@@ -28,3 +28,4 @@ data/voice_model_data_log_xtts.csv
 .vscode/
 .coverage
 moonshine/
+companion_token.txt
