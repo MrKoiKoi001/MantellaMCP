@@ -10,7 +10,7 @@ from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.6"
+SERVER_VERSION: str = "0.7"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -18,6 +18,7 @@ TOOL_COMMAND: str = "COMMAND"
 TOOL_STATE: str = "STATE"
 ARGUMENT_DEBUG: str = "debug"
 ARGUMENT_INVENTORY: str = "inventory"
+ARGUMENT_CORPSE: str = "corpse"
 
 SERVER_INSTRUCTIONS: str = (
     "You are playing a companion character inside the game Skyrim, fighting and travelling alongside the player. "
@@ -43,7 +44,10 @@ TOOLS: list[dict[str, Any]] = [
             "attack = attack the target (works on peaceful characters too, so only when the player wants it), "
             "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
             "flee = retreat: you do not fight and run from enemies until your next command, "
-            "move_to = walk to the target and wait there until 'follow'. "
+            "move_to = walk to the target and wait there until 'follow', "
+            "loot = walk to the dead character that is the target and take what its body carries: everything, or only "
+            "the kind of item whose ID is in 'detail' (see what it carries with STATE and 'corpse' first). "
+            "The walk takes a while, your next STATE tells you what you got. Afterwards you follow or wait as before. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
             "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
             "unequip = put the item away, "
@@ -56,8 +60,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target character (attack, move_to) or ID of the item (equip, unequip, give, take), taken from STATE. Required for these actions."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the spell name for cast_spell."},
+                "target": {"type": "string", "description": "ref_id of the target character (attack, move_to, loot) or ID of the item (equip, unequip, give, take), taken from STATE. Required for these actions."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -73,7 +77,8 @@ TOOLS: list[dict[str, Any]] = [
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
             "seen from you, waiting, following or walking to someone, retreating, and whom it fights. "
             "Without a follower of the player you have no body. "
-            "'Nearby': up to 10 living characters within about 50 meters of the player, nearest first, one per line: "
+            "'Nearby': up to 10 characters within about 50 meters of the player, one per line: the living first, then "
+            "the dead (marked 'dead'), each nearest first. "
             "ref_id, name, distance and direction from the player, after 'from you' the same seen from your own character, "
             "and 'hostile' if it is hostile to the player. "
             "Directions are relative to where the player (after 'from you': your character) faces: "
@@ -88,12 +93,15 @@ TOOLS: list[dict[str, Any]] = [
             "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "
             "'Gear': what you hold in your hands, your gold and the player's gold. "
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
-            "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take."
+            "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
+            "With 'corpse' you get what a dead character carries, in the same form, for the command loot. "
+            "'Since your last STATE': what became of a loot or move_to you started (what you took, or that you did not get there)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 ARGUMENT_INVENTORY: {"type": "string", "enum": consts.INVENTORY_CHOICES, "description": "Also list an inventory: own = yours, player = the player's, both. Only when you need it."},
+                ARGUMENT_CORPSE: {"type": "string", "description": "ref_id of a dead character from 'Nearby': also list what its body carries. Replaces 'inventory' for this call."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
         },
@@ -182,7 +190,13 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
         inventory = str(arguments.get(ARGUMENT_INVENTORY, "") or "").strip().lower()
         if inventory not in consts.INVENTORY_CHOICES:
             inventory = ""
-        state_result = await queue.get_state(inventory=inventory)
+        corpse = str(arguments.get(ARGUMENT_CORPSE, "") or "").strip()
+        if corpse != "":
+            corpse_form_id = parse_ref_id(corpse)
+            if corpse_form_id is None:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{corpse}' is not a ref_id. Use the one of a dead character from 'Nearby' in STATE."}, True)
+            corpse = format_ref_id(corpse_form_id)
+        state_result = await queue.get_state(inventory=inventory, corpse=corpse)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)
@@ -208,9 +222,15 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
                 count = int(detail)
             else:
                 return _tool_json({"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is how many: a number or 'all'."}, True)
+        item = ""
+        if action == consts.ACTION_LOOT and detail != "" and detail.lower() != consts.COUNT_ALL_TEXT:
+            item_form_id = parse_ref_id(detail)
+            if item_form_id is None or item_form_id == 0:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True)
+            item = format_ref_id(item_form_id)
         if action == consts.ACTION_CAST_SPELL and detail == "":
             return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the spell name in 'detail'."}, True)
-        result = await queue.send_command(action, target, detail, count=count)
+        result = await queue.send_command(action, target, detail, count=count, item=item)
         is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
         return _tool_json(result, is_error)
 

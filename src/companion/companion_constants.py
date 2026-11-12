@@ -36,6 +36,11 @@ class companion_constants:
     INVENTORY_OWN: str = "own"
     INVENTORY_PLAYER: str = "player"
     INVENTORY_BOTH: str = "both"
+    # Internal: what the dead character carries that the target of the report_state command names
+    INVENTORY_CORPSE: str = "corpse"
+    # For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything
+    KEY_COMMAND_ITEM_HIGH: str = PREFIX + "item_high"
+    KEY_COMMAND_ITEM_LOW: str = PREFIX + "item_low"
     INVENTORY_CHOICES: list[str] = [INVENTORY_OWN, INVENTORY_PLAYER, INVENTORY_BOTH]
     COUNT_ALL_TEXT: str = "all"
     COUNT_ALL: int = 0
@@ -51,6 +56,7 @@ class companion_constants:
     ACTION_STAND_DOWN: str = "stand_down"
     ACTION_FLEE: str = "flee"
     ACTION_MOVE_TO: str = "move_to"
+    ACTION_LOOT: str = "loot"
     ACTION_EQUIP: str = "equip"
     ACTION_UNEQUIP: str = "unequip"
     ACTION_GIVE: str = "give"
@@ -66,6 +72,7 @@ class companion_constants:
         ACTION_STAND_DOWN,
         ACTION_FLEE,
         ACTION_MOVE_TO,
+        ACTION_LOOT,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
         ACTION_GIVE,
@@ -76,7 +83,7 @@ class companion_constants:
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
     # 'detail' says how many
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
-    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO] + ITEM_ACTIONS
+    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_LOOT] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"

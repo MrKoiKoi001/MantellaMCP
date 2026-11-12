@@ -37,7 +37,7 @@ def game_state_for(nearby: list[dict]) -> dict:
     values: list[int] = []
     names: list[str] = []
     for place, character in enumerate(nearby):
-        values.extend([to_papyrus_number(character["ref_id"]), character["distance_meters"], character["angle_degrees"], int(character["hostile"])])
+        values.extend([to_papyrus_number(character["ref_id"]), character["distance_meters"], character["angle_degrees"], int(character["hostile"]), int(character.get("dead", False))])
         names.append(f"{place}:{character['name']}")
     return {
         game_state.KEY_LOCATION: "Whiterun",
@@ -119,7 +119,7 @@ def test_state_lists_nearby_characters_nearest_first():
         state = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True}}))["state"]
     assert [character["distance_meters"] for character in state["nearby"]] == [8, 12, 20]
     # The ref ID came as a negative number, and the name in lower case
-    assert state["nearby"][1] == {"name": "Bandit", "ref_id": "FF000A01", "distance_meters": 12, "angle_degrees": -40, "hostile": True}
+    assert state["nearby"][1] == {"name": "Bandit", "ref_id": "FF000A01", "distance_meters": 12, "angle_degrees": -40, "hostile": True, "dead": False}
     assert state["player"] == {"name": "Koi", "health_percent": 90, "in_combat": True, "position": [100, -200, 30], "facing_degrees": 315}
     assert state["indoors"] is False
     assert (state["build_ms"], state["scan_ms"]) == (640, 410)
@@ -165,11 +165,11 @@ def test_game_state_names_survive_a_dropped_name():
 
     # The HTTP plugin of the game drops a name it cannot send, so the second of three names is missing here
     state = game_state.read_game_state({
-        game_state.KEY_NEARBY_VALUES: [1, 5, 0, 0, 2, 6, 0, 0, 3, 7, 0, 0],
+        game_state.KEY_NEARBY_VALUES: [1, 5, 0, 0, 0, 2, 6, 0, 0, 0, 3, 7, 0, 0, 0],
         game_state.KEY_NEARBY_NAMES: ["0:Sven", "2:wolf"],
     })
     assert [character["name"] for character in state["nearby"]] == ["Sven", "unknown", "Wolf"]
-    # Numbers that do not come in fours are not a list of characters
+    # Numbers that do not come in fives are not a list of characters
     assert game_state.read_game_state({game_state.KEY_NEARBY_VALUES: [1, 5, 0]})["nearby"] == []
     assert game_state.read_game_state(None) is None
 
@@ -202,6 +202,7 @@ def test_state_text_describes_the_companion():
         "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
         "FF000A01 Bandit, 12 m ahead-left, from you 13 m behind, hostile",
         "FF000A02 Bandit, 20 m behind-right, from you 19 m ahead, hostile",
+        "FF000A03 Bandit Outlaw, dead, 5 m ahead, from you 8 m behind-left",
         "Quests:",
         "- Before the Storm (tracked): Talk to the Jarl of Whiterun",
         "- The Golden Claw: Find the secret of Bleak Falls Barrow; Retrieve the Golden Claw",
@@ -319,7 +320,7 @@ def test_view_of_the_companion_is_calculated_from_the_view_of_the_player():
             game_state.KEY_COMPANION_NAME: "Lydia",
             game_state.KEY_COMPANION_VALUES: companion_values,
             # One character 10 m to the right of the player, and one exactly where Lydia stands
-            game_state.KEY_NEARBY_VALUES: [1, 10, 90, 0, 2, 10, 0, 0],
+            game_state.KEY_NEARBY_VALUES: [1, 10, 90, 0, 0, 2, 10, 0, 0, 0],
             game_state.KEY_NEARBY_NAMES: ["0:Sven", "1:Chicken"],
         })
 
@@ -552,3 +553,107 @@ def test_fake_game_companion_walks_and_retreats_like_the_game():
     assert is_fleeing_after(consts.ACTION_FLEE) is True
     assert is_fleeing_after(consts.ACTION_FOLLOW) is False
     assert walk_target_after(consts.ACTION_FOLLOW, "") == ""
+
+
+def test_the_dead_are_listed_after_the_living():
+    from src.companion import game_state
+    from src.companion.state_text import describe_state
+
+    nearby = [
+        {"name": "Bandit", "ref_id": "FF000A03", "distance_meters": 2, "angle_degrees": 0, "hostile": False, "dead": True},
+        {"name": "Wolf", "ref_id": "FF000A04", "distance_meters": 30, "angle_degrees": 90, "hostile": True},
+        {"name": "Bandit Chief", "ref_id": "FF000A05", "distance_meters": 1, "angle_degrees": 180, "hostile": False, "dead": True},
+        {"name": "Faendal", "ref_id": "0001348C", "distance_meters": 9, "angle_degrees": -90, "hostile": False},
+    ]
+    state = game_state.read_game_state(game_state_for(nearby))
+    assert [(character["name"], character["dead"]) for character in state["nearby"]] == [
+        ("Faendal", False), ("Wolf", False), ("Bandit Chief", True), ("Bandit", True)]
+    lines = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()
+    assert lines[-2:] == ["FF000A05 Bandit Chief, dead, 1 m behind", "FF000A03 Bandit, dead, 2 m ahead"]
+    # A list in the shape of an older game mod (four numbers per character) is left out instead of read wrongly
+    raw = game_state_for(nearby[:1])
+    raw[game_state.KEY_NEARBY_VALUES] = raw[game_state.KEY_NEARBY_VALUES][:4]
+    assert game_state.read_game_state(raw)["nearby"] == []
+
+
+def test_what_a_body_carries_only_comes_when_asked_for():
+    from src.companion.fake_game import CORPSE_REF_ID, build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(state: dict, corpse_wanted: str = "") -> list[str]:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state,
+                               "corpse_wanted": corpse_wanted}).splitlines()
+
+    state = read_game_state(build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id=CORPSE_REF_ID))
+    assert state["corpse"] == {"ref_id": "FF000A03", "name": "Bandit Outlaw"}
+    lines = text_for(state, CORPSE_REF_ID)
+    # On a body the gold is something to take, so it is in the list
+    assert lines[lines.index("The body of Bandit Outlaw FF000A03 carries:"):] == [
+        "The body of Bandit Outlaw FF000A03 carries:",
+        "- Weapons: Iron War Axe 0001359D (equipped)",
+        "- Armor and clothing: Hide Armor 00013911 (equipped)",
+        "- Other: Gold 0000000F x23",
+    ]
+    assert not any("body" in line for line in text_for(state))
+    # The game sends nothing for a ref_id that is no body. A body from an earlier question does not count either
+    missing = "There is no dead character with the ref_id 000F6845 around. Take the ref_id from the dead in 'Nearby'."
+    assert text_for(read_game_state(build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id="000F6845")), "000F6845")[-1] == missing
+    assert text_for(state, "000F6845")[-1] == missing
+    state["inventory_corpse"]["items"] = []
+    assert text_for(state, CORPSE_REF_ID)[-1] == "The body of Bandit Outlaw FF000A03 carries nothing."
+
+
+def test_loot_carries_the_item_and_its_outcome_is_told_once():
+    import asyncio
+
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import build_state, run_command, walk_target_after
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def call(tool: str, arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": tool, "arguments": arguments}))
+
+        assert "needs a target" in call("COMMAND", {"action": "loot"})["message"]
+        assert "ID of the item" in call("COMMAND", {"action": "loot", "target": "FF000A03", "detail": "the axe"})["message"]
+        assert call("COMMAND", {"action": "loot", "target": "FF000A03", "detail": "all"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        assert "not a ref_id" in call("STATE", {"corpse": "that bandit"})["message"]
+
+    async def commands() -> tuple[list[dict], list[dict]]:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.send_command(consts.ACTION_LOOT, "FF000A03", "0001359D", result_timeout_seconds=0.1, item="0001359D"))
+        first = await game
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, inventory=consts.INVENTORY_OWN, corpse="FF000A03"))
+        return first, await game
+
+    loot, report = asyncio.run(commands())
+    assert (loot[0][consts.KEY_COMMAND_TARGET_HIGH], loot[0][consts.KEY_COMMAND_TARGET_LOW]) == (0xFF00, 0x0A03)
+    assert (loot[0][consts.KEY_COMMAND_ITEM_HIGH], loot[0][consts.KEY_COMMAND_ITEM_LOW]) == (0x0001, 0x359D)
+    # Asking about a body replaces asking for an inventory
+    assert (report[0][consts.KEY_COMMAND_DETAIL], report[0][consts.KEY_COMMAND_TARGET]) == (consts.INVENTORY_CORPSE, "FF000A03")
+    assert (report[0][consts.KEY_COMMAND_ITEM_HIGH], report[0][consts.KEY_COMMAND_ITEM_LOW]) == (0, 0)
+
+    async def outcome() -> tuple[dict, dict]:
+        queue = CompanionCommandQueue(hold_seconds=0.05, connection_grace_seconds=0.0)
+        await queue.poll(read_game_state(build_state(report="You took 1 Iron War Axe from the body of Bandit Outlaw.")), [])
+        # A later state without an outcome must not wipe out what the AI has not been told yet
+        await queue.poll(read_game_state(build_state()), [])
+        return await queue.get_state(), await queue.get_state()
+
+    first, second = asyncio.run(outcome())
+    assert first["reports"] == ["You took 1 Iron War Axe from the body of Bandit Outlaw."] and second["reports"] == []
+    assert "report" not in first["state"]
+    assert "Since your last STATE: You took 1 Iron War Axe from the body of Bandit Outlaw." in describe_state(first).splitlines()
+    assert not any("Since your last STATE" in line for line in describe_state(second).splitlines())
+
+    # The fake game answers like the game mod
+    assert run_command(consts.ACTION_LOOT, "FF000A03", "")[0] is True
+    assert "alive" in run_command(consts.ACTION_LOOT, "000F6845", "")[1]
+    assert run_command(consts.ACTION_LOOT, "00000099", "")[0] is False
+    assert walk_target_after(consts.ACTION_LOOT, "FF000A03") == "FF000A03"

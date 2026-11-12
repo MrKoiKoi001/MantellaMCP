@@ -27,6 +27,8 @@ class CompanionCommandQueue:
     MAX_MERGED_HEARD_LENGTH: int = 600
     # Collecting a whole inventory takes the game several seconds
     INVENTORY_TIMEOUT_SECONDS: float = 15.0
+    # What became of commands that take time (loot, move_to) is kept here until the AI asks for the state the next time
+    MAX_REPORTS: int = 5
 
     def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0) -> None:
         self.__hold_seconds: float = hold_seconds
@@ -39,6 +41,7 @@ class CompanionCommandQueue:
         self.__state_time: float = 0.0
         self.__state_version: int = 0
         self.__heard: list[dict[str, Any]] = []
+        self.__reports: list[str] = []
         self.__poll_generation: int = 0
         self.__is_poll_open: bool = False
         self.__last_poll_time: float | None = None
@@ -63,6 +66,10 @@ class CompanionCommandQueue:
             if isinstance(state, dict):
                 # The game hands out every line only once, so the lines must not get lost with the next state
                 self.__keep_heard(state.pop("heard", None))
+                # The same goes for what became of loot and move_to
+                report = state.pop("report", None)
+                if isinstance(report, str) and report.strip() != "":
+                    self.__reports = (self.__reports + [report.strip()])[-self.MAX_REPORTS:]
                 self.__state = state
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
@@ -90,12 +97,13 @@ class CompanionCommandQueue:
     # ------------------------------------------------------------------- MCP side
 
     async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0,
-                           count: int = 1) -> dict[str, Any]:
+                           count: int = 1, item: str = "") -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
             target: ref_id of the target character or ID of the item (see ref_ids.py), or empty
             count: For give and take: how many of the item, 0 = all of them
+            item: For loot: ID of the one item to take from the body, or empty for everything
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
                 unless a request for the state came in together with the command
 
@@ -108,6 +116,7 @@ class CompanionCommandQueue:
 
             command_id = uuid.uuid4().hex
             target_high, target_low = split_form_id(parse_ref_id(target) or 0)
+            item_high, item_low = split_form_id(parse_ref_id(item) or 0)
             command: dict[str, Any] = {
                 consts.KEY_COMMAND_ID: command_id,
                 consts.KEY_COMMAND_ACTION: action,
@@ -116,6 +125,8 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_TARGET_LOW: target_low,
                 consts.KEY_COMMAND_DETAIL: detail,
                 consts.KEY_COMMAND_COUNT: count,
+                consts.KEY_COMMAND_ITEM_HIGH: item_high,
+                consts.KEY_COMMAND_ITEM_LOW: item_low,
             }
             self.__pending_commands.append(command)
             self.__changed.notify_all()
@@ -139,16 +150,20 @@ class CompanionCommandQueue:
             message = str(result.get(consts.KEY_RESULT_MESSAGE, ""))
             return self.__status(consts.STATUS_DONE if is_ok else consts.STATUS_FAILED, message)
 
-    async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "") -> dict[str, Any]:
+    async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "") -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
             inventory: Whose inventory the fresh state should carry (companion_constants.INVENTORY_...), or empty for none
+            corpse: ref_id of a dead character. The fresh state then carries what that body has on it, instead of 'inventory'
 
         Returns:
-            A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted' and 'heard':
-            what the characters in the game said since this was called the last time
+            A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted', 'corpse_wanted',
+            'heard' (what the characters in the game said since this was called the last time)
+            and 'reports' (what became of loot and move_to since then)
         """
+        if corpse != "":
+            inventory = consts.INVENTORY_CORPSE
         if inventory != "":
             refresh_timeout_seconds = max(refresh_timeout_seconds, self.INVENTORY_TIMEOUT_SECONDS)
         async with self.__changed:
@@ -157,7 +172,7 @@ class CompanionCommandQueue:
 
         is_fresh = False
         if is_connected:
-            request = await self.send_command(consts.ACTION_REPORT_STATE, detail=inventory)
+            request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -175,7 +190,9 @@ class CompanionCommandQueue:
                 # The kept state may still carry an inventory from an earlier question. Only a fresh one is worth showing
                 "inventory_wanted": inventory if is_fresh else "",
                 "inventory_missed": inventory != "" and not is_fresh,
+                "corpse_wanted": corpse if is_fresh else "",
                 "heard": self.__take_heard(),
+                "reports": self.__take_reports(),
             }
 
     # -------------------------------------------------------------------- helpers
@@ -227,6 +244,12 @@ class CompanionCommandQueue:
             "name": line["name"],
             "text": line["text"],
         } for line in lines[-self.MAX_HEARD_LINES:]]
+
+    def __take_reports(self) -> list[str]:
+        """What became of loot and move_to and the AI has not been told yet, oldest first. Forgotten afterwards"""
+        reports = self.__reports
+        self.__reports = []
+        return reports
 
     async def __wait_until(self, predicate: Callable[[], bool], timeout_seconds: float) -> bool:
         """Waits (with the condition lock held by the caller) until predicate is true or the timeout hits"""

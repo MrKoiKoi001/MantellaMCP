@@ -35,8 +35,8 @@ KEY_QUESTS: str = "quests"
 # what was said. A line the player picked in a dialogue menu has the player as its speaker.
 # The SKSE plugin of the game mod writes these lines (TakeHeardLines in plugin.cpp of the plugin repository)
 KEY_HEARD: str = "heard"
-# Four numbers per character: ref ID, distance to the player in meters,
-# angle from where the player faces to the character in degrees (negative = left), hostile to the player (0 or 1)
+# Five numbers per character, living or dead: ref ID, distance to the player in meters,
+# angle from where the player faces to the character in degrees (negative = left), hostile to the player (0 or 1), dead (0 or 1)
 KEY_NEARBY_VALUES: str = "nearby"
 # One text per character: its place in the list above, a colon and its name, eg "0:Bandit".
 # The HTTP plugin of the game drops names it cannot send without a word, so the place cannot be counted
@@ -51,6 +51,14 @@ KEY_HANDS: str = "hands"
 # The names are under the same key with NAMES_SUFFIX, built like KEY_NEARBY_NAMES
 KEY_INVENTORY_OWN: str = "inventory_own"
 KEY_INVENTORY_PLAYER: str = "inventory_player"
+# Only when the server asked for it: what a dead character carries, built like the inventories above,
+# with the ref ID of the dead character as the only number under KEY_CORPSE and its name under KEY_CORPSE_NAME.
+# All three are missing if the game found no such body
+KEY_INVENTORY_CORPSE: str = "inventory_corpse"
+KEY_CORPSE: str = "corpse"
+KEY_CORPSE_NAME: str = "corpse_name"
+# What became of the commands loot and move_to since the last state, as text for the AI. Missing if that is nothing
+KEY_REPORT: str = "report"
 NAMES_SUFFIX: str = "_names"
 # How long the game mod took in milliseconds: for the whole state, and for the characters nearby alone
 KEY_TIMES: str = "times_ms"
@@ -82,7 +90,7 @@ QUEST_PART_SEPARATOR: str = "\t"
 QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
 # The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
 QUEST_TYPE_MISCELLANEOUS: int = 6
-VALUES_PER_NEARBY_CHARACTER: int = 4
+VALUES_PER_NEARBY_CHARACTER: int = 5
 TIME_VALUE_COUNT: int = 2
 NAME_PLACE_SEPARATOR: str = ":"
 UNKNOWN_NAME: str = "unknown"
@@ -159,6 +167,19 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         inventory = _read_inventory(raw, key)
         if inventory is not None:
             state[key] = inventory
+    corpse_values = _numbers(raw.get(KEY_CORPSE))
+    # On a body the gold is something to take, so it stays in the list
+    corpse_inventory = _read_inventory(raw, KEY_INVENTORY_CORPSE, is_gold_listed=True)
+    if corpse_values is not None and len(corpse_values) == 1 and corpse_inventory is not None:
+        corpse_name = raw.get(KEY_CORPSE_NAME)
+        state["corpse"] = {
+            "ref_id": _ref_id(corpse_values[0]),
+            "name": _tidy_name(corpse_name) if isinstance(corpse_name, str) else UNKNOWN_NAME,
+        }
+        state[KEY_INVENTORY_CORPSE] = corpse_inventory
+    report = raw.get(KEY_REPORT)
+    if isinstance(report, str) and report.strip() != "":
+        state["report"] = report.strip()
 
     state["nearby"] = _read_nearby(raw)
     _add_view_of_companion(state)
@@ -231,8 +252,12 @@ def _hand_name(hand: Any) -> str:
     return hand.partition(HAND_SEPARATOR)[2].strip()
 
 
-def _read_inventory(raw: dict[str, Any], key: str) -> dict[str, Any] | None:
-    """Returns 'total' (kinds of items the character has) and 'items' (the ones the game listed, without gold), or None"""
+def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False) -> dict[str, Any] | None:
+    """Returns 'total' (kinds of items the character has) and 'items' (the ones the game listed), or None
+
+    Args:
+        is_gold_listed: Whether gold is one of the items. Without it, gold is left out (the state carries it as a number)
+    """
     values = _numbers(raw.get(key))
     if values is None or len(values) == 0 or (len(values) - 1) % VALUES_PER_ITEM != 0:
         return None
@@ -242,7 +267,7 @@ def _read_inventory(raw: dict[str, Any], key: str) -> dict[str, Any] | None:
         start = 1 + place * VALUES_PER_ITEM
         form_id, count, form_type, equipped = values[start:start + VALUES_PER_ITEM]
         item_id = _ref_id(form_id)
-        if form_id == 0 or place not in names or item_id == GOLD_ITEM_ID:
+        if form_id == 0 or place not in names or (item_id == GOLD_ITEM_ID and not is_gold_listed):
             continue
         items.append({
             "id": item_id,
@@ -321,6 +346,7 @@ def _signed_angle(angle_degrees: float) -> int:
 
 
 def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """The characters around the player. A list in another shape (eg from a game mod that is older than this server) is left out"""
     values = _numbers(raw.get(KEY_NEARBY_VALUES))
     if values is None or len(values) % VALUES_PER_NEARBY_CHARACTER != 0:
         return []
@@ -329,15 +355,17 @@ def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
     nearby: list[dict[str, Any]] = []
     for place in range(len(values) // VALUES_PER_NEARBY_CHARACTER):
         start = place * VALUES_PER_NEARBY_CHARACTER
-        form_id, distance, angle, hostile = values[start:start + VALUES_PER_NEARBY_CHARACTER]
+        form_id, distance, angle, hostile, dead = values[start:start + VALUES_PER_NEARBY_CHARACTER]
         nearby.append({
             "name": names.get(place, UNKNOWN_NAME),
             "ref_id": _ref_id(form_id),
             "distance_meters": distance,
             "angle_degrees": angle,
             "hostile": hostile != 0,
+            "dead": dead != 0,
         })
-    nearby.sort(key=lambda character: character["distance_meters"])
+    # The living first, then the dead, each nearest first
+    nearby.sort(key=lambda character: (character["dead"], character["distance_meters"]))
     return nearby
 
 

@@ -7,7 +7,8 @@ the AI needs to decide, instead of the whole state as JSON.
 from typing import Any
 
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import ITEM_GROUPS, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER, MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP
+from src.companion.game_state import (ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
+                                      MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP)
 
 DEGREES_PER_DIRECTION: float = 45.0
 # Clockwise, starting straight ahead of whoever looks
@@ -69,6 +70,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
     gear_line = _describe_gear(state.get("player"), state.get("companion"))
     if gear_line != "":
         lines.append(gear_line)
+    reports = state_result.get("reports")
+    if isinstance(reports, list) and len(reports) > 0:
+        lines.append("Since your last STATE: " + " ".join(str(report) for report in reports))
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:
@@ -82,6 +86,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.extend(_describe_inventory("Your inventory", state.get(KEY_INVENTORY_OWN)))
     if wanted in (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH):
         lines.extend(_describe_inventory("The player's inventory", state.get(KEY_INVENTORY_PLAYER)))
+    corpse_wanted = state_result.get("corpse_wanted")
+    if isinstance(corpse_wanted, str) and corpse_wanted != "":
+        lines.extend(_describe_corpse(corpse_wanted, state.get("corpse"), state.get(KEY_INVENTORY_CORPSE)))
     if state_result.get("inventory_missed"):
         lines.append("The game did not send the inventory in time. Ask again.")
     return "\n".join(lines)
@@ -155,6 +162,16 @@ def _describe_inventory(title: str, inventory: Any) -> list[str]:
     total = inventory.get("total", 0)
     if total > MAX_INVENTORY_ITEMS:
         lines.append(f"- The list is cut off: only the first {MAX_INVENTORY_ITEMS} of {total} kinds of items were checked.")
+    return lines
+
+
+def _describe_corpse(wanted_ref_id: str, corpse: Any, inventory: Any) -> list[str]:
+    """What the dead character carries that the AI asked about. After each item its ID for the command loot"""
+    if not isinstance(corpse, dict) or corpse.get("ref_id") != wanted_ref_id:
+        return [f"There is no dead character with the ref_id {wanted_ref_id} around. Take the ref_id from the dead in 'Nearby'."]
+    lines = _describe_inventory(f"The body of {corpse.get('name')} {wanted_ref_id} carries", inventory)
+    if len(lines) == 1:
+        return [f"The body of {corpse.get('name')} {wanted_ref_id} carries nothing."]
     return lines
 
 
@@ -240,7 +257,10 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
 
 
 def _describe_nearby_character(character: dict[str, Any]) -> str:
-    line = f"{character.get('ref_id')} {character.get('name')}, {_describe_where(character)}"
+    line = f"{character.get('ref_id')} {character.get('name')}, "
+    if character.get("dead"):
+        line += "dead, "
+    line += _describe_where(character)
     if "distance_from_companion_meters" in character:
         line += f", from you {character['distance_from_companion_meters']} m"
         if "angle_from_companion_degrees" in character:
