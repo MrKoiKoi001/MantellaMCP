@@ -7,14 +7,14 @@ the AI needs to decide, instead of the whole state as JSON.
 from typing import Any
 
 DEGREES_PER_DIRECTION: float = 45.0
-# Clockwise, starting straight ahead of the player
+# Clockwise, starting straight ahead of whoever looks
 RELATIVE_DIRECTIONS: list[str] = ["ahead", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
 # Clockwise, starting in the north
 COMPASS_DIRECTIONS: list[str] = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"]
 
 
 def relative_direction(angle_degrees: float) -> str:
-    """Where something is, seen from the player. 0 = straight ahead, negative = to the left, positive = to the right"""
+    """Where something is, seen from someone. 0 = straight ahead, negative = to the left, positive = to the right"""
     return _direction(angle_degrees, RELATIVE_DIRECTIONS)
 
 
@@ -66,10 +66,15 @@ def describe_state(state_result: dict[str, Any]) -> str:
 
 
 def _describe_place(state: dict[str, Any]) -> str:
-    location = str(state.get("location", "Unknown place"))
-    if "indoors" not in state:
-        return location
-    return f"{location} ({'indoors' if state['indoors'] else 'outdoors'})"
+    place = str(state.get("location", "Unknown place"))
+    if "indoors" in state:
+        place += f" ({'indoors' if state['indoors'] else 'outdoors'})"
+    if "time" in state:
+        place += f", {state['time']}"
+    # Indoors nobody sees the weather
+    if "weather" in state and state.get("indoors") is False:
+        place += f", {state['weather']}"
+    return place
 
 
 def _describe_player(player: Any) -> str:
@@ -103,7 +108,17 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append("far away from the player")
     elif "distance_meters" in companion:
         parts.append(_describe_where(companion))
-    parts.append("waiting" if companion.get("waiting") else "following")
+        if "facing_degrees" in companion:
+            parts.append(f"faces {compass_direction(companion['facing_degrees'])}")
+        if "player_angle_degrees" in companion:
+            parts.append(f"player {relative_direction(companion['player_angle_degrees'])} of you")
+    walk_target_ref_id = companion.get("walk_target_ref_id")
+    if walk_target_ref_id is not None:
+        parts.append(" ".join(text for text in ["walking to", _name_of(walk_target_ref_id, nearby), walk_target_ref_id] if text != ""))
+    else:
+        parts.append("waiting" if companion.get("waiting") else "following")
+    if companion.get("retreating"):
+        parts.append("retreating")
     target_ref_id = companion.get("target_ref_id")
     if target_ref_id is not None:
         # The name is only known if the target is in the list of characters nearby
@@ -115,6 +130,10 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
 
 def _describe_nearby_character(character: dict[str, Any]) -> str:
     line = f"{character.get('ref_id')} {character.get('name')}, {_describe_where(character)}"
+    if "distance_from_companion_meters" in character:
+        line += f", from you {character['distance_from_companion_meters']} m"
+        if "angle_from_companion_degrees" in character:
+            line += f" {relative_direction(character['angle_from_companion_degrees'])}"
     if character.get("hostile"):
         line += ", hostile"
     return line

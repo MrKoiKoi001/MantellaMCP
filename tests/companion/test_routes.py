@@ -192,16 +192,21 @@ def test_state_text_describes_the_companion():
         return describe_state({"connected": connected, "fresh": fresh, "state_age_seconds": 12.5, "state": state}).splitlines()
 
     fighting = text_for(read_game_state(build_state(False, "FF000A01")))
+    # The player faces north-east and Lydia stands behind him facing south, so she sees everything the other way round
     assert fighting == [
-        "Whiterun, Plains District (outdoors)",
+        "Whiterun, Plains District (outdoors), 14:35, snow",
         "Player Dragonborn: health 85%, fighting, faces north-east, position 23500,-7900,-3300",
-        "You, Lydia: health 100%, 3 m behind-left, following, fighting Bandit FF000A01",
+        "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, following, fighting Bandit FF000A01",
         "Nearby:",
-        "000F6845 Whiterun Guard, 8 m right",
-        "FF000A01 Bandit, 12 m ahead-left, hostile",
-        "FF000A02 Bandit, 20 m behind-right, hostile",
+        "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
+        "FF000A01 Bandit, 12 m ahead-left, from you 13 m behind, hostile",
+        "FF000A02 Bandit, 20 m behind-right, from you 19 m ahead, hostile",
     ]
-    assert text_for(read_game_state(build_state(True)))[2] == "You, Lydia: health 100%, 3 m behind-left, waiting"
+    you_start = "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, "
+    assert text_for(read_game_state(build_state(True)))[2] == you_start + "waiting"
+    # While walking somewhere the game has the companion on 'waiting', which would only confuse here
+    assert text_for(read_game_state(build_state(True, "", False, "000F6845")))[2] == you_start + "walking to Whiterun Guard 000F6845"
+    assert text_for(read_game_state(build_state(False, "", True)))[2] == you_start + "following, retreating"
 
     stale = text_for(read_game_state(build_state()), fresh=False)
     assert stale[0] == "The game did not answer in time. What follows is 12.5 seconds old:"
@@ -297,3 +302,70 @@ def test_command_travels_from_mcp_to_game_and_result_travels_back():
         assert received_commands[0][consts.KEY_COMMAND_TARGET] == "FF000A01"
         assert received_commands[0][consts.KEY_COMMAND_TARGET_HIGH] == 0xFF00
         assert received_commands[0][consts.KEY_COMMAND_TARGET_LOW] == 0x0A01
+
+
+def test_view_of_the_companion_is_calculated_from_the_view_of_the_player():
+    from src.companion import game_state
+
+    def state_for(companion_values: list[int]) -> dict:
+        return game_state.read_game_state({
+            # The player faces north
+            game_state.KEY_PLAYER_VALUES: [100, 0, 0, 0, 0, 0, 0],
+            game_state.KEY_COMPANION_NAME: "Lydia",
+            game_state.KEY_COMPANION_VALUES: companion_values,
+            # One character 10 m to the right of the player, and one exactly where Lydia stands
+            game_state.KEY_NEARBY_VALUES: [1, 10, 90, 0, 2, 10, 0, 0],
+            game_state.KEY_NEARBY_NAMES: ["0:Sven", "1:Chicken"],
+        })
+
+    # Lydia stands 10 m ahead of the player and looks back at him (south)
+    state = state_for([20, 100, 0, 0, 0, 1, 10, 0, 0, 180, 0, 0])
+    assert state["companion"]["player_angle_degrees"] == 0
+    sven, chicken = state["nearby"]
+    # Sven is south-east of her: 14 m away, half left of where she looks
+    assert (sven["distance_from_companion_meters"], sven["angle_from_companion_degrees"]) == (14, -45)
+    # No direction to a character that stands on the same spot
+    assert chicken["distance_from_companion_meters"] == 0 and "angle_from_companion_degrees" not in chicken
+
+    # A companion outside the loaded area has no position, so nothing can be calculated
+    far_away = state_for([20, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    assert "player_angle_degrees" not in far_away["companion"] and "facing_degrees" not in far_away["companion"]
+    assert "distance_from_companion_meters" not in far_away["nearby"][0]
+    # A game mod from before this round sends nine numbers for the companion, which is no longer understood
+    assert "companion" not in state_for([20, 100, 0, 0, 0, 1, 10, 0, 0])
+
+
+def test_weather_and_time_of_day():
+    from src.companion import game_state
+    from src.companion.state_text import describe_state
+
+    def first_line(world_values: list[int], indoors: int) -> str:
+        state = game_state.read_game_state({
+            game_state.KEY_LOCATION: "Riverwood",
+            game_state.KEY_PLAYER_VALUES: [100, 0, 0, 0, 0, 0, indoors],
+            game_state.KEY_WORLD_VALUES: world_values,
+        })
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()[0]
+
+    assert first_line([3, 875], 0) == "Riverwood (outdoors), 14:35, snow"
+    assert first_line([0, 5], 0) == "Riverwood (outdoors), 00:05, clear"
+    # Indoors nobody sees the weather, and -1 means the game does not know it
+    assert first_line([2, 1439], 1) == "Riverwood (indoors), 23:59"
+    assert first_line([-1, 720], 0) == "Riverwood (outdoors), 12:00"
+
+
+def test_fake_game_companion_walks_and_retreats_like_the_game():
+    from src.companion.fake_game import is_fleeing_after, is_waiting_after, run_command, walk_target_after
+
+    is_ok, message, target_ref_id = run_command(consts.ACTION_MOVE_TO, "000F6845", "")
+    assert is_ok is True and "Whiterun Guard" in message
+    assert is_waiting_after(consts.ACTION_MOVE_TO, False) is True
+    assert walk_target_after(consts.ACTION_MOVE_TO, "000F6845") == "000F6845"
+    assert run_command(consts.ACTION_MOVE_TO, "00000099", "")[0] is False
+
+    # Retreating ends the fight, and the next command ends both the retreat and the walk
+    is_ok, message, target_ref_id = run_command(consts.ACTION_FLEE, "", "FF000A01")
+    assert is_ok is True and target_ref_id == ""
+    assert is_fleeing_after(consts.ACTION_FLEE) is True
+    assert is_fleeing_after(consts.ACTION_FOLLOW) is False
+    assert walk_target_after(consts.ACTION_FOLLOW, "") == ""

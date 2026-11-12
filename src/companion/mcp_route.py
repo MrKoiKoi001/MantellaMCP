@@ -10,7 +10,7 @@ from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.2"
+SERVER_VERSION: str = "0.3"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -40,8 +40,10 @@ TOOLS: list[dict[str, Any]] = [
             "Make your companion character do something in the game. "
             "follow = follow the player, wait = stay here, "
             "attack = attack the target (works on peaceful characters too, so only when the player wants it), "
-            "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight). "
-            "Not built into the game mod yet: flee = retreat from combat, move_to = walk to the target, "
+            "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
+            "flee = retreat: you do not fight and run from enemies until your next command, "
+            "move_to = walk to the target and wait there until 'follow'. "
+            "Not built into the game mod yet: "
             "cast_spell = cast the spell named in 'detail' on the target (no target = on yourself)."
         ),
         "inputSchema": {
@@ -58,15 +60,19 @@ TOOLS: list[dict[str, Any]] = [
         "name": TOOL_STATE,
         "description": (
             "Get the current situation in the game as a few short lines. "
-            "First the place and whether it is indoors or outdoors. "
+            "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
+            "(clear, cloudy, rain or snow). "
             "'Player': health, fighting or not, the compass direction the player faces, and the position x,y,z "
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
-            "'You': your own character with health, where it is, waiting or following, and whom it fights. "
+            "'You': your own character with health, where it is, the compass direction it faces, where the player is "
+            "seen from you, waiting, following or walking to someone, retreating, and whom it fights. "
             "Without a follower of the player you have no body. "
             "'Nearby': up to 10 living characters within about 50 meters of the player, nearest first, one per line: "
-            "ref_id, name, distance, direction, and 'hostile' if it is hostile to the player. "
-            "All distances and directions are measured from the player. Directions are relative to where the player faces: "
+            "ref_id, name, distance and direction from the player, after 'from you' the same seen from your own character, "
+            "and 'hostile' if it is hostile to the player. "
+            "Directions are relative to where the player (after 'from you': your character) faces: "
             "ahead, ahead-right, right, behind-right, behind, behind-left, left, ahead-left. "
+            "Use the player's view when the player points at someone, and your own view when you talk about where you stand. "
             "Outdoors the list can miss someone, so get STATE once more if a character the player talks about is not in it."
         ),
         "inputSchema": {

@@ -35,7 +35,7 @@ def to_papyrus_number(ref_id: str) -> int:
     return form_id
 
 
-def build_state(is_waiting: bool = False, target_ref_id: str = "") -> dict:
+def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "") -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py"""
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -50,10 +50,12 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "") -> dict:
         game_state.KEY_LOCATION: "Whiterun, Plains District",
         game_state.KEY_PLAYER_NAME: "Dragonborn",
         game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0],
+        # Snow at 14:35
+        game_state.KEY_WORLD_VALUES: [3, 875],
         game_state.KEY_COMPANION_NAME: "Lydia",
         game_state.KEY_COMPANION_VALUES: [
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,
-            to_papyrus_number(target_ref_id),
+            to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -62,7 +64,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "") -> dict:
 
 
 def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str, str]:
-    """Answers attack and stand_down like the game mod does
+    """Answers attack, move_to, flee and stand_down like the game mod does
 
     Returns:
         Whether it worked, the text for the AI, and whom the companion fights afterwards (ref_id or empty)
@@ -72,6 +74,13 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
             if character["ref_id"] == target:
                 return True, f"You attack {character['name']} now.", target
         return False, f"There is no character with the ref_id '{target}'. Take the ref_id from 'nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_MOVE_TO:
+        for character in NEARBY:
+            if character["ref_id"] == target:
+                return True, f"You walk to {character['name']} and wait there. 'follow' brings you back to the player.", target_ref_id
+        return False, f"There is no character with the ref_id '{target}'. Take the ref_id from 'nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_FLEE:
+        return True, "You retreat: you do not fight and you run from enemies. This holds until your next command.", ""
     if action == consts.ACTION_STAND_DOWN:
         if target_ref_id == "":
             return True, "You were not fighting.", ""
@@ -80,12 +89,22 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
 
 
 def is_waiting_after(action: str, is_waiting: bool) -> bool:
-    """Like the game: 'wait' makes the companion stay, 'follow' makes it come along again, everything else changes nothing"""
-    if action == consts.ACTION_WAIT:
+    """Like the game: 'wait' and 'move_to' make the companion stay, 'follow' makes it come along again, everything else changes nothing"""
+    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO):
         return True
     if action == consts.ACTION_FOLLOW:
         return False
     return is_waiting
+
+
+def is_fleeing_after(action: str) -> bool:
+    """Like the game: the retreat holds until the next command"""
+    return action == consts.ACTION_FLEE
+
+
+def walk_target_after(action: str, target: str) -> str:
+    """Like the game: every new command ends the walk. The simulator's companion never arrives, so it keeps walking until then"""
+    return target if action == consts.ACTION_MOVE_TO else ""
 
 
 def main():
@@ -97,6 +116,8 @@ def main():
     results: list[dict] = []
     is_waiting = False
     target_ref_id = ""
+    is_fleeing = False
+    walk_target_ref_id = ""
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
@@ -105,7 +126,7 @@ def main():
         poll_id += 1
         request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results}
         if is_state_wanted:
-            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id)
+            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id)
         body = json.dumps(request_body).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         try:
@@ -130,8 +151,11 @@ def main():
                 is_state_wanted = True
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
-            is_waiting = is_waiting_after(str(action), is_waiting)
             is_ok, message, target_ref_id = run_command(str(action), str(target), target_ref_id)
+            if is_ok:
+                is_waiting = is_waiting_after(str(action), is_waiting)
+                is_fleeing = is_fleeing_after(str(action))
+                walk_target_ref_id = walk_target_after(str(action), str(target))
             results.append({
                 consts.KEY_COMMAND_ID: command.get(consts.KEY_COMMAND_ID),
                 consts.KEY_RESULT_OK: is_ok,

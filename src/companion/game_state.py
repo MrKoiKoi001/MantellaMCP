@@ -5,6 +5,7 @@ it asks the game. So the mod sends three texts and a few lists of plain numbers 
 per value (BuildState in KI_MCP_Gefaehrte_Loop.psc of the game mod). This module gives the numbers their
 names back. The order of the numbers in each list has to match that script.
 """
+import math
 from typing import Any
 
 from src.companion.ref_ids import format_ref_id
@@ -17,8 +18,12 @@ KEY_PLAYER_NAME: str = "player_name"
 KEY_PLAYER_VALUES: str = "player"
 KEY_COMPANION_NAME: str = "companion_name"
 # ref ID, health in percent, dead, in combat, waiting, in the loaded area (each 0 or 1), distance to the player in meters,
-# angle from where the player faces to the companion in degrees (negative = left), ref ID of its combat target (0 = none)
+# angle from where the player faces to the companion in degrees (negative = left), ref ID of its combat target (0 = none),
+# direction the companion faces in degrees (0 = north, 90 = east), retreating because of the command flee (0 or 1),
+# ref ID of the character it is walking to because of the command move_to (0 = none)
 KEY_COMPANION_VALUES: str = "companion"
+# weather outside (see WEATHER_NAMES, -1 = unknown), time of day in minutes since midnight
+KEY_WORLD_VALUES: str = "world"
 # Four numbers per character: ref ID, distance to the player in meters,
 # angle from where the player faces to the character in degrees (negative = left), hostile to the player (0 or 1)
 KEY_NEARBY_VALUES: str = "nearby"
@@ -29,13 +34,20 @@ KEY_NEARBY_NAMES: str = "nearby_names"
 KEY_TIMES: str = "times_ms"
 
 PLAYER_VALUE_COUNT: int = 7
-COMPANION_VALUE_COUNT: int = 9
+COMPANION_VALUE_COUNT: int = 12
+WORLD_VALUE_COUNT: int = 2
 VALUES_PER_NEARBY_CHARACTER: int = 4
 TIME_VALUE_COUNT: int = 2
 NAME_PLACE_SEPARATOR: str = ":"
 UNKNOWN_NAME: str = "unknown"
 # Papyrus only knows signed numbers, so ref IDs from 80000000 on arrive as negative numbers
 REF_ID_MASK: int = 0xFFFFFFFF
+# The four kinds of weather the game tells apart (Weather.GetClassification). The game calls the first one 'pleasant'
+WEATHER_NAMES: dict[int, str] = {0: "clear", 1: "cloudy", 2: "rain", 3: "snow"}
+MINUTES_PER_HOUR: int = 60
+MINUTES_PER_DAY: int = 1440
+# Closer than this, a direction from one character to another says nothing
+MINIMUM_DISTANCE_FOR_DIRECTION: float = 0.5
 
 
 def read_game_state(raw: Any) -> dict[str, Any] | None:
@@ -67,11 +79,20 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     if len(player) > 0:
         state["player"] = player
 
+    world_values = _numbers(raw.get(KEY_WORLD_VALUES))
+    if world_values is not None and len(world_values) == WORLD_VALUE_COUNT:
+        weather, minutes = world_values
+        if weather in WEATHER_NAMES:
+            state["weather"] = WEATHER_NAMES[weather]
+        if 0 <= minutes < MINUTES_PER_DAY:
+            state["time"] = f"{minutes // MINUTES_PER_HOUR:02d}:{minutes % MINUTES_PER_HOUR:02d}"
+
     companion = _read_companion(raw)
     if companion is not None:
         state["companion"] = companion
 
     state["nearby"] = _read_nearby(raw)
+    _add_view_of_companion(state)
 
     times = _numbers(raw.get(KEY_TIMES))
     if times is not None and len(times) == TIME_VALUE_COUNT:
@@ -84,7 +105,7 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
     if values is None or len(values) != COMPANION_VALUE_COUNT:
         return None
-    form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id = values
+    form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id, facing, retreating, walk_target_form_id = values
 
     companion: dict[str, Any] = {}
     name = raw.get(KEY_COMPANION_NAME)
@@ -99,9 +120,54 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     if is_loaded != 0:
         companion["distance_meters"] = distance
         companion["angle_degrees"] = angle
+        companion["facing_degrees"] = facing % 360
     if target_form_id != 0:
         companion["target_ref_id"] = _ref_id(target_form_id)
+    companion["retreating"] = retreating != 0
+    if walk_target_form_id != 0:
+        companion["walk_target_ref_id"] = _ref_id(walk_target_form_id)
     return companion
+
+
+def _add_view_of_companion(state: dict[str, Any]) -> None:
+    """Adds where the player and the characters nearby are, seen from the companion
+
+    The game measures everything from the player. Asking it again from the companion would cost two more
+    questions per character, so this is calculated here: from where the player faces, and from the distance
+    and angle of the companion and of the other character. Heights are left out, and the game sends whole
+    meters and whole degrees, so the result is a little less exact than what was measured from the player.
+    """
+    player = state.get("player")
+    companion = state.get("companion")
+    if not isinstance(player, dict) or not isinstance(companion, dict):
+        return
+    if "facing_degrees" not in player or "facing_degrees" not in companion or "distance_meters" not in companion:
+        return
+    player_facing: int = player["facing_degrees"]
+    companion_facing: int = companion["facing_degrees"]
+    companion_east, companion_north = _map_offset(companion["distance_meters"], player_facing + companion["angle_degrees"])
+
+    # Seen from the companion, the player is in the opposite direction of where the companion is seen from the player
+    companion["player_angle_degrees"] = _signed_angle(player_facing + companion["angle_degrees"] + 180 - companion_facing)
+    for character in state["nearby"]:
+        east, north = _map_offset(character["distance_meters"], player_facing + character["angle_degrees"])
+        east -= companion_east
+        north -= companion_north
+        distance = math.hypot(east, north)
+        character["distance_from_companion_meters"] = round(distance)
+        if distance >= MINIMUM_DISTANCE_FOR_DIRECTION:
+            character["angle_from_companion_degrees"] = _signed_angle(math.degrees(math.atan2(east, north)) - companion_facing)
+
+
+def _map_offset(distance: float, map_direction_degrees: float) -> tuple[float, float]:
+    """How far to the east and to the north something is that lies in this direction on the map (0 = north, 90 = east)"""
+    radians = math.radians(map_direction_degrees)
+    return distance * math.sin(radians), distance * math.cos(radians)
+
+
+def _signed_angle(angle_degrees: float) -> int:
+    """The angle in whole degrees from -180 to 179, so that negative means left"""
+    return (round(angle_degrees) + 180) % 360 - 180
 
 
 def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
