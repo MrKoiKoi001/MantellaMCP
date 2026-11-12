@@ -8,7 +8,7 @@ names back. The order of the numbers in each list has to match that script.
 import math
 from typing import Any
 
-from src.companion.ref_ids import format_ref_id
+from src.companion.ref_ids import format_ref_id, parse_ref_id
 
 # Keys of the state as the game mod sends it
 KEY_LOCATION: str = "location"
@@ -23,12 +23,18 @@ KEY_COMPANION_NAME: str = "companion_name"
 # ref ID of the character it is walking to because of the command move_to (0 = none)
 KEY_COMPANION_VALUES: str = "companion"
 # weather outside (see WEATHER_NAMES, -1 = unknown), time of day in minutes since midnight,
-# interface version of the SKSE plugin of the game mod (0 = not loaded, so the game cannot tell the quests)
+# interface version of the SKSE plugin of the game mod (0 = not loaded, so the game cannot tell the quests),
+# whether that plugin listens to what characters say (0 or 1)
 KEY_WORLD_VALUES: str = "world"
 # One text per open quest of the journal, tracked ones first. Its parts are separated by tabs:
 # tracked (1 or 0), type of the quest as the game numbers it, name of the quest, then the text of each open objective.
 # The SKSE plugin of the game mod writes these lines (GetOpenQuests in plugin.cpp of the plugin repository)
 KEY_QUESTS: str = "quests"
+# One text per line a character near the player said since the last state (the subtitles of the game), oldest first.
+# Its parts are separated by tabs: how many seconds ago, ref ID of the speaker as eight hex digits, name of the speaker,
+# what was said. A line the player picked in a dialogue menu has the player as its speaker.
+# The SKSE plugin of the game mod writes these lines (TakeHeardLines in plugin.cpp of the plugin repository)
+KEY_HEARD: str = "heard"
 # Four numbers per character: ref ID, distance to the player in meters,
 # angle from where the player faces to the character in degrees (negative = left), hostile to the player (0 or 1)
 KEY_NEARBY_VALUES: str = "nearby"
@@ -40,9 +46,14 @@ KEY_TIMES: str = "times_ms"
 
 PLAYER_VALUE_COUNT: int = 7
 COMPANION_VALUE_COUNT: int = 12
-WORLD_VALUE_COUNT: int = 3
-# A game mod from before the quests sends only the weather and the time
+WORLD_VALUE_COUNT: int = 4
+# Older game mods send fewer numbers: only the weather and the time before there were quests,
+# and nothing about listening before there was hearing
 WORLD_VALUE_COUNT_WITHOUT_PLUGIN: int = 2
+WORLD_VALUE_COUNT_WITHOUT_HEARING: int = 3
+WORLD_PLACE_OF_PLUGIN_VERSION: int = 2
+WORLD_PLACE_OF_HEARING: int = 3
+HEARD_PART_COUNT: int = 4
 QUEST_PART_SEPARATOR: str = "\t"
 QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
 # The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
@@ -91,7 +102,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["player"] = player
 
     world_values = _numbers(raw.get(KEY_WORLD_VALUES))
-    if world_values is not None and len(world_values) in (WORLD_VALUE_COUNT_WITHOUT_PLUGIN, WORLD_VALUE_COUNT):
+    if world_values is not None and WORLD_VALUE_COUNT_WITHOUT_PLUGIN <= len(world_values) <= WORLD_VALUE_COUNT:
         weather, minutes = world_values[:WORLD_VALUE_COUNT_WITHOUT_PLUGIN]
         if weather in WEATHER_NAMES:
             state["weather"] = WEATHER_NAMES[weather]
@@ -99,8 +110,13 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
             state["time"] = f"{minutes // MINUTES_PER_HOUR:02d}:{minutes % MINUTES_PER_HOUR:02d}"
         # Without the SKSE plugin the game cannot tell the quests. Then there is no 'quests' in the result,
         # so that 'no open quests' (an empty list) can be told apart from 'not known'
-        if len(world_values) == WORLD_VALUE_COUNT and world_values[-1] > 0:
+        if len(world_values) > WORLD_PLACE_OF_PLUGIN_VERSION and world_values[WORLD_PLACE_OF_PLUGIN_VERSION] > 0:
             state["quests"] = _read_quests(raw.get(KEY_QUESTS))
+        # Same idea: 'hearing' is only in the result if the game mod knows about listening at all
+        if len(world_values) > WORLD_PLACE_OF_HEARING:
+            state["hearing"] = world_values[WORLD_PLACE_OF_HEARING] != 0
+            if state["hearing"]:
+                state["heard"] = _read_heard(raw.get(KEY_HEARD))
 
     companion = _read_companion(raw)
     if companion is not None:
@@ -169,6 +185,31 @@ def _read_quests(raw_quests: Any) -> list[dict[str, Any]]:
             "objectives": objectives,
         })
     return quests
+
+
+def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:
+    """What was said since the last state, oldest first"""
+    heard: list[dict[str, Any]] = []
+    if not isinstance(raw_lines, list):
+        return heard
+    for entry in raw_lines:
+        if not isinstance(entry, str):
+            continue
+        # The text comes last and is not split any further
+        parts = entry.split(QUEST_PART_SEPARATOR, HEARD_PART_COUNT - 1)
+        if len(parts) != HEARD_PART_COUNT:
+            continue
+        age_text, ref_id_text, name, text = parts
+        form_id = parse_ref_id(ref_id_text)
+        if not age_text.isdecimal() or form_id is None or text.strip() == "":
+            continue
+        heard.append({
+            "seconds_ago": int(age_text),
+            "ref_id": format_ref_id(form_id),
+            "name": _tidy_name(name),
+            "text": text.strip(),
+        })
+    return heard
 
 
 def _add_view_of_companion(state: dict[str, Any]) -> None:

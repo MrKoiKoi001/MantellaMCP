@@ -400,6 +400,72 @@ def test_quests_of_the_journal():
     assert lines[10] == "- Miscellaneous: Errand 0; Errand 1; Errand 2; Errand 3; Errand 4; Errand 5; and 2 more"
 
 
+def test_heard_lines_are_kept_until_the_ai_asks_and_given_only_once():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+
+    def state_text(client: TestClient) -> list[str]:
+        return tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {}})).splitlines()
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state(has_heard_lines=True)})
+        # A later state without lines must not wipe out what has not been given to the AI yet
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()})
+        first = state_text(client)
+        second = state_text(client)
+        debug = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True}}))
+    # The player picked a line in the dialogue menu, the guard answered, and the own character is 'You'.
+    # The ages have grown by the seconds the server waited for the game, so only their order is checked
+    heard = first[first.index("Heard:") + 1:]
+    assert [line.partition(" s ago, ")[2] for line in heard] == [
+        "Dragonborn: What do you know about dragons?",
+        "Whiterun Guard: Only what the old tales say.",
+        "You: I am sworn to carry your burdens.",
+    ]
+    ages = [int(line.partition(" s ago, ")[0].removeprefix("- ")) for line in heard]
+    assert ages[0] - ages[1] == 3 and ages[1] - ages[2] == 6 and 3 <= ages[2] < 30
+    assert "Heard:" not in second
+    assert debug["heard"] == [] and debug["state"]["hearing"] is True and "heard" not in debug["state"]
+
+    # Old game mods say nothing about listening. A broken line is left out
+    assert "hearing" not in game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 1]})
+    state = game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 1], game_state.KEY_HEARD: [
+        "5\tFF000A01\tbandit\tNever should have come here!\t", "broken", "x\t00000014\tKoi\tHello"]})
+    assert state["heard"] == [{"seconds_ago": 5, "ref_id": "FF000A01", "name": "Bandit", "text": "Never should have come here!"}]
+    assert game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0], game_state.KEY_HEARD: ["5\t00000014\tKoi\tHello"]}) == {
+        "time": "10:00", "weather": "clear", "quests": [], "hearing": False, "nearby": []}
+
+
+def test_heard_lines_of_one_speaker_are_joined_and_old_ones_dropped():
+    import asyncio
+
+    from src.companion.command_queue import CompanionCommandQueue
+
+    def line(seconds_ago: int, ref_id: str, name: str, text: str) -> dict:
+        return {"seconds_ago": seconds_ago, "ref_id": ref_id, "name": name, "text": text}
+
+    async def scenario(heard: list[dict]) -> list[dict]:
+        # Without a grace period the game counts as gone right after its request, so nothing waits for it here
+        queue = CompanionCommandQueue(hold_seconds=0.05, connection_grace_seconds=0.0)
+        await queue.poll({"location": "Whiterun", "heard": heard}, [])
+        return (await queue.get_state())["heard"]
+
+    # A speech in three pieces becomes one line with the age of its last piece. A later remark stays its own line
+    speech = asyncio.run(scenario([
+        line(40, "0001A66B", "Balgruuf", "So, you were at Helgen?"), line(34, "0001A66B", "Balgruuf", "You saw this dragon with your own eyes?"),
+        line(30, "00000014", "Koi", "Yes."), line(2, "0001A66B", "Balgruuf", "By Ysmir, Irileth was right!"),
+    ]))
+    assert [(entry["name"], entry["text"]) for entry in speech] == [
+        ("Balgruuf", "So, you were at Helgen? You saw this dragon with your own eyes?"), ("Koi", "Yes."), ("Balgruuf", "By Ysmir, Irileth was right!")]
+    assert [entry["seconds_ago"] for entry in speech] == [34, 30, 2]
+
+    # Only the newest ten lines, and nothing older than five minutes
+    many = [line(301 + number, "FF000A01", "Bandit", "Too old") for number in range(3)]
+    many += [line(280 - 20 * number, f"FF000B{number:02d}", f"Guard {number}", f"Line {number}") for number in range(12)]
+    kept = asyncio.run(scenario(many))
+    assert [entry["text"] for entry in kept] == [f"Line {number}" for number in range(2, 12)]
+
+
 def test_fake_game_companion_walks_and_retreats_like_the_game():
     from src.companion.fake_game import is_fleeing_after, is_waiting_after, run_command, walk_target_after
 

@@ -18,6 +18,13 @@ class CompanionCommandQueue:
     """
 
     MAX_STORED_RESULTS: int = 50
+    # What the characters in the game said is kept here until the AI asks for the state the next time.
+    # A long talk must not fill the conversation of the AI, so it only gets the newest lines, and no old ones
+    MAX_HEARD_LINES: int = 10
+    MAX_HEARD_AGE_SECONDS: float = 300.0
+    # The game shows a longer speech in several pieces. Pieces of one speaker that follow each other this closely become one line
+    HEARD_MERGE_SECONDS: float = 15.0
+    MAX_MERGED_HEARD_LENGTH: int = 600
 
     def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0) -> None:
         self.__hold_seconds: float = hold_seconds
@@ -29,6 +36,7 @@ class CompanionCommandQueue:
         self.__state: dict[str, Any] | None = None
         self.__state_time: float = 0.0
         self.__state_version: int = 0
+        self.__heard: list[dict[str, Any]] = []
         self.__poll_generation: int = 0
         self.__is_poll_open: bool = False
         self.__last_poll_time: float | None = None
@@ -51,6 +59,8 @@ class CompanionCommandQueue:
             self.__is_poll_open = True
             self.__last_poll_time = time.monotonic()
             if isinstance(state, dict):
+                # The game hands out every line only once, so the lines must not get lost with the next state
+                self.__keep_heard(state.pop("heard", None))
                 self.__state = state
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
@@ -128,7 +138,8 @@ class CompanionCommandQueue:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Returns:
-            A dictionary with 'connected', 'fresh', 'state_age_seconds' and 'state'
+            A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state' and 'heard':
+            what the characters in the game said since this was called the last time
         """
         async with self.__changed:
             version_before = self.__state_version
@@ -151,6 +162,7 @@ class CompanionCommandQueue:
                 "fresh": is_fresh,
                 "state_age_seconds": age,
                 "state": self.__state,
+                "heard": self.__take_heard(),
             }
 
     # -------------------------------------------------------------------- helpers
@@ -170,6 +182,38 @@ class CompanionCommandQueue:
                 self.__results[str(result[consts.KEY_COMMAND_ID])] = result
         while len(self.__results) > self.MAX_STORED_RESULTS:
             self.__results.pop(next(iter(self.__results)))
+
+    def __keep_heard(self, heard: Any):
+        if not isinstance(heard, list):
+            return
+        now = time.monotonic()
+        for line in heard:
+            if not isinstance(line, dict):
+                continue
+            heard_time = now - float(line.get("seconds_ago", 0))
+            text = str(line.get("text", ""))
+            previous = self.__heard[-1] if len(self.__heard) > 0 else None
+            if (previous is not None and previous["ref_id"] == line.get("ref_id")
+                    and 0.0 <= heard_time - previous["time"] <= self.HEARD_MERGE_SECONDS
+                    and len(previous["text"]) + len(text) < self.MAX_MERGED_HEARD_LENGTH):
+                previous["text"] += " " + text
+                previous["time"] = heard_time
+                continue
+            self.__heard.append({"ref_id": line.get("ref_id"), "name": line.get("name"), "text": text, "time": heard_time})
+        # Bounded even if the AI never asks
+        self.__heard = self.__heard[-self.MAX_STORED_RESULTS:]
+
+    def __take_heard(self) -> list[dict[str, Any]]:
+        """The lines the AI has not been given yet, oldest first. They are forgotten afterwards"""
+        now = time.monotonic()
+        lines = [line for line in self.__heard if now - line["time"] <= self.MAX_HEARD_AGE_SECONDS]
+        self.__heard = []
+        return [{
+            "seconds_ago": max(0, round(now - line["time"])),
+            "ref_id": line["ref_id"],
+            "name": line["name"],
+            "text": line["text"],
+        } for line in lines[-self.MAX_HEARD_LINES:]]
 
     async def __wait_until(self, predicate: Callable[[], bool], timeout_seconds: float) -> bool:
         """Waits (with the condition lock held by the caller) until predicate is true or the timeout hits"""

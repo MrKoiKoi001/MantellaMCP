@@ -10,7 +10,7 @@ from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.4"
+SERVER_VERSION: str = "0.5"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -76,7 +76,10 @@ TOOLS: list[dict[str, Any]] = [
             "Outdoors the list can miss someone, so get STATE once more if a character the player talks about is not in it. "
             "'Quests': the open quests from the player's journal, each with its open objectives. The ones the player "
             "tracks come first and are marked. 'Miscellaneous' collects the small objectives without a quest name. "
-            "The lines are missing if the game cannot tell the quests."
+            "The lines are missing if the game cannot tell the quests. "
+            "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
+            "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
+            "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking."
         ),
         "inputSchema": {
             "type": "object",

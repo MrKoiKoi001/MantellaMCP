@@ -31,7 +31,13 @@ QUESTS: list[list[str]] = [
     ["0", "8", "The Golden Claw", "Find the secret of Bleak Falls Barrow", "Retrieve the Golden Claw"],
     ["0", "6", "Favor for Alvor", "Buy a sword from Alvor"],
 ]
-NATIVE_PLUGIN_VERSION: int = 1
+NATIVE_PLUGIN_VERSION: int = 2
+# What was said since the last state as the SKSE plugin writes it: seconds ago, ref ID of the speaker, name, text
+HEARD: list[list[str]] = [
+    ["12", "00000014", "Dragonborn", "What do you know about dragons?"],
+    ["9", "000F6845", "Whiterun Guard", "Only what the old tales say."],
+    ["3", "000A2C94", "Lydia", "I am sworn to carry your burdens."],
+]
 
 
 def to_papyrus_number(ref_id: str) -> int:
@@ -44,8 +50,13 @@ def to_papyrus_number(ref_id: str) -> int:
     return form_id
 
 
-def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "") -> dict:
-    """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py"""
+def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "",
+                has_heard_lines: bool = False) -> dict:
+    """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
+
+    Args:
+        has_heard_lines: The plugin of the game mod hands out every line only once, so only one state should carry them
+    """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
     nearby_names: list[str] = []
@@ -55,12 +66,12 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             character["angle_degrees"], int(character["hostile"]),
         ])
         nearby_names.append(f"{place}{game_state.NAME_PLACE_SEPARATOR}{character['name']}")
-    return {
+    state: dict = {
         game_state.KEY_LOCATION: "Whiterun, Plains District",
         game_state.KEY_PLAYER_NAME: "Dragonborn",
         game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0],
         # Snow at 14:35
-        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION],
+        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
         game_state.KEY_COMPANION_NAME: "Lydia",
         game_state.KEY_COMPANION_VALUES: [
@@ -71,6 +82,9 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_NEARBY_NAMES: nearby_names,
         game_state.KEY_TIMES: [0, 0],
     }
+    if has_heard_lines:
+        state[game_state.KEY_HEARD] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in HEARD]
+    return state
 
 
 def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str, str]:
@@ -136,7 +150,8 @@ def main():
         poll_id += 1
         request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results}
         if is_state_wanted:
-            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id)
+            # Only the first state has something that was said
+            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1)
         body = json.dumps(request_body).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         try:

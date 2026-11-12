@@ -15,6 +15,9 @@ COMPASS_DIRECTIONS: list[str] = ["north", "north-east", "east", "south-east", "s
 MAX_QUEST_LINES: int = 8
 MAX_MISCELLANEOUS_OBJECTIVES: int = 6
 OBJECTIVE_SEPARATOR: str = "; "
+# Up to this age a line that was heard is given in seconds, after that in minutes
+MAX_AGE_IN_SECONDS: int = 90
+SECONDS_PER_MINUTE: int = 60
 
 
 def relative_direction(angle_degrees: float) -> str:
@@ -67,6 +70,7 @@ def describe_state(state_result: dict[str, Any]) -> str:
         for character in nearby:
             lines.append(_describe_nearby_character(character))
     lines.extend(_describe_quests(state.get("quests")))
+    lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
     return "\n".join(lines)
 
 
@@ -97,6 +101,24 @@ def _describe_quests(quests: Any) -> list[str]:
         more = f"{OBJECTIVE_SEPARATOR}and {left_out} more" if left_out > 0 else ""
         lines.append(f"- Miscellaneous: {OBJECTIVE_SEPARATOR.join(shown)}{more}")
     return lines
+
+
+def _describe_heard(heard: Any, companion: Any) -> list[str]:
+    """What the characters in the game said since the AI asked the last time. No lines at all if that is nothing"""
+    if not isinstance(heard, list) or len(heard) == 0:
+        return []
+    own_ref_id = companion.get("ref_id") if isinstance(companion, dict) else None
+    lines: list[str] = ["Heard:"]
+    for line in heard:
+        speaker = "You" if own_ref_id is not None and line.get("ref_id") == own_ref_id else line.get("name")
+        lines.append(f"- {_describe_age(line.get('seconds_ago', 0))}, {speaker}: {line.get('text')}")
+    return lines
+
+
+def _describe_age(seconds: int) -> str:
+    if seconds <= MAX_AGE_IN_SECONDS:
+        return f"{seconds} s ago"
+    return f"{round(seconds / SECONDS_PER_MINUTE)} min ago"
 
 
 def _describe_place(state: dict[str, Any]) -> str:
