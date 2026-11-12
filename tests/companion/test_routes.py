@@ -201,6 +201,10 @@ def test_state_text_describes_the_companion():
         "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
         "FF000A01 Bandit, 12 m ahead-left, from you 13 m behind, hostile",
         "FF000A02 Bandit, 20 m behind-right, from you 19 m ahead, hostile",
+        "Quests:",
+        "- Before the Storm (tracked): Talk to the Jarl of Whiterun",
+        "- The Golden Claw: Find the secret of Bleak Falls Barrow; Retrieve the Golden Claw",
+        "- Miscellaneous: Buy a sword from Alvor",
     ]
     you_start = "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, "
     assert text_for(read_game_state(build_state(True)))[2] == you_start + "waiting"
@@ -352,6 +356,48 @@ def test_weather_and_time_of_day():
     # Indoors nobody sees the weather, and -1 means the game does not know it
     assert first_line([2, 1439], 1) == "Riverwood (indoors), 23:59"
     assert first_line([-1, 720], 0) == "Riverwood (outdoors), 12:00"
+
+
+def test_quests_of_the_journal():
+    from src.companion import game_state
+    from src.companion.state_text import describe_state
+
+    def quest_lines(world_values: list[int], quests: list[str] | None) -> list[str]:
+        raw: dict = {game_state.KEY_LOCATION: "Riverwood", game_state.KEY_WORLD_VALUES: world_values}
+        if quests is not None:
+            raw[game_state.KEY_QUESTS] = quests
+        state = game_state.read_game_state(raw)
+        lines = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()
+        # What comes after the characters nearby
+        return lines[lines.index("Nearby: nobody") + 1:]
+
+    def quest(tracked: int, quest_type: int, name: str, *objectives: str) -> str:
+        return "\t".join([str(tracked), str(quest_type), name, *objectives])
+
+    # Without the plugin of the game mod (old mod with two numbers, or version 0) nothing is said about quests
+    assert quest_lines([0, 600], None) == []
+    assert quest_lines([0, 600, 0], [quest(1, 1, "Unbound", "Escape Helgen")]) == []
+    # With the plugin, no list from the game means that the journal has no open quests
+    assert quest_lines([0, 600, 1], None) == ["Quests: none"]
+
+    state = game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 1], game_state.KEY_QUESTS: [
+        quest(1, 1, "Before the Storm", "Talk to the Jarl of Whiterun"), "broken line", quest(0, 8, "Empty quest")]})
+    assert state["quests"] == [{"name": "Before the Storm", "tracked": True, "type": 1, "miscellaneous": False,
+                                "objectives": ["Talk to the Jarl of Whiterun"]}]
+
+    # Small objectives (type 6, or a quest without a name) share one line, however many quests they come from
+    assert quest_lines([0, 600, 1], [
+        quest(0, 6, "Hidden name", "Visit the inn"), quest(1, 8, "The Golden Claw", "Find the claw", "Bring it back"),
+        quest(0, 0, "", "Talk to Alvor"),
+    ]) == ["Quests:", "- The Golden Claw (tracked): Find the claw; Bring it back", "- Miscellaneous: Visit the inn; Talk to Alvor"]
+
+    # A long journal is cut off, and so is a long list of small objectives
+    many = [quest(0, 8, f"Quest {number}", "Do it") for number in range(11)] + [quest(0, 6, "", f"Errand {number}") for number in range(8)]
+    lines = quest_lines([0, 600, 1], many)
+    assert len(lines) == 11
+    assert lines[8] == "- Quest 7: Do it"
+    assert lines[9] == "- and 3 more"
+    assert lines[10] == "- Miscellaneous: Errand 0; Errand 1; Errand 2; Errand 3; Errand 4; Errand 5; and 2 more"
 
 
 def test_fake_game_companion_walks_and_retreats_like_the_game():

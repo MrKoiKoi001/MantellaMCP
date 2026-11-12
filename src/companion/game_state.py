@@ -1,7 +1,7 @@
 """The game state: from the short form the game mod sends to the layout the AI side works with.
 
 Every value the game mod hands to its HTTP plugin costs the game one frame, and so does every question
-it asks the game. So the mod sends three texts and a few lists of plain numbers instead of one named entry
+it asks the game. So the mod sends a few texts and a few lists of plain numbers instead of one named entry
 per value (BuildState in KI_MCP_Gefaehrte_Loop.psc of the game mod). This module gives the numbers their
 names back. The order of the numbers in each list has to match that script.
 """
@@ -22,8 +22,13 @@ KEY_COMPANION_NAME: str = "companion_name"
 # direction the companion faces in degrees (0 = north, 90 = east), retreating because of the command flee (0 or 1),
 # ref ID of the character it is walking to because of the command move_to (0 = none)
 KEY_COMPANION_VALUES: str = "companion"
-# weather outside (see WEATHER_NAMES, -1 = unknown), time of day in minutes since midnight
+# weather outside (see WEATHER_NAMES, -1 = unknown), time of day in minutes since midnight,
+# interface version of the SKSE plugin of the game mod (0 = not loaded, so the game cannot tell the quests)
 KEY_WORLD_VALUES: str = "world"
+# One text per open quest of the journal, tracked ones first. Its parts are separated by tabs:
+# tracked (1 or 0), type of the quest as the game numbers it, name of the quest, then the text of each open objective.
+# The SKSE plugin of the game mod writes these lines (GetOpenQuests in plugin.cpp of the plugin repository)
+KEY_QUESTS: str = "quests"
 # Four numbers per character: ref ID, distance to the player in meters,
 # angle from where the player faces to the character in degrees (negative = left), hostile to the player (0 or 1)
 KEY_NEARBY_VALUES: str = "nearby"
@@ -35,7 +40,13 @@ KEY_TIMES: str = "times_ms"
 
 PLAYER_VALUE_COUNT: int = 7
 COMPANION_VALUE_COUNT: int = 12
-WORLD_VALUE_COUNT: int = 2
+WORLD_VALUE_COUNT: int = 3
+# A game mod from before the quests sends only the weather and the time
+WORLD_VALUE_COUNT_WITHOUT_PLUGIN: int = 2
+QUEST_PART_SEPARATOR: str = "\t"
+QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
+# The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
+QUEST_TYPE_MISCELLANEOUS: int = 6
 VALUES_PER_NEARBY_CHARACTER: int = 4
 TIME_VALUE_COUNT: int = 2
 NAME_PLACE_SEPARATOR: str = ":"
@@ -80,12 +91,16 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["player"] = player
 
     world_values = _numbers(raw.get(KEY_WORLD_VALUES))
-    if world_values is not None and len(world_values) == WORLD_VALUE_COUNT:
-        weather, minutes = world_values
+    if world_values is not None and len(world_values) in (WORLD_VALUE_COUNT_WITHOUT_PLUGIN, WORLD_VALUE_COUNT):
+        weather, minutes = world_values[:WORLD_VALUE_COUNT_WITHOUT_PLUGIN]
         if weather in WEATHER_NAMES:
             state["weather"] = WEATHER_NAMES[weather]
         if 0 <= minutes < MINUTES_PER_DAY:
             state["time"] = f"{minutes // MINUTES_PER_HOUR:02d}:{minutes % MINUTES_PER_HOUR:02d}"
+        # Without the SKSE plugin the game cannot tell the quests. Then there is no 'quests' in the result,
+        # so that 'no open quests' (an empty list) can be told apart from 'not known'
+        if len(world_values) == WORLD_VALUE_COUNT and world_values[-1] > 0:
+            state["quests"] = _read_quests(raw.get(KEY_QUESTS))
 
     companion = _read_companion(raw)
     if companion is not None:
@@ -127,6 +142,33 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     if walk_target_form_id != 0:
         companion["walk_target_ref_id"] = _ref_id(walk_target_form_id)
     return companion
+
+
+def _read_quests(raw_quests: Any) -> list[dict[str, Any]]:
+    """The open quests in the order the game sent them (tracked ones first)"""
+    quests: list[dict[str, Any]] = []
+    if not isinstance(raw_quests, list):
+        return quests
+    for entry in raw_quests:
+        if not isinstance(entry, str):
+            continue
+        parts = entry.split(QUEST_PART_SEPARATOR)
+        if len(parts) < QUEST_PART_COUNT_BEFORE_OBJECTIVES:
+            continue
+        tracked_text, type_text, name = parts[:QUEST_PART_COUNT_BEFORE_OBJECTIVES]
+        objectives = [text.strip() for text in parts[QUEST_PART_COUNT_BEFORE_OBJECTIVES:] if text.strip() != ""]
+        if len(objectives) == 0:
+            continue
+        quest_type = int(type_text) if type_text.isdecimal() else 0
+        quests.append({
+            "name": name.strip(),
+            "tracked": tracked_text == "1",
+            "type": quest_type,
+            # A quest without a name cannot be shown under its name either
+            "miscellaneous": quest_type == QUEST_TYPE_MISCELLANEOUS or name.strip() == "",
+            "objectives": objectives,
+        })
+    return quests
 
 
 def _add_view_of_companion(state: dict[str, Any]) -> None:

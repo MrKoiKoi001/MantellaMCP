@@ -25,6 +25,15 @@ NEARBY: list[dict] = [
 ]
 
 
+# The open quests as the SKSE plugin of the game mod writes them: tracked, type, name, then the open objectives
+QUESTS: list[list[str]] = [
+    ["1", "1", "Before the Storm", "Talk to the Jarl of Whiterun"],
+    ["0", "8", "The Golden Claw", "Find the secret of Bleak Falls Barrow", "Retrieve the Golden Claw"],
+    ["0", "6", "Favor for Alvor", "Buy a sword from Alvor"],
+]
+NATIVE_PLUGIN_VERSION: int = 1
+
+
 def to_papyrus_number(ref_id: str) -> int:
     """Papyrus only knows signed numbers, so the game mod sends ref IDs from 80000000 on as negative numbers"""
     if ref_id == "":
@@ -51,7 +60,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_PLAYER_NAME: "Dragonborn",
         game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0],
         # Snow at 14:35
-        game_state.KEY_WORLD_VALUES: [3, 875],
+        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION],
+        game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
         game_state.KEY_COMPANION_NAME: "Lydia",
         game_state.KEY_COMPANION_VALUES: [
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,

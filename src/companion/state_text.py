@@ -11,6 +11,10 @@ DEGREES_PER_DIRECTION: float = 45.0
 RELATIVE_DIRECTIONS: list[str] = ["ahead", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
 # Clockwise, starting in the north
 COMPASS_DIRECTIONS: list[str] = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"]
+# A long journal must not fill the conversation of the AI. Tracked quests come first, so they are the ones that stay
+MAX_QUEST_LINES: int = 8
+MAX_MISCELLANEOUS_OBJECTIVES: int = 6
+OBJECTIVE_SEPARATOR: str = "; "
 
 
 def relative_direction(angle_degrees: float) -> str:
@@ -62,7 +66,37 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.append("Nearby:")
         for character in nearby:
             lines.append(_describe_nearby_character(character))
+    lines.extend(_describe_quests(state.get("quests")))
     return "\n".join(lines)
+
+
+def _describe_quests(quests: Any) -> list[str]:
+    """The open quests of the journal. No lines at all if the game could not tell them (its SKSE plugin is missing)"""
+    if not isinstance(quests, list):
+        return []
+    named_quests = [quest for quest in quests if not quest.get("miscellaneous")]
+    miscellaneous_objectives: list[str] = []
+    for quest in quests:
+        if quest.get("miscellaneous"):
+            miscellaneous_objectives.extend(quest.get("objectives", []))
+    if len(named_quests) == 0 and len(miscellaneous_objectives) == 0:
+        return ["Quests: none"]
+
+    lines: list[str] = ["Quests:"]
+    for quest in named_quests[:MAX_QUEST_LINES]:
+        title = str(quest.get("name"))
+        if quest.get("tracked"):
+            title += " (tracked)"
+        lines.append(f"- {title}: {OBJECTIVE_SEPARATOR.join(quest.get('objectives', []))}")
+    left_out = len(named_quests) - MAX_QUEST_LINES
+    if left_out > 0:
+        lines.append(f"- and {left_out} more")
+    if len(miscellaneous_objectives) > 0:
+        shown = miscellaneous_objectives[:MAX_MISCELLANEOUS_OBJECTIVES]
+        left_out = len(miscellaneous_objectives) - len(shown)
+        more = f"{OBJECTIVE_SEPARATOR}and {left_out} more" if left_out > 0 else ""
+        lines.append(f"- Miscellaneous: {OBJECTIVE_SEPARATOR.join(shown)}{more}")
+    return lines
 
 
 def _describe_place(state: dict[str, Any]) -> str:
