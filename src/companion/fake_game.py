@@ -40,6 +40,27 @@ HEARD: list[list[str]] = [
 ]
 
 
+GOLD: list[int] = [250, 30]
+HANDS: list[str] = ["R:Steel Sword", "L:Iron Shield"]
+# Inventories as the game mod sends them: ID, how many, form type of the game, worn or held, name
+OWN_ITEMS: list[tuple[str, int, int, int, str]] = [
+    ("00013989", 1, 41, 1, "Steel Sword"), ("00012EB6", 1, 26, 1, "Iron Shield"), ("00013985", 1, 41, 0, "Hunting Bow"),
+    ("0001397D", 24, 42, 0, "Iron Arrow"), ("0003EADD", 2, 46, 0, "Potion of Minor Healing"), ("0000000F", 30, 32, 0, "Gold"),
+]
+PLAYER_ITEMS: list[tuple[str, int, int, int, str]] = [
+    ("00012E49", 1, 41, 1, "Iron Sword"), ("0003EADD", 5, 46, 0, "Potion of Minor Healing"), ("0000000A", 12, 32, 0, "Lockpick"),
+]
+
+
+def build_inventory(items: list[tuple[str, int, int, int, str]]) -> tuple[list[int], list[str]]:
+    values: list[int] = [len(items)]
+    names: list[str] = []
+    for place, (item_id, count, form_type, equipped, name) in enumerate(items):
+        values.extend([to_papyrus_number(item_id), count, form_type, equipped])
+        names.append(f"{place}{game_state.NAME_PLACE_SEPARATOR}{name}")
+    return values, names
+
+
 def to_papyrus_number(ref_id: str) -> int:
     """Papyrus only knows signed numbers, so the game mod sends ref IDs from 80000000 on as negative numbers"""
     if ref_id == "":
@@ -51,11 +72,12 @@ def to_papyrus_number(ref_id: str) -> int:
 
 
 def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "",
-                has_heard_lines: bool = False) -> dict:
+                has_heard_lines: bool = False, inventory: str = "") -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
         has_heard_lines: The plugin of the game mod hands out every line only once, so only one state should carry them
+        inventory: Whose inventory the server asked for (companion_constants.INVENTORY_...), or empty for none
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -80,8 +102,17 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
+        game_state.KEY_GOLD: GOLD,
+        game_state.KEY_HANDS: HANDS,
         game_state.KEY_TIMES: [0, 0],
     }
+    wanted_inventories = [
+        (game_state.KEY_INVENTORY_OWN, OWN_ITEMS, (consts.INVENTORY_OWN, consts.INVENTORY_BOTH)),
+        (game_state.KEY_INVENTORY_PLAYER, PLAYER_ITEMS, (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH)),
+    ]
+    for key, items, choices in wanted_inventories:
+        if inventory in choices:
+            state[key], state[key + game_state.NAMES_SUFFIX] = build_inventory(items)
     if has_heard_lines:
         state[game_state.KEY_HEARD] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in HEARD]
     return state
@@ -103,6 +134,12 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
             if character["ref_id"] == target:
                 return True, f"You walk to {character['name']} and wait there. 'follow' brings you back to the player.", target_ref_id
         return False, f"There is no character with the ref_id '{target}'. Take the ref_id from 'nearby' in STATE.", target_ref_id
+    if action in consts.ITEM_ACTIONS:
+        items = PLAYER_ITEMS if action == consts.ACTION_TAKE else OWN_ITEMS
+        for item_id, count, form_type, equipped, name in items:
+            if item_id == target:
+                return True, f"Fake game did '{action}' with {name}.", target_ref_id
+        return False, f"There is no item with the ID '{target}'. Take the ID from the inventory in STATE.", target_ref_id
     if action == consts.ACTION_FLEE:
         return True, "You retreat: you do not fight and you run from enemies. This holds until your next command.", ""
     if action == consts.ACTION_STAND_DOWN:
@@ -145,13 +182,15 @@ def main():
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
+    wanted_inventory = ""
     print(f"Fake game polling {url} (Ctrl+C to stop)")
     while True:
         poll_id += 1
         request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results}
         if is_state_wanted:
             # Only the first state has something that was said
-            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1)
+            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory)
+            wanted_inventory = ""
         body = json.dumps(request_body).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         try:
@@ -174,6 +213,7 @@ def main():
             detail = command.get(consts.KEY_COMMAND_DETAIL)
             if action == consts.ACTION_REPORT_STATE:
                 is_state_wanted = True
+                wanted_inventory = str(detail or "")
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             is_ok, message, target_ref_id = run_command(str(action), str(target), target_ref_id)

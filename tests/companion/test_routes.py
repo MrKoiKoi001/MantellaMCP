@@ -197,6 +197,7 @@ def test_state_text_describes_the_companion():
         "Whiterun, Plains District (outdoors), 14:35, snow",
         "Player Dragonborn: health 85%, fighting, faces north-east, position 23500,-7900,-3300",
         "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, following, fighting Bandit FF000A01",
+        "Gear: you hold Steel Sword and Iron Shield, your gold 30, the player's gold 250",
         "Nearby:",
         "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
         "FF000A01 Bandit, 12 m ahead-left, from you 13 m behind, hostile",
@@ -464,6 +465,76 @@ def test_heard_lines_of_one_speaker_are_joined_and_old_ones_dropped():
     many += [line(280 - 20 * number, f"FF000B{number:02d}", f"Guard {number}", f"Line {number}") for number in range(12)]
     kept = asyncio.run(scenario(many))
     assert [entry["text"] for entry in kept] == [f"Line {number}" for number in range(2, 12)]
+
+
+def test_inventory_only_comes_when_asked_for():
+    from src.companion.fake_game import build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(state: dict, wanted: str = "", missed: bool = False) -> list[str]:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state,
+                               "inventory_wanted": wanted, "inventory_missed": missed}).splitlines()
+
+    both = read_game_state(build_state(inventory=consts.INVENTORY_BOTH))
+    assert both["inventory_own"]["total"] == 6
+    # Gold is a number in the 'Gear' line and not an item in the list
+    assert {"id": "0000000F", "name": "Gold", "count": 30, "group": "Other", "equipped": False} not in both["inventory_own"]["items"]
+    lines = text_for(both, consts.INVENTORY_BOTH)
+    assert lines[lines.index("Your inventory:"):] == [
+        "Your inventory:",
+        "- Weapons: Steel Sword 00013989 (equipped), Hunting Bow 00013985",
+        "- Ammunition: Iron Arrow 0001397D x24",
+        "- Armor and clothing: Iron Shield 00012EB6 (equipped)",
+        "- Potions and food: Potion of Minor Healing 0003EADD x2",
+        "The player's inventory:",
+        "- Weapons: Iron Sword 00012E49 (equipped)",
+        "- Potions and food: Potion of Minor Healing 0003EADD x5",
+        "- Other: Lockpick 0000000A x12",
+    ]
+    assert not any("inventory" in line for line in text_for(both))
+    both["inventory_own"]["total"] = 143
+    assert text_for(both, consts.INVENTORY_OWN)[-1] == "- The list is cut off: only the first 120 of 143 kinds of items were checked."
+    assert "The player's inventory:" not in text_for(both, consts.INVENTORY_OWN)
+    assert text_for(read_game_state(build_state()), "", True)[-1] == "The game did not send the inventory in time. Ask again."
+    assert "inventory_own" not in read_game_state(build_state(inventory=consts.INVENTORY_PLAYER))
+
+    # Without a follower there are no hands, and an empty hand is left out
+    alone = read_game_state({"gold": [12, 0], "hands": ["R:Iron Dagger", "L:"]})
+    assert alone["player"] == {"gold": 12} and "companion" not in alone
+    assert "Gear: the player's gold 12" in text_for(alone)
+    raw = build_state()
+    raw["hands"] = ["R:", "L:"]
+    assert "Gear: you hold nothing, your gold 30, the player's gold 250" in text_for(read_game_state(raw))
+
+
+def test_item_commands_carry_how_many():
+    import asyncio
+
+    from src.companion.command_queue import CompanionCommandQueue
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "needs a target" in command({"action": "equip"})["message"]
+        assert "how many" in command({"action": "give", "target": "0003EADD", "detail": "a few"})["message"]
+        assert command({"action": "give", "target": "0003EADD", "detail": "all"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+
+    async def scenario() -> tuple[list[dict], list[dict]]:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.send_command(consts.ACTION_TAKE, "0003EADD", "", result_timeout_seconds=0.1, count=3))
+        first = await game
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, inventory=consts.INVENTORY_OWN))
+        return first, await game
+
+    take, report = asyncio.run(scenario())
+    assert (take[0][consts.KEY_COMMAND_ACTION], take[0][consts.KEY_COMMAND_COUNT]) == (consts.ACTION_TAKE, 3)
+    assert (report[0][consts.KEY_COMMAND_ACTION], report[0][consts.KEY_COMMAND_DETAIL]) == (consts.ACTION_REPORT_STATE, consts.INVENTORY_OWN)
 
 
 def test_fake_game_companion_walks_and_retreats_like_the_game():

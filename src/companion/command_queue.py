@@ -25,6 +25,8 @@ class CompanionCommandQueue:
     # The game shows a longer speech in several pieces. Pieces of one speaker that follow each other this closely become one line
     HEARD_MERGE_SECONDS: float = 15.0
     MAX_MERGED_HEARD_LENGTH: int = 600
+    # Collecting a whole inventory takes the game several seconds
+    INVENTORY_TIMEOUT_SECONDS: float = 15.0
 
     def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0) -> None:
         self.__hold_seconds: float = hold_seconds
@@ -87,11 +89,13 @@ class CompanionCommandQueue:
 
     # ------------------------------------------------------------------- MCP side
 
-    async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0) -> dict[str, Any]:
+    async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0,
+                           count: int = 1) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
-            target: ref_id of the target character (see ref_ids.py), or empty
+            target: ref_id of the target character or ID of the item (see ref_ids.py), or empty
+            count: For give and take: how many of the item, 0 = all of them
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
                 unless a request for the state came in together with the command
 
@@ -111,6 +115,7 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_TARGET_HIGH: target_high,
                 consts.KEY_COMMAND_TARGET_LOW: target_low,
                 consts.KEY_COMMAND_DETAIL: detail,
+                consts.KEY_COMMAND_COUNT: count,
             }
             self.__pending_commands.append(command)
             self.__changed.notify_all()
@@ -134,20 +139,25 @@ class CompanionCommandQueue:
             message = str(result.get(consts.KEY_RESULT_MESSAGE, ""))
             return self.__status(consts.STATUS_DONE if is_ok else consts.STATUS_FAILED, message)
 
-    async def get_state(self, refresh_timeout_seconds: float = 6.0) -> dict[str, Any]:
+    async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "") -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
+        Args:
+            inventory: Whose inventory the fresh state should carry (companion_constants.INVENTORY_...), or empty for none
+
         Returns:
-            A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state' and 'heard':
+            A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted' and 'heard':
             what the characters in the game said since this was called the last time
         """
+        if inventory != "":
+            refresh_timeout_seconds = max(refresh_timeout_seconds, self.INVENTORY_TIMEOUT_SECONDS)
         async with self.__changed:
             version_before = self.__state_version
             is_connected = self.__is_game_connected()
 
         is_fresh = False
         if is_connected:
-            request = await self.send_command(consts.ACTION_REPORT_STATE)
+            request = await self.send_command(consts.ACTION_REPORT_STATE, detail=inventory)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -162,6 +172,9 @@ class CompanionCommandQueue:
                 "fresh": is_fresh,
                 "state_age_seconds": age,
                 "state": self.__state,
+                # The kept state may still carry an inventory from an earlier question. Only a fresh one is worth showing
+                "inventory_wanted": inventory if is_fresh else "",
+                "inventory_missed": inventory != "" and not is_fresh,
                 "heard": self.__take_heard(),
             }
 

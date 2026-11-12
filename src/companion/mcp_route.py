@@ -10,13 +10,14 @@ from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.5"
+SERVER_VERSION: str = "0.6"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
 TOOL_COMMAND: str = "COMMAND"
 TOOL_STATE: str = "STATE"
 ARGUMENT_DEBUG: str = "debug"
+ARGUMENT_INVENTORY: str = "inventory"
 
 SERVER_INSTRUCTIONS: str = (
     "You are playing a companion character inside the game Skyrim, fighting and travelling alongside the player. "
@@ -43,6 +44,11 @@ TOOLS: list[dict[str, Any]] = [
             "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
             "flee = retreat: you do not fight and run from enemies until your next command, "
             "move_to = walk to the target and wait there until 'follow'. "
+            "With your things (the target is the ID of an item from an inventory in STATE): "
+            "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
+            "unequip = put the item away, "
+            "give = hand the item to the player, take = take the item out of the player's inventory "
+            "(only when the player wants it). For give and take 'detail' says how many: a number or 'all', nothing = 1. "
             "Not built into the game mod yet: "
             "cast_spell = cast the spell named in 'detail' on the target (no target = on yourself)."
         ),
@@ -50,8 +56,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target character, taken from STATE. Required for attack and move_to."},
-                "detail": {"type": "string", "description": "Extra information for the action, eg the spell name for cast_spell."},
+                "target": {"type": "string", "description": "ref_id of the target character (attack, move_to) or ID of the item (equip, unequip, give, take), taken from STATE. Required for these actions."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -79,11 +85,15 @@ TOOLS: list[dict[str, Any]] = [
             "The lines are missing if the game cannot tell the quests. "
             "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
             "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
-            "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking."
+            "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "
+            "'Gear': what you hold in your hands, your gold and the player's gold. "
+            "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
+            "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
+                ARGUMENT_INVENTORY: {"type": "string", "enum": consts.INVENTORY_CHOICES, "description": "Also list an inventory: own = yours, player = the player's, both. Only when you need it."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
         },
@@ -169,7 +179,10 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
         arguments = {}
 
     if name == TOOL_STATE:
-        state_result = await queue.get_state()
+        inventory = str(arguments.get(ARGUMENT_INVENTORY, "") or "").strip().lower()
+        if inventory not in consts.INVENTORY_CHOICES:
+            inventory = ""
+        state_result = await queue.get_state(inventory=inventory)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)
@@ -185,11 +198,19 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
         if target != "":
             target_form_id = parse_ref_id(target)
             if target_form_id is None:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{target}' is not a ref_id. Use a ref_id from STATE, eg 000A2C94."}, True)
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{target}' is not a ref_id or item ID. Use one from STATE, eg 000A2C94."}, True)
             target = format_ref_id(target_form_id)
+        count = 1
+        if action in consts.ACTIONS_WITH_COUNT and detail != "":
+            if detail.lower() == consts.COUNT_ALL_TEXT:
+                count = consts.COUNT_ALL
+            elif detail.isdecimal() and int(detail) > 0:
+                count = int(detail)
+            else:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is how many: a number or 'all'."}, True)
         if action == consts.ACTION_CAST_SPELL and detail == "":
             return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the spell name in 'detail'."}, True)
-        result = await queue.send_command(action, target, detail)
+        result = await queue.send_command(action, target, detail, count=count)
         is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
         return _tool_json(result, is_error)
 

@@ -41,6 +41,17 @@ KEY_NEARBY_VALUES: str = "nearby"
 # One text per character: its place in the list above, a colon and its name, eg "0:Bandit".
 # The HTTP plugin of the game drops names it cannot send without a word, so the place cannot be counted
 KEY_NEARBY_NAMES: str = "nearby_names"
+# Gold of the player and of the companion (0 without a companion)
+KEY_GOLD: str = "gold"
+# What the companion holds: two texts, "R:" and "L:" followed by the name of what is in that hand (nothing = empty hand)
+KEY_HANDS: str = "hands"
+# Only when the server asked for it: the inventory of the companion and of the player.
+# First number: how many kinds of items there are in all (the game mod cuts long inventories off).
+# Then four numbers per item: form ID, how many, form type (see ITEM_GROUPS), worn or held (0 or 1). All 0 = left out.
+# The names are under the same key with NAMES_SUFFIX, built like KEY_NEARBY_NAMES
+KEY_INVENTORY_OWN: str = "inventory_own"
+KEY_INVENTORY_PLAYER: str = "inventory_player"
+NAMES_SUFFIX: str = "_names"
 # How long the game mod took in milliseconds: for the whole state, and for the characters nearby alone
 KEY_TIMES: str = "times_ms"
 
@@ -54,6 +65,19 @@ WORLD_VALUE_COUNT_WITHOUT_HEARING: int = 3
 WORLD_PLACE_OF_PLUGIN_VERSION: int = 2
 WORLD_PLACE_OF_HEARING: int = 3
 HEARD_PART_COUNT: int = 4
+GOLD_VALUE_COUNT: int = 2
+VALUES_PER_ITEM: int = 4
+# The game mod lists at most this many kinds of items of one inventory (MaxInventoryItems in KI_MCP_Gefaehrte_Loop.psc)
+MAX_INVENTORY_ITEMS: int = 120
+HAND_SEPARATOR: str = ":"
+# Gold is an item like any other. It is shown as a number instead of in the lists
+GOLD_ITEM_ID: str = "0000000F"
+# Form types of the game (as SKSE numbers them) and the heading their items get. Everything else is 'Other'
+ITEM_GROUPS: dict[int, str] = {
+    41: "Weapons", 42: "Ammunition", 26: "Armor and clothing", 46: "Potions and food", 30: "Ingredients",
+    27: "Books", 23: "Scrolls", 52: "Soul gems", 45: "Keys",
+}
+OTHER_ITEM_GROUP: str = "Other"
 QUEST_PART_SEPARATOR: str = "\t"
 QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
 # The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
@@ -122,6 +146,20 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     if companion is not None:
         state["companion"] = companion
 
+    gold_values = _numbers(raw.get(KEY_GOLD))
+    if gold_values is not None and len(gold_values) == GOLD_VALUE_COUNT:
+        player["gold"] = gold_values[0]
+        state["player"] = player
+        if companion is not None:
+            companion["gold"] = gold_values[1]
+    hands = raw.get(KEY_HANDS)
+    if companion is not None and isinstance(hands, list):
+        companion["holds"] = [name for name in (_hand_name(hand) for hand in hands) if name != ""]
+    for key in (KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER):
+        inventory = _read_inventory(raw, key)
+        if inventory is not None:
+            state[key] = inventory
+
     state["nearby"] = _read_nearby(raw)
     _add_view_of_companion(state)
 
@@ -185,6 +223,35 @@ def _read_quests(raw_quests: Any) -> list[dict[str, Any]]:
             "objectives": objectives,
         })
     return quests
+
+
+def _hand_name(hand: Any) -> str:
+    if not isinstance(hand, str):
+        return ""
+    return hand.partition(HAND_SEPARATOR)[2].strip()
+
+
+def _read_inventory(raw: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """Returns 'total' (kinds of items the character has) and 'items' (the ones the game listed, without gold), or None"""
+    values = _numbers(raw.get(key))
+    if values is None or len(values) == 0 or (len(values) - 1) % VALUES_PER_ITEM != 0:
+        return None
+    names = _names_by_place(raw.get(key + NAMES_SUFFIX))
+    items: list[dict[str, Any]] = []
+    for place in range((len(values) - 1) // VALUES_PER_ITEM):
+        start = 1 + place * VALUES_PER_ITEM
+        form_id, count, form_type, equipped = values[start:start + VALUES_PER_ITEM]
+        item_id = _ref_id(form_id)
+        if form_id == 0 or place not in names or item_id == GOLD_ITEM_ID:
+            continue
+        items.append({
+            "id": item_id,
+            "name": names[place],
+            "count": count,
+            "group": ITEM_GROUPS.get(form_type, OTHER_ITEM_GROUP),
+            "equipped": equipped != 0,
+        })
+    return {"total": values[0], "items": items}
 
 
 def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:

@@ -29,7 +29,16 @@ class companion_constants:
     # The same ref_id as a number, cut into its upper and lower 16 bits (see ref_ids.split_form_id). Both 0 without a target
     KEY_COMMAND_TARGET_HIGH: str = PREFIX + "target_high"
     KEY_COMMAND_TARGET_LOW: str = PREFIX + "target_low"
+    # Extra text for the action. For report_state: whose inventory the state should carry (see INVENTORY_...), or empty
     KEY_COMMAND_DETAIL: str = PREFIX + "detail"
+    # For give and take: how many of the item, 0 = all of them
+    KEY_COMMAND_COUNT: str = PREFIX + "count"
+    INVENTORY_OWN: str = "own"
+    INVENTORY_PLAYER: str = "player"
+    INVENTORY_BOTH: str = "both"
+    INVENTORY_CHOICES: list[str] = [INVENTORY_OWN, INVENTORY_PLAYER, INVENTORY_BOTH]
+    COUNT_ALL_TEXT: str = "all"
+    COUNT_ALL: int = 0
     # SKSE_HTTP sends every reply to all listening scripts. If Mantella is installed next to the companion mod,
     # MantellaConversation.psc reads our replies too and treats them as an error unless it finds exactly this value
     KEY_MANTELLA_REPLY_TYPE: str = "mantella_reply_type"
@@ -42,6 +51,10 @@ class companion_constants:
     ACTION_STAND_DOWN: str = "stand_down"
     ACTION_FLEE: str = "flee"
     ACTION_MOVE_TO: str = "move_to"
+    ACTION_EQUIP: str = "equip"
+    ACTION_UNEQUIP: str = "unequip"
+    ACTION_GIVE: str = "give"
+    ACTION_TAKE: str = "take"
     ACTION_CAST_SPELL: str = "cast_spell"
     # Internal: makes the game collect its state and send it with its next request
     ACTION_REPORT_STATE: str = "report_state"
@@ -53,9 +66,17 @@ class companion_constants:
         ACTION_STAND_DOWN,
         ACTION_FLEE,
         ACTION_MOVE_TO,
+        ACTION_EQUIP,
+        ACTION_UNEQUIP,
+        ACTION_GIVE,
+        ACTION_TAKE,
         ACTION_CAST_SPELL,
     ]
-    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO]
+    # Their target is the ID of an item from an inventory instead of the ref_id of a character
+    ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
+    # 'detail' says how many
+    ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
+    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"

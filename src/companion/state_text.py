@@ -6,6 +6,9 @@ the AI needs to decide, instead of the whole state as JSON.
 """
 from typing import Any
 
+from src.companion.companion_constants import companion_constants as consts
+from src.companion.game_state import ITEM_GROUPS, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER, MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP
+
 DEGREES_PER_DIRECTION: float = 45.0
 # Clockwise, starting straight ahead of whoever looks
 RELATIVE_DIRECTIONS: list[str] = ["ahead", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
@@ -63,6 +66,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
     if not isinstance(nearby, list):
         nearby = []
     lines.append(_describe_companion(state.get("companion"), nearby))
+    gear_line = _describe_gear(state.get("player"), state.get("companion"))
+    if gear_line != "":
+        lines.append(gear_line)
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:
@@ -71,6 +77,13 @@ def describe_state(state_result: dict[str, Any]) -> str:
             lines.append(_describe_nearby_character(character))
     lines.extend(_describe_quests(state.get("quests")))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
+    wanted = state_result.get("inventory_wanted")
+    if wanted in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
+        lines.extend(_describe_inventory("Your inventory", state.get(KEY_INVENTORY_OWN)))
+    if wanted in (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH):
+        lines.extend(_describe_inventory("The player's inventory", state.get(KEY_INVENTORY_PLAYER)))
+    if state_result.get("inventory_missed"):
+        lines.append("The game did not send the inventory in time. Ask again.")
     return "\n".join(lines)
 
 
@@ -100,6 +113,48 @@ def _describe_quests(quests: Any) -> list[str]:
         left_out = len(miscellaneous_objectives) - len(shown)
         more = f"{OBJECTIVE_SEPARATOR}and {left_out} more" if left_out > 0 else ""
         lines.append(f"- Miscellaneous: {OBJECTIVE_SEPARATOR.join(shown)}{more}")
+    return lines
+
+
+def _describe_gear(player: Any, companion: Any) -> str:
+    """What the companion holds and how much gold both have, as far as the game sent it"""
+    parts: list[str] = []
+    if isinstance(companion, dict):
+        if "holds" in companion:
+            parts.append("you hold " + (" and ".join(companion["holds"]) if len(companion["holds"]) > 0 else "nothing"))
+        if "gold" in companion:
+            parts.append(f"your gold {companion['gold']}")
+    if isinstance(player, dict) and "gold" in player:
+        parts.append(f"the player's gold {player['gold']}")
+    if len(parts) == 0:
+        return ""
+    return "Gear: " + ", ".join(parts)
+
+
+def _describe_inventory(title: str, inventory: Any) -> list[str]:
+    """One line per kind of item (weapons, potions ...). After each item its ID for the commands equip, unequip, give and take"""
+    if not isinstance(inventory, dict):
+        return [f"{title}: the game did not send it."]
+    items = inventory.get("items", [])
+    if len(items) == 0:
+        return [f"{title}: empty"]
+    lines: list[str] = [f"{title}:"]
+    for group in list(ITEM_GROUPS.values()) + [OTHER_ITEM_GROUP]:
+        texts: list[str] = []
+        for item in items:
+            if item.get("group") != group:
+                continue
+            text = f"{item.get('name')} {item.get('id')}"
+            if item.get("count", 1) != 1:
+                text += f" x{item['count']}"
+            if item.get("equipped"):
+                text += " (equipped)"
+            texts.append(text)
+        if len(texts) > 0:
+            lines.append(f"- {group}: {', '.join(texts)}")
+    total = inventory.get("total", 0)
+    if total > MAX_INVENTORY_ITEMS:
+        lines.append(f"- The list is cut off: only the first {MAX_INVENTORY_ITEMS} of {total} kinds of items were checked.")
     return lines
 
 
