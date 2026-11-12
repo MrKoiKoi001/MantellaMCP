@@ -203,8 +203,12 @@ def test_state_text_describes_the_companion():
         "FF000A01 Bandit, 12 m ahead-left, from you 13 m behind, hostile",
         "FF000A02 Bandit, 20 m behind-right, from you 19 m ahead, hostile",
         "FF000A03 Bandit Outlaw, dead, 5 m ahead, from you 8 m behind-left",
+        "Places: Pelagia Farm (farm) 120 m ahead-left, Whiterun Stables (stable) 260 m behind",
+        "Doors: Warmaiden's 20 m right, Dragonsreach 140 m ahead-left",
         "Quests:",
-        "- Before the Storm (tracked): Talk to the Jarl of Whiterun",
+        # The Jarl is north of the player, who faces north-east. Lydia faces south, so the door is behind her
+        "- Before the Storm (tracked): Talk to the Jarl of Whiterun "
+        "[target Jarl Balgruuf: behind the door to Dragonsreach, 140 m ahead-left, from you 141 m behind]",
         "- The Golden Claw: Find the secret of Bleak Falls Barrow; Retrieve the Golden Claw",
         "- Miscellaneous: Buy a sword from Alvor",
     ]
@@ -657,3 +661,64 @@ def test_loot_carries_the_item_and_its_outcome_is_told_once():
     assert "alive" in run_command(consts.ACTION_LOOT, "000F6845", "")[1]
     assert run_command(consts.ACTION_LOOT, "00000099", "")[0] is False
     assert walk_target_after(consts.ACTION_LOOT, "FF000A03") == "FF000A03"
+
+
+def test_quest_targets_and_places():
+    from src.companion import game_state
+    from src.companion.state_text import describe_state
+
+    def lines_for(raw: dict) -> list[str]:
+        state = game_state.read_game_state(raw)
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()
+
+    def line(*parts: object) -> str:
+        return "\t".join(str(part) for part in parts)
+
+    raw: dict = {
+        game_state.KEY_WORLD_VALUES: [0, 600, 3, 0],
+        # The second line is broken and left out, so the third quest of the game is the second one here
+        game_state.KEY_QUESTS: [line(1, 1, "Bleak Falls Barrow", "Retrieve the Dragonstone", "Talk to Farengar"), "broken line",
+                                line(1, 6, "", "Bring the claw to Lucan")],
+        game_state.KEY_QUEST_TARGETS: [
+            line(0, 0, 0, 35, 90, "Dragonstone", ""), line(0, 1, 2, 0, 0, "Farengar Secret-Fire", "Dragonsreach"),
+            line(2, 0, 1, 12, -90, "Lucan Valerius", "Riverwood Trader"), line(2, 0, 2, 0, 0, "", ""),
+            # Left out: a quest and an objective that do not exist, an unknown kind, too few parts, no number
+            line(1, 0, 0, 5, 0, "Nobody", ""), line(0, 7, 0, 5, 0, "Nobody", ""), line(0, 0, 9, 5, 0, "Nobody", ""),
+            line(0, 0, 0, 5, 0, "Nobody"), line(0, 0, 0, "near", 0, "Nobody", ""),
+        ],
+    }
+    state = game_state.read_game_state(raw)
+    assert state["quests"][0]["targets"] == [
+        {"objective": 0, "kind": "here", "name": "Dragonstone", "distance_meters": 35, "angle_degrees": 90},
+        {"objective": 1, "kind": "elsewhere", "name": "Farengar Secret-Fire", "place": "Dragonsreach"},
+    ]
+    assert lines_for(raw)[-3:] == [
+        "Quests:",
+        "- Bleak Falls Barrow (tracked): Retrieve the Dragonstone [target Dragonstone: 35 m right]; "
+        "Talk to Farengar [target Farengar Secret-Fire: not in this area, in Dragonsreach]",
+        "- Miscellaneous: Bring the claw to Lucan [target Lucan Valerius: behind the door to Riverwood Trader, 12 m left] "
+        "[target: not in this area]",
+    ]
+    # No list of targets (an older plugin, or no tracked quest has one) leaves the quests as they were
+    del raw[game_state.KEY_QUEST_TARGETS]
+    assert "targets" not in game_state.read_game_state(raw)["quests"][0]
+
+    # Places: map markers and doors each get a line. Indoors the plugin sends doors only
+    places = {game_state.KEY_PLACES: [
+        line(0, 120, -60, 13, 1, "Pelagia Farm"), line(0, 290, 10, 39, 0, "Dragonsreach"), line(0, 150, 100, 99, 0, "Odd Marker"),
+        line(1, 20, 90, 0, 0, "Warmaiden's"), line(1, 44, 180, 0, 0, "Skyrim"),
+        # Left out: an unknown kind, no name, too few parts
+        line(7, 5, 0, 0, 0, "Nothing"), line(1, 5, 0, 0, 0, " "), line(1, 5, 0, 0),
+    ]}
+    assert game_state.read_game_state(places)["places"][:2] == [
+        {"kind": "marker", "name": "Pelagia Farm", "distance_meters": 120, "angle_degrees": -60, "type": "farm", "known": True},
+        {"kind": "marker", "name": "Dragonsreach", "distance_meters": 290, "angle_degrees": 10, "type": "castle", "known": False},
+    ]
+    assert lines_for(places)[-2:] == [
+        "Places: Pelagia Farm (farm) 120 m ahead-left, Dragonsreach (castle) 290 m ahead, Odd Marker 150 m right",
+        "Doors: Warmaiden's 20 m right, Skyrim 44 m behind",
+    ]
+    assert lines_for({game_state.KEY_PLACES: [line(1, 6, 0, 0, 0, "Dragonsreach, Jarl's Quarters")]})[-1] == "Doors: Dragonsreach, Jarl's Quarters 6 m ahead"
+    # An older game mod sends no places at all, and then nothing is said about them
+    assert "places" not in game_state.read_game_state({game_state.KEY_LOCATION: "Riverwood"})
+    assert game_state.read_game_state({game_state.KEY_PLACES: []})["places"] == []

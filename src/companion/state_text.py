@@ -8,7 +8,8 @@ from typing import Any
 
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.game_state import (ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
-                                      MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP)
+                                      MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
+                                      TARGET_BEHIND_DOOR, TARGET_ELSEWHERE)
 
 DEGREES_PER_DIRECTION: float = 45.0
 # Clockwise, starting straight ahead of whoever looks
@@ -19,6 +20,9 @@ COMPASS_DIRECTIONS: list[str] = ["north", "north-east", "east", "south-east", "s
 MAX_QUEST_LINES: int = 8
 MAX_MISCELLANEOUS_OBJECTIVES: int = 6
 OBJECTIVE_SEPARATOR: str = "; "
+# A long list of places must not fill the conversation of the AI either. The game sends the nearest ones first
+MAX_PLACE_MARKERS: int = 6
+MAX_PLACE_DOORS: int = 6
 # Up to this age a line that was heard is given in seconds, after that in minutes
 MAX_AGE_IN_SECONDS: int = 90
 SECONDS_PER_MINUTE: int = 60
@@ -79,6 +83,7 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.append("Nearby:")
         for character in nearby:
             lines.append(_describe_nearby_character(character))
+    lines.extend(_describe_places(state.get("places")))
     lines.extend(_describe_quests(state.get("quests")))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
     wanted = state_result.get("inventory_wanted")
@@ -102,7 +107,7 @@ def _describe_quests(quests: Any) -> list[str]:
     miscellaneous_objectives: list[str] = []
     for quest in quests:
         if quest.get("miscellaneous"):
-            miscellaneous_objectives.extend(quest.get("objectives", []))
+            miscellaneous_objectives.extend(_objective_texts(quest))
     if len(named_quests) == 0 and len(miscellaneous_objectives) == 0:
         return ["Quests: none"]
 
@@ -111,7 +116,7 @@ def _describe_quests(quests: Any) -> list[str]:
         title = str(quest.get("name"))
         if quest.get("tracked"):
             title += " (tracked)"
-        lines.append(f"- {title}: {OBJECTIVE_SEPARATOR.join(quest.get('objectives', []))}")
+        lines.append(f"- {title}: {OBJECTIVE_SEPARATOR.join(_objective_texts(quest))}")
     left_out = len(named_quests) - MAX_QUEST_LINES
     if left_out > 0:
         lines.append(f"- and {left_out} more")
@@ -120,6 +125,49 @@ def _describe_quests(quests: Any) -> list[str]:
         left_out = len(miscellaneous_objectives) - len(shown)
         more = f"{OBJECTIVE_SEPARATOR}and {left_out} more" if left_out > 0 else ""
         lines.append(f"- Miscellaneous: {OBJECTIVE_SEPARATOR.join(shown)}{more}")
+    return lines
+
+
+def _objective_texts(quest: dict[str, Any]) -> list[str]:
+    """The texts of the open objectives of a quest. An objective whose target the game knows gets it in brackets behind it"""
+    texts: list[str] = [str(objective) for objective in quest.get("objectives", [])]
+    for target in quest.get("targets", []):
+        place = target.get("objective")
+        if isinstance(place, int) and 0 <= place < len(texts):
+            texts[place] += f" [{_describe_target(target)}]"
+    return texts
+
+
+def _describe_target(target: dict[str, Any]) -> str:
+    """Where the target of an objective is: what the compass of the game points to"""
+    name = str(target.get("name", "")).strip()
+    title = "target" if name == "" else f"target {name}"
+    place = str(target.get("place", "")).strip()
+    if target.get("kind") == TARGET_ELSEWHERE:
+        return f"{title}: not in this area" + ("" if place == "" else f", in {place}")
+    where = _describe_where(target) + _describe_from_companion(target)
+    if target.get("kind") == TARGET_BEHIND_DOOR:
+        door = "behind a door" if place == "" else f"behind the door to {place}"
+        return f"{title}: {door}, {where}"
+    return f"{title}: {where}"
+
+
+def _describe_places(places: Any) -> list[str]:
+    """Map markers and doors around the player, seen from the player. No lines at all if the game sent no places"""
+    if not isinstance(places, list):
+        return []
+    lines: list[str] = []
+    for title, kind, limit in (("Places", PLACE_MARKER, MAX_PLACE_MARKERS), ("Doors", PLACE_DOOR, MAX_PLACE_DOORS)):
+        texts: list[str] = []
+        for place in places:
+            if place.get("kind") != kind or len(texts) >= limit:
+                continue
+            text = str(place.get("name"))
+            if "type" in place:
+                text += f" ({place['type']})"
+            texts.append(f"{text} {_describe_where(place)}")
+        if len(texts) > 0:
+            lines.append(f"{title}: {', '.join(texts)}")
     return lines
 
 
@@ -260,14 +308,20 @@ def _describe_nearby_character(character: dict[str, Any]) -> str:
     line = f"{character.get('ref_id')} {character.get('name')}, "
     if character.get("dead"):
         line += "dead, "
-    line += _describe_where(character)
-    if "distance_from_companion_meters" in character:
-        line += f", from you {character['distance_from_companion_meters']} m"
-        if "angle_from_companion_degrees" in character:
-            line += f" {relative_direction(character['angle_from_companion_degrees'])}"
+    line += _describe_where(character) + _describe_from_companion(character)
     if character.get("hostile"):
         line += ", hostile"
     return line
+
+
+def _describe_from_companion(character: dict[str, Any]) -> str:
+    """The same seen from the companion, as an addition to _describe_where. Empty if that is not known"""
+    if "distance_from_companion_meters" not in character:
+        return ""
+    text = f", from you {character['distance_from_companion_meters']} m"
+    if "angle_from_companion_degrees" in character:
+        text += f" {relative_direction(character['angle_from_companion_degrees'])}"
+    return text
 
 
 def _describe_where(character: dict[str, Any]) -> str:

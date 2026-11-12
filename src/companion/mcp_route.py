@@ -10,7 +10,7 @@ from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.7"
+SERVER_VERSION: str = "0.8"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -85,9 +85,17 @@ TOOLS: list[dict[str, Any]] = [
             "ahead, ahead-right, right, behind-right, behind, behind-left, left, ahead-left. "
             "Use the player's view when the player points at someone, and your own view when you talk about where you stand. "
             "Outdoors the list can miss someone, so get STATE once more if a character the player talks about is not in it. "
+            "'Places': the nearest places of the map within about 300 meters of the player (farms, mills, stables, towers, "
+            "caves ...), also ones the player has not discovered yet, with distance and direction from the player. "
+            "'Doors': the nearest doors that lead into a building, a cave or out of town, named by where they lead. "
+            "Use both to say where you are and where to go instead of coordinates. Indoors there are only doors. "
             "'Quests': the open quests from the player's journal, each with its open objectives. The ones the player "
             "tracks come first and are marked. 'Miscellaneous' collects the small objectives without a quest name. "
             "The lines are missing if the game cannot tell the quests. "
+            "Behind an objective of a tracked quest, in brackets, is its target (what the compass of the game points to): "
+            "its name, distance and direction from the player and after 'from you' from your character, so you can lead the way. "
+            "'behind the door to ...' means the distance and direction are those of the door you have to go through, "
+            "'not in this area' that the target is somewhere else, with the name of that place if the game has one. "
             "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
             "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
             "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "

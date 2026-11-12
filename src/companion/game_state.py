@@ -30,6 +30,19 @@ KEY_WORLD_VALUES: str = "world"
 # tracked (1 or 0), type of the quest as the game numbers it, name of the quest, then the text of each open objective.
 # The SKSE plugin of the game mod writes these lines (GetOpenQuests in plugin.cpp of the plugin repository)
 KEY_QUESTS: str = "quests"
+# One text per target of a tracked quest (what the compass of the game points to). Its parts are separated by tabs:
+# place of the quest in the list above (from 0), place of the objective in that quest (from 0), where the target is
+# (see TARGET_KINDS), distance to the player in meters, angle from where the player faces in degrees (negative = left)
+# - for a target behind a door these are the distance and angle of that door, for a target somewhere else both are 0 -,
+# name of the target (can be empty), name of the place behind the door or of the place the target is in (can be empty).
+# The SKSE plugin of the game mod writes these lines (GetQuestTargets in plugin.cpp of the plugin repository)
+KEY_QUEST_TARGETS: str = "quest_targets"
+# One text per place around the player: map markers first, then doors that lead into another area, each nearest first.
+# Its parts are separated by tabs: kind (see PLACE_KINDS), distance to the player in meters, angle as above,
+# for a map marker the kind of place as the game numbers it (see MARKER_TYPES), for a map marker 1 if the player
+# has been there, name of the place (for a door: of the place it leads to).
+# The SKSE plugin of the game mod writes these lines (GetNearbyPlaces in plugin.cpp of the plugin repository)
+KEY_PLACES: str = "places"
 # One text per line a character near the player said since the last state (the subtitles of the game), oldest first.
 # Its parts are separated by tabs: how many seconds ago, ref ID of the speaker as eight hex digits, name of the speaker,
 # what was said. A line the player picked in a dialogue menu has the player as its speaker.
@@ -90,6 +103,27 @@ QUEST_PART_SEPARATOR: str = "\t"
 QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
 # The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
 QUEST_TYPE_MISCELLANEOUS: int = 6
+TARGET_PART_COUNT: int = 7
+TARGET_HERE: str = "here"
+TARGET_BEHIND_DOOR: str = "door"
+TARGET_ELSEWHERE: str = "elsewhere"
+TARGET_KINDS: dict[int, str] = {0: TARGET_HERE, 1: TARGET_BEHIND_DOOR, 2: TARGET_ELSEWHERE}
+PLACE_PART_COUNT: int = 6
+PLACE_MARKER: str = "marker"
+PLACE_DOOR: str = "door"
+PLACE_KINDS: dict[int, str] = {0: PLACE_MARKER, 1: PLACE_DOOR}
+# What the map markers of the game stand for (RE::MARKER_TYPE in CommonLibSSE-NG, file ExtraMapMarker.h).
+# From 35 to 52 the game has one marker per hold capital and one per castle in it
+MARKER_TYPES: dict[int, str] = {
+    1: "city", 2: "town", 3: "settlement", 4: "cave", 5: "camp", 6: "fort", 7: "Nordic ruin", 8: "Dwemer ruin",
+    9: "shipwreck", 10: "grove", 11: "landmark", 12: "dragon lair", 13: "farm", 14: "wood mill", 15: "mine",
+    16: "Imperial camp", 17: "Stormcloak camp", 18: "standing stone", 19: "wheat mill", 20: "smelter", 21: "stable",
+    22: "Imperial tower", 23: "clearing", 24: "pass", 25: "altar", 26: "rock", 27: "lighthouse", 28: "Orc stronghold",
+    29: "giant camp", 30: "shack", 31: "Nordic tower", 32: "Nordic dwelling", 33: "docks", 34: "shrine",
+    53: "temple", 54: "town", 55: "standing stone", 56: "Telvanni tower", 59: "castle",
+}
+FIRST_CAPITAL_MARKER_TYPE: int = 35
+LAST_CAPITAL_MARKER_TYPE: int = 52
 VALUES_PER_NEARBY_CHARACTER: int = 5
 TIME_VALUE_COUNT: int = 2
 NAME_PLACE_SEPARATOR: str = ":"
@@ -143,7 +177,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         # Without the SKSE plugin the game cannot tell the quests. Then there is no 'quests' in the result,
         # so that 'no open quests' (an empty list) can be told apart from 'not known'
         if len(world_values) > WORLD_PLACE_OF_PLUGIN_VERSION and world_values[WORLD_PLACE_OF_PLUGIN_VERSION] > 0:
-            state["quests"] = _read_quests(raw.get(KEY_QUESTS))
+            state["quests"] = _read_quests(raw.get(KEY_QUESTS), raw.get(KEY_QUEST_TARGETS))
         # Same idea: 'hearing' is only in the result if the game mod knows about listening at all
         if len(world_values) > WORLD_PLACE_OF_HEARING:
             state["hearing"] = world_values[WORLD_PLACE_OF_HEARING] != 0
@@ -182,6 +216,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["report"] = report.strip()
 
     state["nearby"] = _read_nearby(raw)
+    # Only a game mod whose plugin knows about places sends this list. Without it nothing is said about places
+    if isinstance(raw.get(KEY_PLACES), list):
+        state["places"] = _read_places(raw.get(KEY_PLACES))
     _add_view_of_companion(state)
 
     times = _numbers(raw.get(KEY_TIMES))
@@ -219,12 +256,18 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     return companion
 
 
-def _read_quests(raw_quests: Any) -> list[dict[str, Any]]:
-    """The open quests in the order the game sent them (tracked ones first)"""
+def _read_quests(raw_quests: Any, raw_targets: Any = None) -> list[dict[str, Any]]:
+    """The open quests in the order the game sent them (tracked ones first)
+
+    Args:
+        raw_targets: Where the targets of the tracked quests are (KEY_QUEST_TARGETS). A quest with targets gets 'targets'
+    """
     quests: list[dict[str, Any]] = []
     if not isinstance(raw_quests, list):
         return quests
-    for entry in raw_quests:
+    # The targets name their quest by its place in the list of the game, and a broken line is left out here
+    quests_by_place: dict[int, dict[str, Any]] = {}
+    for place, entry in enumerate(raw_quests):
         if not isinstance(entry, str):
             continue
         parts = entry.split(QUEST_PART_SEPARATOR)
@@ -243,7 +286,82 @@ def _read_quests(raw_quests: Any) -> list[dict[str, Any]]:
             "miscellaneous": quest_type == QUEST_TYPE_MISCELLANEOUS or name.strip() == "",
             "objectives": objectives,
         })
+        quests_by_place[place] = quests[-1]
+    _add_quest_targets(quests_by_place, raw_targets)
     return quests
+
+
+def _add_quest_targets(quests_by_place: dict[int, dict[str, Any]], raw_targets: Any) -> None:
+    """Gives every quest its targets as 'targets': each with 'objective' (place of its objective in 'objectives'), 'kind',
+    'name', and depending on the kind 'distance_meters' and 'angle_degrees' (of the target or of the door to it) and 'place'"""
+    if not isinstance(raw_targets, list):
+        return
+    for entry in raw_targets:
+        if not isinstance(entry, str):
+            continue
+        parts = entry.split(QUEST_PART_SEPARATOR)
+        if len(parts) != TARGET_PART_COUNT:
+            continue
+        numbers = [_whole_number(text) for text in parts[:5]]
+        if None in numbers:
+            continue
+        quest_place, objective_place, kind_number, distance, angle = numbers
+        quest = quests_by_place.get(quest_place)
+        if quest is None or kind_number not in TARGET_KINDS or not 0 <= objective_place < len(quest["objectives"]):
+            continue
+        target: dict[str, Any] = {"objective": objective_place, "kind": TARGET_KINDS[kind_number], "name": parts[5].strip()}
+        if target["kind"] != TARGET_ELSEWHERE:
+            target["distance_meters"] = distance
+            target["angle_degrees"] = angle
+        if target["kind"] != TARGET_HERE:
+            target["place"] = parts[6].strip()
+        quest.setdefault("targets", []).append(target)
+
+
+def _read_places(raw_places: Any) -> list[dict[str, Any]]:
+    """The places around the player in the order the game sent them (map markers first, then doors, each nearest first)"""
+    places: list[dict[str, Any]] = []
+    if not isinstance(raw_places, list):
+        return places
+    for entry in raw_places:
+        if not isinstance(entry, str):
+            continue
+        # The name comes last and is not split any further
+        parts = entry.split(QUEST_PART_SEPARATOR, PLACE_PART_COUNT - 1)
+        if len(parts) != PLACE_PART_COUNT:
+            continue
+        numbers = [_whole_number(text) for text in parts[:5]]
+        name = parts[5].strip()
+        if None in numbers or name == "":
+            continue
+        kind_number, distance, angle, marker_type, known = numbers
+        if kind_number not in PLACE_KINDS:
+            continue
+        place: dict[str, Any] = {"kind": PLACE_KINDS[kind_number], "name": name, "distance_meters": distance, "angle_degrees": angle}
+        if place["kind"] == PLACE_MARKER:
+            marker_name = _marker_type_name(marker_type)
+            if marker_name != "":
+                place["type"] = marker_name
+            place["known"] = known != 0
+        places.append(place)
+    return places
+
+
+def _marker_type_name(marker_type: int) -> str:
+    """What kind of place a map marker stands for, or an empty text if that says nothing"""
+    if FIRST_CAPITAL_MARKER_TYPE <= marker_type <= LAST_CAPITAL_MARKER_TYPE:
+        # The game numbers them in pairs: first the castle of a hold capital, then the capital itself
+        return "castle" if (marker_type - FIRST_CAPITAL_MARKER_TYPE) % 2 == 0 else "city"
+    return MARKER_TYPES.get(marker_type, "")
+
+
+def _whole_number(text: str) -> int | None:
+    """Returns the number in the text (digits with an optional minus sign in front), or None"""
+    cleaned = text.strip()
+    digits = cleaned[1:] if cleaned.startswith("-") else cleaned
+    if not digits.isdecimal():
+        return None
+    return int(cleaned)
 
 
 def _hand_name(hand: Any) -> str:
@@ -305,7 +423,7 @@ def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:
 
 
 def _add_view_of_companion(state: dict[str, Any]) -> None:
-    """Adds where the player and the characters nearby are, seen from the companion
+    """Adds where the player, the characters nearby and the targets of quests are, seen from the companion
 
     The game measures everything from the player. Asking it again from the companion would cost two more
     questions per character, so this is calculated here: from where the player faces, and from the distance
@@ -324,7 +442,9 @@ def _add_view_of_companion(state: dict[str, Any]) -> None:
 
     # Seen from the companion, the player is in the opposite direction of where the companion is seen from the player
     companion["player_angle_degrees"] = _signed_angle(player_facing + companion["angle_degrees"] + 180 - companion_facing)
-    for character in state["nearby"]:
+    # A target with a distance is in the area of the player, or it is behind a door that is
+    targets = [target for quest in state.get("quests", []) for target in quest.get("targets", []) if "distance_meters" in target]
+    for character in state["nearby"] + targets:
         east, north = _map_offset(character["distance_meters"], player_facing + character["angle_degrees"])
         east -= companion_east
         north -= companion_north

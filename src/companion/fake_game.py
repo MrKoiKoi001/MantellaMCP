@@ -32,7 +32,20 @@ QUESTS: list[list[str]] = [
     ["0", "8", "The Golden Claw", "Find the secret of Bleak Falls Barrow", "Retrieve the Golden Claw"],
     ["0", "6", "Favor for Alvor", "Buy a sword from Alvor"],
 ]
-NATIVE_PLUGIN_VERSION: int = 2
+# Where the targets of the tracked quest are as the plugin writes them: place of the quest, place of the objective,
+# where (0 = here, 1 = behind a door, 2 = elsewhere), distance and angle from the player, name of the target, name of the place
+QUEST_TARGETS: list[list[str]] = [
+    ["0", "0", "1", "140", "-40", "Jarl Balgruuf", "Dragonsreach"],
+]
+# The places around the player as the plugin writes them: kind (0 = map marker, 1 = door), distance and angle from the player,
+# kind of map marker as the game numbers it, 1 if the player has been there, name
+PLACES: list[list[str]] = [
+    ["0", "120", "-60", "13", "1", "Pelagia Farm"],
+    ["0", "260", "170", "21", "0", "Whiterun Stables"],
+    ["1", "20", "90", "0", "0", "Warmaiden's"],
+    ["1", "140", "-40", "0", "0", "Dragonsreach"],
+]
+NATIVE_PLUGIN_VERSION: int = 3
 # What was said since the last state as the SKSE plugin writes it: seconds ago, ref ID of the speaker, name, text
 HEARD: list[list[str]] = [
     ["12", "00000014", "Dragonborn", "What do you know about dragons?"],
@@ -105,6 +118,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         # Snow at 14:35
         game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
+        game_state.KEY_QUEST_TARGETS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUEST_TARGETS],
+        game_state.KEY_PLACES: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in PLACES],
         game_state.KEY_COMPANION_NAME: "Lydia",
         game_state.KEY_COMPANION_VALUES: [
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,
