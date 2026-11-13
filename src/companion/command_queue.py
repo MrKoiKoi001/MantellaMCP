@@ -36,6 +36,9 @@ class CompanionCommandQueue:
 
     def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0) -> None:
         self.__hold_seconds: float = hold_seconds
+        # Whether the game mod is to cut off the sentences the game lets the companion say on its own.
+        # Goes along with every command, the game mod takes it from report_state
+        self.mutes_game_lines: bool = False
         self.__connection_grace_seconds: float = connection_grace_seconds
         self.__changed: asyncio.Condition = asyncio.Condition()
         self.__pending_commands: list[dict[str, Any]] = []
@@ -150,6 +153,7 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_SPACE: int(space),
                 consts.KEY_COMMAND_FIND: find,
                 consts.KEY_COMMAND_TALK: talk,
+                consts.KEY_COMMAND_MUTE: int(self.mutes_game_lines),
             }
             self.__pending_commands.append(command)
             self.__changed.notify_all()

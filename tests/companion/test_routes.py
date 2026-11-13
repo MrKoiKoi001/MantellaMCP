@@ -1950,3 +1950,19 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
     assert (settings.voice_volume, settings.talk_gestures) == (250, False)
     file.write_text("[companion]\nvoice_volume = 9000\n", encoding="utf-8")
     assert load_settings(str(file))[0].voice_volume == 400 and load_settings(str(file))[0].talk_gestures is True
+
+    # The setting mute_game_lines goes to the game with every command, which takes it from report_state
+    assert load_settings(str(file))[0].mute_game_lines is False
+    file.write_text("[companion]\nmute_game_lines = on\n", encoding="utf-8")
+    assert load_settings(str(file))[0].mute_game_lines is True
+    for wanted in (True, False):
+        with TestClient(create_app(TOKEN, hold_seconds=5, mutes_game_lines=wanted)) as client:
+            received: list[dict] = []
+
+            def poll():
+                received.extend(client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()}).json()[consts.KEY_COMMANDS])
+
+            threading.Thread(target=poll, daemon=True).start()
+            time.sleep(0.3)
+            rpc(client, "tools/call", {"name": "STATE", "arguments": {}})
+            assert received[0][consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE and received[0][consts.KEY_COMMAND_MUTE] == int(wanted)

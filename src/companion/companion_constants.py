@@ -145,6 +145,9 @@ class companion_constants:
     # say: the animation event of the game that moves the hands of the companion while it talks ("" = none).
     # The server picks one of TALK_EVENTS for every sentence if the setting talk_gestures is on
     KEY_COMMAND_TALK: str = "companion_talk"
+    # report_state: 1 = the game mod is to cut off the sentences the game lets the companion say on its own
+    # (the setting mute_game_lines)
+    KEY_COMMAND_MUTE: str = "companion_mute"
     TALK_EVENTS: list[str] = ["IdleDialogueMovingTalkA", "IdleDialogueMovingTalkB", "IdleDialogueMovingTalkC", "IdleDialogueMovingTalkD"]
     # The companion puts its weapon away and keeps it away although the player draws one, until draw
     ACTION_SHEATHE: str = "sheathe"
