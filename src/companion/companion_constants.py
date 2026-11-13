@@ -36,12 +36,20 @@ class companion_constants:
     # For report_state: 1 if the state should carry the things close to the player (furniture, containers, loose items).
     # KEY_COMMAND_COUNT then says how many characters (and things of each kind) the state should list at most
     KEY_COMMAND_THINGS: str = PREFIX + "things"
+    # For report_state: 1 if the lists of the state (characters, things, places, quest targets) should be seen from
+    # the companion instead of from the player
+    KEY_COMMAND_AROUND: str = PREFIX + "around"
+    # What the AI can name as the centre of those lists
+    AROUND_PLAYER: str = "player"
+    AROUND_COMPANION: str = "you"
+    AROUND_CHOICES: list[str] = [AROUND_PLAYER, AROUND_COMPANION]
     INVENTORY_OWN: str = "own"
     INVENTORY_PLAYER: str = "player"
     INVENTORY_BOTH: str = "both"
     # Internal: what the dead character carries or the container holds that the target of the report_state command names
     INVENTORY_CORPSE: str = "corpse"
-    # For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything
+    # For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything.
+    # For gesture: the ID of the animation to play (see gestures.py). Both 0 = end the gesture
     KEY_COMMAND_ITEM_HIGH: str = PREFIX + "item_high"
     KEY_COMMAND_ITEM_LOW: str = PREFIX + "item_low"
     INVENTORY_CHOICES: list[str] = [INVENTORY_OWN, INVENTORY_PLAYER, INVENTORY_BOTH]
@@ -61,6 +69,10 @@ class companion_constants:
     ACTION_MOVE_TO: str = "move_to"
     ACTION_LOOT: str = "loot"
     ACTION_SIT: str = "sit"
+    ACTION_LOOK_AT: str = "look_at"
+    ACTION_GESTURE: str = "gesture"
+    # For gesture: what 'detail' says to end a gesture that goes on and on
+    GESTURE_STOP_TEXT: str = "stop"
     ACTION_EQUIP: str = "equip"
     ACTION_UNEQUIP: str = "unequip"
     ACTION_GIVE: str = "give"
@@ -78,6 +90,8 @@ class companion_constants:
         ACTION_MOVE_TO,
         ACTION_LOOT,
         ACTION_SIT,
+        ACTION_LOOK_AT,
+        ACTION_GESTURE,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
         ACTION_GIVE,

@@ -14,19 +14,24 @@ from src.companion.ref_ids import format_ref_id, parse_ref_id
 KEY_LOCATION: str = "location"
 KEY_PLAYER_NAME: str = "player_name"
 # health in percent, in combat (0 or 1), position x, y and z in game units,
-# direction the player faces in degrees (0 = north, 90 = east), indoors (0 or 1)
+# direction the player faces in degrees (0 = north, 90 = east), indoors (0 or 1),
+# weapon drawn (0 or 1; older game mods leave this number out)
 KEY_PLAYER_VALUES: str = "player"
 KEY_COMPANION_NAME: str = "companion_name"
 # ref ID, health in percent, dead, in combat, waiting, in the loaded area (each 0 or 1), distance to the player in meters,
 # angle from where the player faces to the companion in degrees (negative = left), ref ID of its combat target (0 = none),
 # direction the companion faces in degrees (0 = north, 90 = east), retreating because of the command flee (0 or 1),
 # ref ID of the character or thing it is walking to because of the commands move_to, loot or sit (0 = none),
-# sitting as the game tells it (see SIT_STATES_SEATED; older game mods leave this number out)
+# sitting as the game tells it (see SIT_STATES_SEATED; older game mods leave this number out),
+# weapon drawn (0 or 1), ref ID of what it looks at because of the command look_at (0 = nothing in particular;
+# older game mods leave both numbers out)
 KEY_COMPANION_VALUES: str = "companion"
 # weather outside (see WEATHER_NAMES, -1 = unknown), time of day in minutes since midnight,
 # interface version of the SKSE plugin of the game mod (0 = not loaded, so the game cannot tell the quests),
 # whether that plugin listens to what characters say (0 or 1),
-# number of the protocol the game mod speaks (see GAME_PROTOCOL; older game mods leave this number out)
+# number of the protocol the game mod speaks (see GAME_PROTOCOL; older game mods leave this number out),
+# whether the lists of this state are seen from the companion (1) or from the player (0; older game mods leave this out).
+# "The viewer" below is the one of the two from whom they are seen
 KEY_WORLD_VALUES: str = "world"
 # One text per open quest of the journal, tracked ones first. Its parts are separated by tabs:
 # tracked (1 or 0), type of the quest as the game numbers it, name of the quest, then the text of each open objective.
@@ -34,19 +39,22 @@ KEY_WORLD_VALUES: str = "world"
 KEY_QUESTS: str = "quests"
 # One text per target of a tracked quest (what the compass of the game points to). Its parts are separated by tabs:
 # place of the quest in the list above (from 0), place of the objective in that quest (from 0), where the target is
-# (see TARGET_KINDS), distance to the player in meters, angle from where the player faces in degrees (negative = left)
+# (see TARGET_KINDS), distance to the viewer in meters, angle from where the viewer faces in degrees (negative = left)
 # - for a target behind a door these are the distance and angle of that door, for a target somewhere else both are 0 -,
-# name of the target (can be empty), name of the place behind the door or of the place the target is in (can be empty).
+# name of the target (can be empty), name of the place behind the door or of the place the target is in (can be empty),
+# ref ID to walk to as eight hex digits: the target, or the door to it, 00000000 for a target somewhere else
+# (older plugins leave this part out).
 # The SKSE plugin of the game mod writes these lines (GetQuestTargets in plugin.cpp of the plugin repository)
 KEY_QUEST_TARGETS: str = "quest_targets"
-# One text per place around the player: map markers first, then doors that lead into another area, each nearest first.
-# Its parts are separated by tabs: kind (see PLACE_KINDS), distance to the player in meters, angle as above,
+# One text per place around the viewer: map markers first, then doors that lead into another area, each nearest first.
+# Its parts are separated by tabs: kind (see PLACE_KINDS), ref ID of the marker or the door as eight hex digits
+# (older plugins leave this part out), distance to the viewer in meters, angle as above,
 # for a map marker the kind of place as the game numbers it (see MARKER_TYPES), for a map marker 1 if the player
 # has been there, name of the place (for a door: of the place it leads to).
 # The SKSE plugin of the game mod writes these lines (GetNearbyPlaces in plugin.cpp of the plugin repository)
 KEY_PLACES: str = "places"
-# Only when the server asked for it. One text per thing close to the player: furniture first, then containers, then items that lie around, each nearest first.
-# Its parts are separated by tabs: kind (see THING_KINDS), ref ID as eight hex digits, distance to the player in meters,
+# Only when the server asked for it. One text per thing close to the viewer: furniture first, then containers, then items that lie around, each nearest first.
+# Its parts are separated by tabs: kind (see THING_KINDS), ref ID as eight hex digits, distance to the viewer in meters,
 # angle as above, for furniture 1 if a character can sit on it and for a container 1 if it is locked, name.
 # The SKSE plugin of the game mod writes these lines (GetNearbyThings in plugin.cpp of the plugin repository)
 KEY_THINGS: str = "things"
@@ -55,8 +63,8 @@ KEY_THINGS: str = "things"
 # what was said. A line the player picked in a dialogue menu has the player as its speaker.
 # The SKSE plugin of the game mod writes these lines (TakeHeardLines in plugin.cpp of the plugin repository)
 KEY_HEARD: str = "heard"
-# Five numbers per character, living or dead: ref ID, distance to the player in meters,
-# angle from where the player faces to the character in degrees (negative = left), hostile to the player (0 or 1), dead (0 or 1)
+# Five numbers per character, living or dead: ref ID, distance to the viewer in meters,
+# angle from where the viewer faces to the character in degrees (negative = left), hostile to the player (0 or 1), dead (0 or 1)
 KEY_NEARBY_VALUES: str = "nearby"
 # One text per character: its place in the list above, a colon and its name, eg "0:Bandit".
 # The HTTP plugin of the game drops names it cannot send without a word, so the place cannot be counted
@@ -78,23 +86,30 @@ KEY_INVENTORY_PLAYER: str = "inventory_player"
 KEY_INVENTORY_CORPSE: str = "inventory_corpse"
 KEY_CORPSE: str = "corpse"
 KEY_CORPSE_NAME: str = "corpse_name"
-# What became of the commands loot and move_to since the last state, as text for the AI. Missing if that is nothing
+# What became of the commands loot, move_to and sit since the last state, as text for the AI. Missing if that is nothing
 KEY_REPORT: str = "report"
 NAMES_SUFFIX: str = "_names"
 # How long the game mod took in milliseconds: for the whole state, and for the characters nearby alone
 KEY_TIMES: str = "times_ms"
 
-PLAYER_VALUE_COUNT: int = 7
-COMPANION_VALUE_COUNT: int = 13
-# Older game mods say nothing about sitting
+PLAYER_VALUE_COUNT: int = 8
+# Older game mods say nothing about the weapon
+PLAYER_VALUE_COUNT_WITHOUT_WEAPON: int = 7
+COMPANION_VALUE_COUNT: int = 15
+# Older game mods say nothing about the weapon and the look, and still older ones nothing about sitting either
+COMPANION_VALUE_COUNT_WITHOUT_WEAPON: int = 13
 COMPANION_VALUE_COUNT_WITHOUT_SITTING: int = 12
+COMPANION_PLACE_OF_SITTING: int = 12
+COMPANION_PLACE_OF_WEAPON: int = 13
+COMPANION_PLACE_OF_LOOK_TARGET: int = 14
 # What the game calls sitting (Actor.GetSitState): 3 = seated, 4 = seated and about to get up
 SIT_STATES_SEATED: tuple[int, ...] = (3, 4)
-WORLD_VALUE_COUNT: int = 5
+WORLD_VALUE_COUNT: int = 6
 WORLD_PLACE_OF_PROTOCOL: int = 4
+WORLD_PLACE_OF_AROUND: int = 5
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 2
+GAME_PROTOCOL: int = 3
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -121,12 +136,16 @@ QUEST_PART_SEPARATOR: str = "\t"
 QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
 # The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
 QUEST_TYPE_MISCELLANEOUS: int = 6
-TARGET_PART_COUNT: int = 7
+TARGET_PART_COUNT: int = 8
+# Older plugins do not send the ref ID to walk to
+TARGET_PART_COUNT_WITHOUT_REF_ID: int = 7
 TARGET_HERE: str = "here"
 TARGET_BEHIND_DOOR: str = "door"
 TARGET_ELSEWHERE: str = "elsewhere"
 TARGET_KINDS: dict[int, str] = {0: TARGET_HERE, 1: TARGET_BEHIND_DOOR, 2: TARGET_ELSEWHERE}
-PLACE_PART_COUNT: int = 6
+PLACE_PART_COUNT: int = 7
+# Older plugins do not send the ref ID of the place
+PLACE_PART_COUNT_WITHOUT_REF_ID: int = 6
 PLACE_MARKER: str = "marker"
 PLACE_DOOR: str = "door"
 PLACE_KINDS: dict[int, str] = {0: PLACE_MARKER, 1: PLACE_DOOR}
@@ -180,13 +199,15 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     if isinstance(player_name, str):
         player["name"] = player_name
     player_values = _numbers(raw.get(KEY_PLAYER_VALUES))
-    if player_values is not None and len(player_values) == PLAYER_VALUE_COUNT:
-        health, in_combat, position_x, position_y, position_z, facing, indoors = player_values
+    if player_values is not None and len(player_values) in (PLAYER_VALUE_COUNT, PLAYER_VALUE_COUNT_WITHOUT_WEAPON):
+        health, in_combat, position_x, position_y, position_z, facing, indoors = player_values[:PLAYER_VALUE_COUNT_WITHOUT_WEAPON]
         player["health_percent"] = health
         player["in_combat"] = in_combat != 0
         player["position"] = [position_x, position_y, position_z]
         player["facing_degrees"] = facing % 360
         state["indoors"] = indoors != 0
+        if len(player_values) == PLAYER_VALUE_COUNT:
+            player["weapon_drawn"] = player_values[-1] != 0
     if len(player) > 0:
         state["player"] = player
 
@@ -203,6 +224,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
             state["quests"] = _read_quests(raw.get(KEY_QUESTS), raw.get(KEY_QUEST_TARGETS))
         # Same idea: 'hearing' is only in the result if the game mod knows about listening at all
         state["protocol"] = world_values[WORLD_PLACE_OF_PROTOCOL] if len(world_values) > WORLD_PLACE_OF_PROTOCOL else 0
+        # From whom the lists below are seen: distances and directions are measured from the companion then
+        state["around_companion"] = len(world_values) > WORLD_PLACE_OF_AROUND and world_values[WORLD_PLACE_OF_AROUND] != 0
         if len(world_values) > WORLD_PLACE_OF_HEARING:
             state["hearing"] = world_values[WORLD_PLACE_OF_HEARING] != 0
             if state["hearing"]:
@@ -263,7 +286,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     """No companion in the result means: the player has no follower at the moment"""
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
-    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
+    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
         return None
     (form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id, facing, retreating,
      walk_target_form_id) = values[:COMPANION_VALUE_COUNT_WITHOUT_SITTING]
@@ -287,8 +310,12 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     companion["retreating"] = retreating != 0
     if walk_target_form_id != 0:
         companion["walk_target_ref_id"] = _ref_id(walk_target_form_id)
-    if len(values) == COMPANION_VALUE_COUNT:
-        companion["sitting"] = values[-1] in SIT_STATES_SEATED
+    if len(values) > COMPANION_PLACE_OF_SITTING:
+        companion["sitting"] = values[COMPANION_PLACE_OF_SITTING] in SIT_STATES_SEATED
+    if len(values) > COMPANION_PLACE_OF_LOOK_TARGET:
+        companion["weapon_drawn"] = values[COMPANION_PLACE_OF_WEAPON] != 0
+        if values[COMPANION_PLACE_OF_LOOK_TARGET] != 0:
+            companion["look_target_ref_id"] = _ref_id(values[COMPANION_PLACE_OF_LOOK_TARGET])
     return companion
 
 
@@ -329,14 +356,15 @@ def _read_quests(raw_quests: Any, raw_targets: Any = None) -> list[dict[str, Any
 
 def _add_quest_targets(quests_by_place: dict[int, dict[str, Any]], raw_targets: Any) -> None:
     """Gives every quest its targets as 'targets': each with 'objective' (place of its objective in 'objectives'), 'kind',
-    'name', and depending on the kind 'distance_meters' and 'angle_degrees' (of the target or of the door to it) and 'place'"""
+    'name', and depending on the kind 'distance_meters' and 'angle_degrees' (of the target or of the door to it), 'place'
+    and 'ref_id' (of the target or of the door to it, to walk there)"""
     if not isinstance(raw_targets, list):
         return
     for entry in raw_targets:
         if not isinstance(entry, str):
             continue
         parts = entry.split(QUEST_PART_SEPARATOR)
-        if len(parts) != TARGET_PART_COUNT:
+        if len(parts) not in (TARGET_PART_COUNT, TARGET_PART_COUNT_WITHOUT_REF_ID):
             continue
         numbers = [_whole_number(text) for text in parts[:5]]
         if None in numbers:
@@ -351,11 +379,15 @@ def _add_quest_targets(quests_by_place: dict[int, dict[str, Any]], raw_targets: 
             target["angle_degrees"] = angle
         if target["kind"] != TARGET_HERE:
             target["place"] = parts[6].strip()
+        if len(parts) == TARGET_PART_COUNT and target["kind"] != TARGET_ELSEWHERE:
+            form_id = parse_ref_id(parts[7])
+            if form_id is not None and form_id != 0:
+                target["ref_id"] = format_ref_id(form_id)
         quest.setdefault("targets", []).append(target)
 
 
 def _read_places(raw_places: Any) -> list[dict[str, Any]]:
-    """The places around the player in the order the game sent them (map markers first, then doors, each nearest first)"""
+    """The places around the viewer in the order the game sent them (map markers first, then doors, each nearest first)"""
     places: list[dict[str, Any]] = []
     if not isinstance(raw_places, list):
         return places
@@ -364,7 +396,13 @@ def _read_places(raw_places: Any) -> list[dict[str, Any]]:
             continue
         # The name comes last and is not split any further
         parts = entry.split(QUEST_PART_SEPARATOR, PLACE_PART_COUNT - 1)
-        if len(parts) != PLACE_PART_COUNT:
+        form_id: int | None = None
+        if len(parts) == PLACE_PART_COUNT:
+            form_id = parse_ref_id(parts[1])
+            if form_id is None:
+                continue
+            del parts[1]
+        if len(parts) != PLACE_PART_COUNT_WITHOUT_REF_ID:
             continue
         numbers = [_whole_number(text) for text in parts[:5]]
         name = parts[5].strip()
@@ -374,6 +412,8 @@ def _read_places(raw_places: Any) -> list[dict[str, Any]]:
         if kind_number not in PLACE_KINDS:
             continue
         place: dict[str, Any] = {"kind": PLACE_KINDS[kind_number], "name": name, "distance_meters": distance, "angle_degrees": angle}
+        if form_id is not None and form_id != 0:
+            place["ref_id"] = format_ref_id(form_id)
         if place["kind"] == PLACE_MARKER:
             marker_name = _marker_type_name(marker_type)
             if marker_name != "":
@@ -384,7 +424,7 @@ def _read_places(raw_places: Any) -> list[dict[str, Any]]:
 
 
 def _read_things(raw_things: Any) -> list[dict[str, Any]]:
-    """The things close to the player in the order the game sent them (furniture, containers, items, each nearest first)"""
+    """The things close to the viewer in the order the game sent them (furniture, containers, items, each nearest first)"""
     things: list[dict[str, Any]] = []
     if not isinstance(raw_things, list):
         return things
@@ -492,6 +532,9 @@ def _add_view_of_companion(state: dict[str, Any]) -> None:
     questions per character, so this is calculated here: from where the player faces, and from the distance
     and angle of the companion and of the other character. Heights are left out, and the game sends whole
     meters and whole degrees, so the result is a little less exact than what was measured from the player.
+
+    If the AI asked for the lists as the companion sees them (state['around_companion']), the game has measured
+    them from the companion already. Then only where the player is gets calculated.
     """
     player = state.get("player")
     companion = state.get("companion")
@@ -505,6 +548,8 @@ def _add_view_of_companion(state: dict[str, Any]) -> None:
 
     # Seen from the companion, the player is in the opposite direction of where the companion is seen from the player
     companion["player_angle_degrees"] = _signed_angle(player_facing + companion["angle_degrees"] + 180 - companion_facing)
+    if state.get("around_companion"):
+        return
     # A target with a distance is in the area of the player, or it is behind a door that is
     targets = [target for quest in state.get("quests", []) for target in quest.get("targets", []) if "distance_meters" in target]
     for character in state["nearby"] + state.get("things", []) + targets:
@@ -529,7 +574,7 @@ def _signed_angle(angle_degrees: float) -> int:
 
 
 def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    """The characters around the player. A list in another shape (eg from a game mod that is older than this server) is left out"""
+    """The characters around the viewer. A list in another shape (eg from a game mod that is older than this server) is left out"""
     values = _numbers(raw.get(KEY_NEARBY_VALUES))
     if values is None or len(values) % VALUES_PER_NEARBY_CHARACTER != 0:
         return []

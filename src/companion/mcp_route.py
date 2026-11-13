@@ -6,11 +6,12 @@ from fastapi.responses import JSONResponse, Response
 
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
+from src.companion.gestures import GESTURES, pick_animation
 from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.10"
+SERVER_VERSION: str = "0.11"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -21,6 +22,10 @@ ARGUMENT_INVENTORY: str = "inventory"
 ARGUMENT_CORPSE: str = "corpse"
 ARGUMENT_THINGS: str = "things"
 ARGUMENT_MAX: str = "max"
+ARGUMENT_AROUND: str = "around"
+# What the AI may also write for 'around' if it means its own character
+AROUND_COMPANION_WORDS: list[str] = [consts.AROUND_COMPANION, "me", "companion", "self"]
+GESTURE_NAMES: str = ", ".join(sorted(GESTURES))
 
 SERVER_INSTRUCTIONS: str = (
     "You are playing a companion character inside the game Skyrim, fighting and travelling alongside the player. "
@@ -46,13 +51,20 @@ TOOLS: list[dict[str, Any]] = [
             "attack = attack the target (works on peaceful characters too, so only when the player wants it), "
             "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
             "flee = retreat: you do not fight and run from enemies until your next command, "
-            "move_to = walk to the target (a character or a thing from 'Nearby') and wait there until 'follow', "
+            "move_to = walk to the target and wait there until 'follow'. The target is anything with a ref_id in STATE: "
+            "a character, a thing, a door from 'Doors', a place from 'Places' (only if it is close enough to be loaded) "
+            "or the target of a quest. You stop at a door, you do not go through it. "
             "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
             "everything, or only the kind of item whose ID is in 'detail' (see what is in it with STATE and 'corpse' first). "
             "The walk takes a while, your next STATE tells you what you got. Afterwards you follow or wait as before. "
             "Containers in a house or a shop belong to someone, so empty those only when the player wants it. "
-            "sit = walk to the piece of furniture that is the target and sit down on it (no target = the nearest seat). "
+            "sit = walk to the piece of furniture that is the target and sit down on it (no target = the seat nearest to you). "
+            "That takes a few seconds, your next STATE says 'sitting' once you sit. "
             "You stay seated until 'follow' or another command that makes you move. "
+            "look_at = keep your eyes on the target (a character or anything else with a ref_id; the player is 00000014). "
+            "It holds until look_at without a target, which lets you look around freely again. "
+            "gesture = play the gesture named in 'detail': " + GESTURE_NAMES + ". "
+            "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
             "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
             "unequip = put the item away, "
@@ -65,8 +77,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from 'Nearby' or 'Things' in STATE: a character (attack, move_to, loot), a container (loot, move_to), a seat (sit, move_to). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the spell name for cast_spell."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, loot, look_at), a container (loot, move_to), a seat (sit, move_to), a door, a place or a quest target (move_to, look_at). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -77,10 +89,11 @@ TOOLS: list[dict[str, Any]] = [
             "Get the current situation in the game as a few short lines. "
             "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
             "(clear, cloudy, rain or snow). "
-            "'Player': health, fighting or not, the compass direction the player faces, and the position x,y,z "
+            "'Player': health, fighting or not, 'weapon drawn' if so, the compass direction the player faces, and the position x,y,z "
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
-            "seen from you, waiting, following or walking to someone, retreating, and whom it fights. "
+            "seen from you, waiting, following, sitting or walking to someone, retreating, whom it fights, "
+            "'weapon drawn' if so, and what it looks at because of look_at. "
             "Without a follower of the player you have no body. "
             "'Nearby': up to 10 lines (more with 'max'), one per character within about 50 meters of the player: first the living, hostile "
             "ones before the others, then the dead (marked 'dead'), each nearest first. "
@@ -93,17 +106,22 @@ TOOLS: list[dict[str, Any]] = [
             "Directions are relative to where the player (after 'from you': your character) faces: "
             "ahead, ahead-right, right, behind-right, behind, behind-left, left, ahead-left. "
             "Use the player's view when the player points at someone, and your own view when you talk about where you stand. "
+            "With 'around' set to 'you' the game lists what is around your own character instead (characters, things, places "
+            "and quest targets, each with distance and direction 'from you' only). Use that when you are away from the player, "
+            "or when you look for something near yourself. "
             "Outdoors the list can miss someone, so get STATE once more if a character the player talks about is not in it. "
             "'Places': the nearest places of the map within about 300 meters of the player (farms, mills, stables, towers, "
             "caves ...), also ones the player has not discovered yet, with distance and direction from the player. "
             "'Doors': the nearest doors that lead into a building, a cave or out of town, named by where they lead. "
             "Use both to say where you are and where to go instead of coordinates. Indoors there are only doors. "
+            "After each name is its ref_id, for the commands move_to and look_at. "
             "'Quests': the open quests from the player's journal, each with its open objectives. The ones the player "
             "tracks come first and are marked. 'Miscellaneous' collects the small objectives without a quest name. "
             "The lines are missing if the game cannot tell the quests. "
             "Behind an objective of a tracked quest, in brackets, is its target (what the compass of the game points to): "
-            "its name, distance and direction from the player and after 'from you' from your character, so you can lead the way. "
-            "'behind the door to ...' means the distance and direction are those of the door you have to go through, "
+            "its name, its ref_id (for move_to and look_at), distance and direction from the player and after 'from you' "
+            "from your character, so you can lead the way. "
+            "'behind the door to ...' means the ref_id, distance and direction are those of the door you have to go through, "
             "'not in this area' that the target is somewhere else, with the name of that place if the game has one. "
             "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
             "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
@@ -112,7 +130,7 @@ TOOLS: list[dict[str, Any]] = [
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
-            "'Since your last STATE': what became of a loot or move_to you started (what you took, or that you did not get there)."
+            "'Since your last STATE': what became of a loot, move_to or sit you started (what you took, or that you did not get there)."
         ),
         "inputSchema": {
             "type": "object",
@@ -120,6 +138,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_INVENTORY: {"type": "string", "enum": consts.INVENTORY_CHOICES, "description": "Also list an inventory: own = yours, player = the player's, both. Only when you need it."},
                 ARGUMENT_CORPSE: {"type": "string", "description": "ref_id of a dead character or of a container from 'Nearby': also list what is in it. Replaces 'inventory' for this call."},
                 ARGUMENT_THINGS: {"type": "boolean", "description": "true = also list the furniture, containers and loose items within about 10 meters of the player. Only when you need them."},
+                ARGUMENT_AROUND: {"type": "string", "enum": consts.AROUND_CHOICES, "description": "Whose surroundings the lists show: player (the default) or you = your own character."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
@@ -219,8 +238,9 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
         if not isinstance(max_lines, int) or isinstance(max_lines, bool):
             max_lines = CompanionCommandQueue.DEFAULT_MAX_LINES
         max_lines = min(max(max_lines, 1), CompanionCommandQueue.HIGHEST_MAX_LINES)
+        around = str(arguments.get(ARGUMENT_AROUND, "") or "").strip().lower()
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
-                                             max_lines=max_lines)
+                                             max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)
@@ -236,7 +256,7 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
         if action == consts.ACTION_SIT and target == "":
             target = await _find_nearest_seat(queue)
             if target == "":
-                return _tool_json({"status": consts.STATUS_FAILED, "message": "The game shows no seat within about 10 meters of the player. Go closer to one, or name a seat from 'Things' in STATE as the target."}, True)
+                return _tool_json({"status": consts.STATUS_FAILED, "message": "The game shows no seat within about 10 meters of you. Go closer to one, or name a seat from 'Things' in STATE as the target."}, True)
         if target != "":
             target_form_id = parse_ref_id(target)
             if target_form_id is None:
@@ -256,6 +276,16 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
             if item_form_id is None or item_form_id == 0:
                 return _tool_json({"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True)
             item = format_ref_id(item_form_id)
+        if action == consts.ACTION_GESTURE:
+            # The game gets the ID of the animation, the name only goes along for its answer
+            target = ""
+            detail = detail.lower().replace(" ", "_")
+            if detail == "":
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"gesture needs the name of the gesture in 'detail' ('{consts.GESTURE_STOP_TEXT}' ends one). The gestures: {GESTURE_NAMES}"}, True)
+            if detail != consts.GESTURE_STOP_TEXT:
+                item = pick_animation(detail)
+                if item == "":
+                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}"}, True)
         if action == consts.ACTION_CAST_SPELL and detail == "":
             return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the spell name in 'detail'."}, True)
         result = await queue.send_command(action, target, detail, count=count, item=item)
@@ -267,7 +297,9 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
 
 async def _find_nearest_seat(queue: CompanionCommandQueue) -> str:
     """Returns the ref_id of the seat that is nearest to the companion (or to the player, if the companion's place is not known), or an empty text"""
-    state_result = await queue.get_state(is_for_the_ai=False, things=True)
+    # The game is asked for the things around the companion. An older game mod, or one whose companion is far away,
+    # answers with the things around the player, and then the distance from the companion is the calculated one
+    state_result = await queue.get_state(is_for_the_ai=False, things=True, around_companion=True)
     state = state_result.get("state")
     things = state.get("things") if isinstance(state, dict) else None
     if not isinstance(things, list):

@@ -28,6 +28,8 @@ MAX_PLACE_DOORS: int = 6
 # Up to this age a line that was heard is given in seconds, after that in minutes
 MAX_AGE_IN_SECONDS: int = 90
 SECONDS_PER_MINUTE: int = 60
+# The ref_id every game gives the player
+PLAYER_REF_ID: str = "00000014"
 
 
 def relative_direction(angle_degrees: float) -> str:
@@ -80,7 +82,12 @@ def describe_state(state_result: dict[str, Any]) -> str:
     things = state.get("things")
     if not isinstance(things, list):
         things = []
-    lines.append(_describe_companion(state.get("companion"), nearby + things))
+    places = state.get("places")
+    if not isinstance(places, list):
+        places = []
+    # Whether the game measured the lists below from the companion instead of from the player
+    is_from_companion = bool(state.get("around_companion"))
+    lines.append(_describe_companion(state.get("companion"), nearby + things + places))
     gear_line = _describe_gear(state.get("player"), state.get("companion"))
     if gear_line != "":
         lines.append(gear_line)
@@ -90,25 +97,29 @@ def describe_state(state_result: dict[str, Any]) -> str:
     max_lines = state_result.get("max_lines")
     if not isinstance(max_lines, int) or isinstance(max_lines, bool) or max_lines < 1:
         max_lines = DEFAULT_MAX_LINES
+    if is_from_companion:
+        lines.append("The lists below show what is around you, not around the player.")
+    elif state_result.get("around_wanted"):
+        lines.append("The game listed what is around the player: your character is not close enough to look around on its own.")
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:
         lines.append("Nearby:")
         for character in nearby[:max_lines]:
-            lines.append(_describe_nearby_character(character))
+            lines.append(_describe_nearby_character(character, is_from_companion))
     # Only when the AI asked for them: furniture and containers before loose items, each nearest first
     if state_result.get("things_wanted"):
         shown_things = sorted(things, key=lambda thing: (thing.get("kind") == THING_ITEM, thing.get("distance_meters", 0)))
         if len(shown_things) == 0:
-            lines.append("Things: nothing within about 10 meters")
+            lines.append("Things: nothing within about 10 meters" + (" of you" if is_from_companion else ""))
         else:
             lines.append("Things:")
             for thing in shown_things[:max_lines]:
-                lines.append(_describe_thing(thing))
+                lines.append(_describe_thing(thing, is_from_companion))
     elif state_result.get("things_missed"):
         lines.append("The game did not send the things in time. Ask again.")
-    lines.extend(_describe_places(state.get("places")))
-    lines.extend(_describe_quests(state.get("quests")))
+    lines.extend(_describe_places(state.get("places"), is_from_companion))
+    lines.extend(_describe_quests(state.get("quests"), is_from_companion))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
     wanted = state_result.get("inventory_wanted")
     if wanted in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
@@ -123,15 +134,19 @@ def describe_state(state_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _describe_quests(quests: Any) -> list[str]:
-    """The open quests of the journal. No lines at all if the game could not tell them (its SKSE plugin is missing)"""
+def _describe_quests(quests: Any, is_from_companion: bool = False) -> list[str]:
+    """The open quests of the journal. No lines at all if the game could not tell them (its SKSE plugin is missing)
+
+    Args:
+        is_from_companion: Whether the game measured where the targets are from the companion instead of from the player
+    """
     if not isinstance(quests, list):
         return []
     named_quests = [quest for quest in quests if not quest.get("miscellaneous")]
     miscellaneous_objectives: list[str] = []
     for quest in quests:
         if quest.get("miscellaneous"):
-            miscellaneous_objectives.extend(_objective_texts(quest))
+            miscellaneous_objectives.extend(_objective_texts(quest, is_from_companion))
     if len(named_quests) == 0 and len(miscellaneous_objectives) == 0:
         return ["Quests: none"]
 
@@ -140,7 +155,7 @@ def _describe_quests(quests: Any) -> list[str]:
         title = str(quest.get("name"))
         if quest.get("tracked"):
             title += " (tracked)"
-        lines.append(f"- {title}: {OBJECTIVE_SEPARATOR.join(_objective_texts(quest))}")
+        lines.append(f"- {title}: {OBJECTIVE_SEPARATOR.join(_objective_texts(quest, is_from_companion))}")
     left_out = len(named_quests) - MAX_QUEST_LINES
     if left_out > 0:
         lines.append(f"- and {left_out} more")
@@ -152,32 +167,40 @@ def _describe_quests(quests: Any) -> list[str]:
     return lines
 
 
-def _objective_texts(quest: dict[str, Any]) -> list[str]:
+def _objective_texts(quest: dict[str, Any], is_from_companion: bool = False) -> list[str]:
     """The texts of the open objectives of a quest. An objective whose target the game knows gets it in brackets behind it"""
     texts: list[str] = [str(objective) for objective in quest.get("objectives", [])]
     for target in quest.get("targets", []):
         place = target.get("objective")
         if isinstance(place, int) and 0 <= place < len(texts):
-            texts[place] += f" [{_describe_target(target)}]"
+            texts[place] += f" [{_describe_target(target, is_from_companion)}]"
     return texts
 
 
-def _describe_target(target: dict[str, Any]) -> str:
-    """Where the target of an objective is: what the compass of the game points to"""
+def _describe_target(target: dict[str, Any], is_from_companion: bool = False) -> str:
+    """Where the target of an objective is: what the compass of the game points to.
+    With the ref_id to walk to if the game sent it: of the target itself, or of the door to it"""
     name = str(target.get("name", "")).strip()
     title = "target" if name == "" else f"target {name}"
     place = str(target.get("place", "")).strip()
     if target.get("kind") == TARGET_ELSEWHERE:
         return f"{title}: not in this area" + ("" if place == "" else f", in {place}")
-    where = _describe_where(target) + _describe_from_companion(target)
+    where = _describe_position(target, is_from_companion)
+    ref_id = str(target.get("ref_id", ""))
     if target.get("kind") == TARGET_BEHIND_DOOR:
-        door = "behind a door" if place == "" else f"behind the door to {place}"
-        return f"{title}: {door}, {where}"
+        door = "a door" if place == "" else f"the door to {place}"
+        if ref_id != "":
+            door += f" {ref_id}"
+        return f"{title}: behind {door}, {where}"
+    if ref_id != "":
+        title += f" {ref_id}"
     return f"{title}: {where}"
 
 
-def _describe_places(places: Any) -> list[str]:
-    """Map markers and doors around the player, seen from the player. No lines at all if the game sent no places"""
+def _describe_places(places: Any, is_from_companion: bool = False) -> list[str]:
+    """Map markers and doors around the player, seen from the player (or both from the companion, if the game measured
+    from there). After each name its ref_id for the command move_to, if the game sent it.
+    No lines at all if the game sent no places"""
     if not isinstance(places, list):
         return []
     lines: list[str] = []
@@ -187,11 +210,13 @@ def _describe_places(places: Any) -> list[str]:
             if place.get("kind") != kind or len(texts) >= limit:
                 continue
             text = str(place.get("name"))
+            if "ref_id" in place:
+                text += f" {place['ref_id']}"
             if "type" in place:
                 text += f" ({place['type']})"
             texts.append(f"{text} {_describe_where(place)}")
         if len(texts) > 0:
-            lines.append(f"{title}: {', '.join(texts)}")
+            lines.append(f"{title}{' (from you)' if is_from_companion else ''}: {', '.join(texts)}")
     return lines
 
 
@@ -291,6 +316,8 @@ def _describe_player(player: Any) -> str:
         parts.append(f"health {player['health_percent']}%")
     if "in_combat" in player:
         parts.append("fighting" if player["in_combat"] else "not fighting")
+    if player.get("weapon_drawn"):
+        parts.append("weapon drawn")
     if "facing_degrees" in player:
         parts.append(f"faces {compass_direction(player['facing_degrees'])}")
     if "position" in player:
@@ -333,20 +360,27 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append(" ".join(text for text in ["fighting", _name_of(target_ref_id, nearby), target_ref_id] if text != ""))
     elif companion.get("in_combat"):
         parts.append("fighting")
+    if companion.get("weapon_drawn"):
+        parts.append("weapon drawn")
+    look_target_ref_id = companion.get("look_target_ref_id")
+    if look_target_ref_id == PLAYER_REF_ID:
+        parts.append("looking at the player")
+    elif look_target_ref_id is not None:
+        parts.append(" ".join(text for text in ["looking at", _name_of(look_target_ref_id, nearby), look_target_ref_id] if text != ""))
     return f"You, {name}: {', '.join(parts)}"
 
 
-def _describe_nearby_character(character: dict[str, Any]) -> str:
+def _describe_nearby_character(character: dict[str, Any], is_from_companion: bool = False) -> str:
     line = f"{character.get('ref_id')} {character.get('name')}, "
     if character.get("dead"):
         line += "dead, "
-    line += _describe_where(character) + _describe_from_companion(character)
+    line += _describe_position(character, is_from_companion)
     if character.get("hostile"):
         line += ", hostile"
     return line
 
 
-def _describe_thing(thing: dict[str, Any]) -> str:
+def _describe_thing(thing: dict[str, Any], is_from_companion: bool = False) -> str:
     """A piece of furniture, a container or an item that lies around, as a line of the list 'Things'"""
     kind = thing.get("kind")
     if kind == THING_FURNITURE:
@@ -355,7 +389,15 @@ def _describe_thing(thing: dict[str, Any]) -> str:
         label = "container, locked" if thing.get("locked") else "container"
     else:
         label = "item"
-    return f"{thing.get('ref_id')} {thing.get('name')}, {label}, {_describe_where(thing)}{_describe_from_companion(thing)}"
+    return f"{thing.get('ref_id')} {thing.get('name')}, {label}, {_describe_position(thing, is_from_companion)}"
+
+
+def _describe_position(character: dict[str, Any], is_from_companion: bool) -> str:
+    """Where a character or a thing is: seen from the player and, as far as known, from the companion as well.
+    If the game measured from the companion (is_from_companion), there is only that"""
+    if is_from_companion:
+        return "from you " + _describe_where(character)
+    return _describe_where(character) + _describe_from_companion(character)
 
 
 def _describe_from_companion(character: dict[str, Any]) -> str:
@@ -369,7 +411,8 @@ def _describe_from_companion(character: dict[str, Any]) -> str:
 
 
 def _describe_where(character: dict[str, Any]) -> str:
-    """Distance to the player and, if the game sent it, the direction seen from the player"""
+    """Distance to whoever the game measured from (the player, unless the AI asked for the view of the companion)
+    and, if the game sent it, the direction seen from there"""
     where = f"{character.get('distance_meters')} m"
     angle = character.get("angle_degrees")
     if isinstance(angle, (int, float)) and not isinstance(angle, bool):

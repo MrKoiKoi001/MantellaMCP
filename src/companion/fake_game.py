@@ -33,18 +33,23 @@ QUESTS: list[list[str]] = [
     ["0", "6", "Favor for Alvor", "Buy a sword from Alvor"],
 ]
 # Where the targets of the tracked quest are as the plugin writes them: place of the quest, place of the objective,
-# where (0 = here, 1 = behind a door, 2 = elsewhere), distance and angle from the player, name of the target, name of the place
+# where (0 = here, 1 = behind a door, 2 = elsewhere), distance and angle from the player, name of the target, name of the place,
+# ref ID to walk to (the target, or the door to it)
 QUEST_TARGETS: list[list[str]] = [
-    ["0", "0", "1", "140", "-40", "Jarl Balgruuf", "Dragonsreach"],
+    ["0", "0", "1", "140", "-40", "Jarl Balgruuf", "Dragonsreach", "0001A6F4"],
 ]
-# The places around the player as the plugin writes them: kind (0 = map marker, 1 = door), distance and angle from the player,
-# kind of map marker as the game numbers it, 1 if the player has been there, name
+# The places around the player as the plugin writes them: kind (0 = map marker, 1 = door), ref ID, distance and angle
+# from the player, kind of map marker as the game numbers it, 1 if the player has been there, name
 PLACES: list[list[str]] = [
-    ["0", "120", "-60", "13", "1", "Pelagia Farm"],
-    ["0", "260", "170", "21", "0", "Whiterun Stables"],
-    ["1", "20", "90", "0", "0", "Warmaiden's"],
-    ["1", "140", "-40", "0", "0", "Dragonsreach"],
+    ["0", "000C0001", "120", "-60", "13", "1", "Pelagia Farm"],
+    ["0", "000C0002", "260", "170", "21", "0", "Whiterun Stables"],
+    ["1", "0001A6F0", "20", "90", "0", "0", "Warmaiden's"],
+    ["1", "0001A6F4", "140", "-40", "0", "0", "Dragonsreach"],
 ]
+DOOR_REF_ID: str = "0001A6F4"
+PLAYER_REF_ID: str = "00000014"
+# The gestures the simulator knows the animations of (form ID of the animation -> what the game calls it)
+GESTURE_ANIMATIONS: dict[str, str] = {"0003EA32": "IdleWave", "000D8734": "IdleSilentBow"}
 # The things close to the player as the plugin writes them: kind (0 = furniture, 1 = container, 2 = item), ref ID,
 # distance and angle from the player, 1 for a seat or a locked container, name
 THINGS: list[list[str]] = [
@@ -64,7 +69,7 @@ CHEST_ITEMS: list[tuple[str, int, int, int, str]] = [
 # What the game calls sitting and not sitting (Actor.GetSitState)
 SIT_STATE_SEATED: int = 3
 SIT_STATE_STANDING: int = 0
-NATIVE_PLUGIN_VERSION: int = 4
+NATIVE_PLUGIN_VERSION: int = 5
 # What was said since the last state as the SKSE plugin writes it: seconds ago, ref ID of the speaker, name, text
 HEARD: list[list[str]] = [
     ["12", "00000014", "Dragonborn", "What do you know about dragons?"],
@@ -113,7 +118,8 @@ def to_papyrus_number(ref_id: str) -> int:
 
 def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "",
                 has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
-                is_sitting: bool = False, has_things: bool = True) -> dict:
+                is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
+                are_weapons_drawn: bool = False, look_target_ref_id: str = "") -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -123,6 +129,10 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         report: What became of a loot or move_to since the last state, or empty
         is_sitting: Whether the companion sits on a seat because of the command sit
         has_things: Whether the server asked for the things close to the player
+        is_around_companion: Whether the server asked for the lists as the companion sees them. The simulator
+            then sends the same numbers and only says that they are measured from the companion
+        are_weapons_drawn: Whether the player and the companion have their weapons out
+        look_target_ref_id: What the companion looks at because of the command look_at, or empty
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -136,9 +146,9 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     state: dict = {
         game_state.KEY_LOCATION: "Whiterun, Plains District",
         game_state.KEY_PLAYER_NAME: "Dragonborn",
-        game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0],
+        game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0, int(are_weapons_drawn)],
         # Snow at 14:35
-        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL],
+        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL, int(is_around_companion)],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
         game_state.KEY_QUEST_TARGETS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUEST_TARGETS],
         game_state.KEY_PLACES: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in PLACES],
@@ -147,6 +157,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
             SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
+            int(are_weapons_drawn), to_papyrus_number(look_target_ref_id),
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -183,8 +194,25 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     return state
 
 
-def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str, str]:
-    """Answers attack, move_to, loot, sit, flee and stand_down like the game mod does
+def name_of(ref_id: str) -> str:
+    """The name of the character, thing, door or place with this ref_id, or an empty text if the simulator has none"""
+    if ref_id == PLAYER_REF_ID:
+        return "Dragonborn"
+    for character in NEARBY:
+        if character["ref_id"] == ref_id:
+            return character["name"]
+    for parts in THINGS + PLACES:
+        if parts[1] == ref_id:
+            return parts[-1]
+    return ""
+
+
+def run_command(action: str, target: str, target_ref_id: str, item_id: str = "", detail: str = "") -> tuple[bool, str, str]:
+    """Answers attack, move_to, loot, sit, look_at, gesture, flee and stand_down like the game mod does
+
+    Args:
+        item_id: For gesture: the ID of the animation the server picked, as eight hex digits (empty = end the gesture)
+        detail: For gesture: the name of the gesture
 
     Returns:
         Whether it worked, the text for the AI, and whom the companion fights afterwards (ref_id or empty)
@@ -195,10 +223,22 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
                 return True, f"You attack {character['name']} now.", target
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_MOVE_TO:
-        for character in NEARBY:
-            if character["ref_id"] == target:
-                return True, f"You walk to {character['name']} and wait there. 'follow' brings you back to the player.", target_ref_id
+        # A walk can lead to a character, a thing, a door or a place
+        if name_of(target) != "" and target != PLAYER_REF_ID:
+            return True, f"You walk to {name_of(target)} and wait there. 'follow' brings you back to the player.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_LOOK_AT:
+        if target == "":
+            return True, "You look where you like again.", target_ref_id
+        if name_of(target) != "":
+            return True, f"You look at {name_of(target)} now. 'look_at' without a target lets you look around freely again.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_GESTURE:
+        if item_id == "":
+            return True, "You stand normally again.", target_ref_id
+        if item_id in GESTURE_ANIMATIONS:
+            return True, f"You do the gesture '{detail}'. If it goes on and on, 'gesture' with 'stop' ends it.", target_ref_id
+        return False, f"The game has no animation for the gesture '{detail}'.", target_ref_id
     if action == consts.ACTION_LOOT:
         for character in NEARBY:
             if character["ref_id"] == target:
@@ -214,8 +254,8 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
         for kind, ref_id, distance, angle, flag, name in THINGS:
             if ref_id == target:
                 if kind != "0":
-                    return False, f"{name} is nothing to sit on. Take the ref_id of a seat from 'Nearby' in STATE.", target_ref_id
-                return True, f"You walk to {name} and sit down. 'follow' makes you get up and come along again.", target_ref_id
+                    return False, f"{name} is nothing to sit on. Take the ref_id of a seat from 'Things' in STATE (argument 'things').", target_ref_id
+                return True, f"You walk to {name} and sit down. Your next STATE tells you whether you sit. 'follow' makes you get up and come along again.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action in consts.ITEM_ACTIONS:
         items = PLAYER_ITEMS if action == consts.ACTION_TAKE else OWN_ITEMS
@@ -233,18 +273,20 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
 
 
 def is_sitting_after(action: str, is_sitting: bool) -> bool:
-    """Like the game: 'sit' seats the companion (the simulator's companion is there at once), 'wait', 'stand_down' and
-    what it does with its things leave it seated, every other command makes it get up"""
+    """Like the game: 'sit' seats the companion (the simulator's companion is there at once), 'wait', 'stand_down',
+    'look_at', 'gesture' and what it does with its things leave it seated, every other command makes it get up"""
     if action == consts.ACTION_SIT:
         return True
-    if action in (consts.ACTION_WAIT, consts.ACTION_STAND_DOWN) or action in consts.ITEM_ACTIONS:
+    if action in (consts.ACTION_WAIT, consts.ACTION_STAND_DOWN, consts.ACTION_LOOK_AT, consts.ACTION_GESTURE) or action in consts.ITEM_ACTIONS:
         return is_sitting
     return False
 
 
 def is_waiting_after(action: str, is_waiting: bool) -> bool:
-    """Like the game: 'wait', 'move_to' and 'sit' make the companion stay, 'follow' makes it come along again, everything else changes nothing"""
-    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO, consts.ACTION_SIT):
+    """Like the game: 'wait' and 'move_to' make the companion stay, 'follow' makes it come along again, everything else
+    changes nothing. That goes for 'sit' as well: the companion sits because of a package of the game mod, and once it
+    gets up it follows or waits as before"""
+    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO):
         return True
     if action == consts.ACTION_FOLLOW:
         return False
@@ -256,9 +298,17 @@ def is_fleeing_after(action: str) -> bool:
     return action == consts.ACTION_FLEE
 
 
-def walk_target_after(action: str, target: str) -> str:
-    """Like the game: every new command ends the walk. The simulator's companion never arrives, so it keeps walking until then"""
+def walk_target_after(action: str, target: str, walk_target_ref_id: str = "") -> str:
+    """Like the game: every new command ends the walk, except for 'look_at', 'gesture' and what the companion does
+    with its things. The simulator's companion never arrives, so it keeps walking until then"""
+    if action in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE) or action in consts.ITEM_ACTIONS:
+        return walk_target_ref_id
     return target if action in (consts.ACTION_MOVE_TO, consts.ACTION_LOOT) else ""
+
+
+def look_target_after(action: str, target: str, look_target_ref_id: str) -> str:
+    """Like the game: the companion keeps looking at the target of 'look_at' until 'look_at' comes without one"""
+    return target if action == consts.ACTION_LOOK_AT else look_target_ref_id
 
 
 def main():
@@ -273,6 +323,8 @@ def main():
     is_fleeing = False
     is_sitting = False
     walk_target_ref_id = ""
+    look_target_ref_id = ""
+    is_around_companion = False
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
@@ -285,8 +337,10 @@ def main():
         request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results}
         if is_state_wanted:
             # Only the first state has something that was said
-            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted)
+            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
+                                                         is_around_companion, target_ref_id != "", look_target_ref_id)
             are_things_wanted = False
+            is_around_companion = False
             wanted_inventory = ""
             wanted_corpse = ""
         body = json.dumps(request_body).encode("utf-8")
@@ -314,14 +368,21 @@ def main():
                 wanted_inventory = str(detail or "")
                 wanted_corpse = str(target or "")
                 are_things_wanted = bool(command.get(consts.KEY_COMMAND_THINGS))
+                is_around_companion = bool(command.get(consts.KEY_COMMAND_AROUND))
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
-            is_ok, message, target_ref_id = run_command(str(action), str(target), target_ref_id)
+            # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it
+            item_number = (int(command.get(consts.KEY_COMMAND_ITEM_HIGH) or 0) << 16) | int(command.get(consts.KEY_COMMAND_ITEM_LOW) or 0)
+            item_id = f"{item_number:08X}" if item_number != 0 else ""
+            is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""))
             if is_ok:
                 is_waiting = is_waiting_after(str(action), is_waiting)
-                is_fleeing = is_fleeing_after(str(action))
+                # Looking somewhere and a gesture do not end a retreat
+                if action not in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE):
+                    is_fleeing = is_fleeing_after(str(action))
                 is_sitting = is_sitting_after(str(action), is_sitting)
-                walk_target_ref_id = walk_target_after(str(action), str(target))
+                walk_target_ref_id = walk_target_after(str(action), str(target or ""), walk_target_ref_id)
+                look_target_ref_id = look_target_after(str(action), str(target or ""), look_target_ref_id)
             results.append({
                 consts.KEY_COMMAND_ID: command.get(consts.KEY_COMMAND_ID),
                 consts.KEY_RESULT_OK: is_ok,

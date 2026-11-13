@@ -204,12 +204,12 @@ def test_state_text_describes_the_companion():
         "FF000A02 Bandit, 20 m behind-right, from you 19 m ahead, hostile",
         "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
         "FF000A03 Bandit Outlaw, dead, 5 m ahead, from you 8 m behind-left",
-        "Places: Pelagia Farm (farm) 120 m ahead-left, Whiterun Stables (stable) 260 m behind",
-        "Doors: Warmaiden's 20 m right, Dragonsreach 140 m ahead-left",
+        "Places: Pelagia Farm 000C0001 (farm) 120 m ahead-left, Whiterun Stables 000C0002 (stable) 260 m behind",
+        "Doors: Warmaiden's 0001A6F0 20 m right, Dragonsreach 0001A6F4 140 m ahead-left",
         "Quests:",
         # The Jarl is north of the player, who faces north-east. Lydia faces south, so the door is behind her
         "- Before the Storm (tracked): Talk to the Jarl of Whiterun "
-        "[target Jarl Balgruuf: behind the door to Dragonsreach, 140 m ahead-left, from you 141 m behind]",
+        "[target Jarl Balgruuf: behind the door to Dragonsreach 0001A6F4, 140 m ahead-left, from you 141 m behind]",
         "- The Golden Claw: Find the secret of Bleak Falls Barrow; Retrieve the Golden Claw",
         "- Miscellaneous: Buy a sword from Alvor",
     ]
@@ -443,7 +443,7 @@ def test_heard_lines_are_kept_until_the_ai_asks_and_given_only_once():
         "5\tFF000A01\tbandit\tNever should have come here!\t", "broken", "x\t00000014\tKoi\tHello"]})
     assert state["heard"] == [{"seconds_ago": 5, "ref_id": "FF000A01", "name": "Bandit", "text": "Never should have come here!"}]
     assert game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0], game_state.KEY_HEARD: ["5\t00000014\tKoi\tHello"]}) == {
-        "time": "10:00", "weather": "clear", "quests": [], "protocol": 0, "hearing": False, "nearby": []}
+        "time": "10:00", "weather": "clear", "quests": [], "protocol": 0, "around_companion": False, "hearing": False, "nearby": []}
 
 
 def test_heard_lines_of_one_speaker_are_joined_and_old_ones_dropped():
@@ -707,6 +707,18 @@ def test_quest_targets_and_places():
     # No list of targets (an older plugin, or no tracked quest has one) leaves the quests as they were
     del raw[game_state.KEY_QUEST_TARGETS]
     assert "targets" not in game_state.read_game_state(raw)["quests"][0]
+    # A newer plugin also sends the ref ID to walk to: of the target itself, or of the door to it
+    raw[game_state.KEY_QUEST_TARGETS] = [
+        line(0, 0, 0, 35, 90, "Dragonstone", "", "000D1234"), line(0, 1, 2, 0, 0, "Farengar Secret-Fire", "Dragonsreach", "00000000"),
+        line(2, 0, 1, 12, -90, "Lucan Valerius", "Riverwood Trader", "0001A6F0"),
+    ]
+    targets = game_state.read_game_state(raw)["quests"][0]["targets"]
+    assert targets[0]["ref_id"] == "000D1234" and "ref_id" not in targets[1]
+    assert lines_for(raw)[-2:] == [
+        "- Bleak Falls Barrow (tracked): Retrieve the Dragonstone [target Dragonstone 000D1234: 35 m right]; "
+        "Talk to Farengar [target Farengar Secret-Fire: not in this area, in Dragonsreach]",
+        "- Miscellaneous: Bring the claw to Lucan [target Lucan Valerius: behind the door to Riverwood Trader 0001A6F0, 12 m left]",
+    ]
 
     # Places: map markers and doors each get a line. Indoors the plugin sends doors only
     places = {game_state.KEY_PLACES: [
@@ -724,6 +736,15 @@ def test_quest_targets_and_places():
         "Doors: Warmaiden's 20 m right, Skyrim 44 m behind",
     ]
     assert lines_for({game_state.KEY_PLACES: [line(1, 6, 0, 0, 0, "Dragonsreach, Jarl's Quarters")]})[-1] == "Doors: Dragonsreach, Jarl's Quarters 6 m ahead"
+    # A newer plugin sends the ref ID of every place as its second part, for the commands move_to and look_at
+    newer_places = {game_state.KEY_PLACES: [
+        line(0, "000C0001", 120, -60, 13, 1, "Pelagia Farm"), line(1, "0001A6F0", 20, 90, 0, 0, "Warmaiden's"),
+        # Left out: what stands in the place of the ref ID is none
+        line(1, "the door", 20, 90, 0, 0, "Warmaiden's"),
+    ]}
+    assert game_state.read_game_state(newer_places)["places"][0] == {
+        "kind": "marker", "name": "Pelagia Farm", "distance_meters": 120, "angle_degrees": -60, "ref_id": "000C0001", "type": "farm", "known": True}
+    assert lines_for(newer_places)[-2:] == ["Places: Pelagia Farm 000C0001 (farm) 120 m ahead-left", "Doors: Warmaiden's 0001A6F0 20 m right"]
     # An older game mod sends no places at all, and then nothing is said about them
     assert "places" not in game_state.read_game_state({game_state.KEY_LOCATION: "Riverwood"})
     assert game_state.read_game_state({game_state.KEY_PLACES: []})["places"] == []
@@ -790,6 +811,7 @@ def test_things_only_come_when_asked_for_and_the_lists_have_a_limit():
 
     plain, wide = asyncio.run(requests())
     assert (plain[consts.KEY_COMMAND_COUNT], plain[consts.KEY_COMMAND_THINGS]) == (10, 0)
+    assert (plain[consts.KEY_COMMAND_AROUND], wide[consts.KEY_COMMAND_AROUND]) == (0, 0)
     assert (wide[consts.KEY_COMMAND_COUNT], wide[consts.KEY_COMMAND_THINGS]) == (25, 1)
 
     with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
@@ -870,6 +892,146 @@ def test_sitting_and_looting_a_container():
     assert "nothing to sit on" in run_command(consts.ACTION_SIT, CHEST_REF_ID, "")[1]
     assert run_command(consts.ACTION_LOOT, CHEST_REF_ID, "")[0] is True
     assert run_command(consts.ACTION_LOOT, LOCKED_CHEST_REF_ID, "")[1] == "Strongbox is locked."
-    assert is_sitting_after(consts.ACTION_SIT, False) is True and is_waiting_after(consts.ACTION_SIT, False) is True
+    # Sitting is the work of a package of the game mod: the companion is not told to wait for it
+    assert is_sitting_after(consts.ACTION_SIT, False) is True and is_waiting_after(consts.ACTION_SIT, False) is False
     assert is_sitting_after(consts.ACTION_WAIT, True) is True and is_sitting_after(consts.ACTION_GIVE, True) is True
     assert is_sitting_after(consts.ACTION_FOLLOW, True) is False and is_sitting_after(consts.ACTION_ATTACK, True) is False
+
+
+def test_weapon_look_and_the_lists_as_the_companion_sees_them():
+    import asyncio
+
+    from src.companion import game_state
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import DOOR_REF_ID, PLAYER_REF_ID, build_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **result: object) -> list[str]:
+        state = game_state.read_game_state(raw)
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, **result}).splitlines()
+
+    # Weapons out, and the companion keeps its eyes on someone because of look_at
+    armed = text_for(build_state(are_weapons_drawn=True, look_target_ref_id="000F6845"))
+    assert armed[1] == "Player Dragonborn: health 85%, not fighting, weapon drawn, faces north-east, position 23500,-7900,-3300"
+    assert armed[2].endswith("following, weapon drawn, looking at Whiterun Guard 000F6845")
+    # The player has no line in 'Nearby', a door has its name from 'Doors'
+    assert text_for(build_state(look_target_ref_id=PLAYER_REF_ID))[2].endswith("following, looking at the player")
+    assert text_for(build_state(look_target_ref_id=DOOR_REF_ID))[2].endswith("following, looking at Dragonsreach 0001A6F4")
+    assert "weapon drawn" not in "".join(text_for(build_state()))
+
+    # A game mod from before this sends fewer numbers and says nothing about weapons and looks
+    older = build_state(are_weapons_drawn=True, look_target_ref_id="000F6845")
+    older[game_state.KEY_PLAYER_VALUES] = older[game_state.KEY_PLAYER_VALUES][:7]
+    older[game_state.KEY_COMPANION_VALUES] = older[game_state.KEY_COMPANION_VALUES][:13]
+    older[game_state.KEY_WORLD_VALUES] = older[game_state.KEY_WORLD_VALUES][:5]
+    older_state = game_state.read_game_state(older)
+    assert "weapon_drawn" not in older_state["player"] and "weapon_drawn" not in older_state["companion"]
+    assert "look_target_ref_id" not in older_state["companion"] and older_state["companion"]["sitting"] is False
+    assert older_state["around_companion"] is False and older_state["player"]["health_percent"] == 85
+
+    # Seen from the player every line has both views. If the game measured from the companion, there is only that one
+    assert game_state.read_game_state(build_state())["around_companion"] is False
+    around_state = game_state.read_game_state(build_state(is_around_companion=True))
+    assert around_state["around_companion"] is True
+    assert "distance_from_companion_meters" not in around_state["nearby"][0]
+    # Where the player is does not depend on that
+    assert around_state["companion"]["player_angle_degrees"] == game_state.read_game_state(build_state())["companion"]["player_angle_degrees"]
+    around = text_for(build_state(is_around_companion=True), things_wanted=True, around_wanted=True)
+    start = around.index("The lists below show what is around you, not around the player.")
+    assert around[start + 1:start + 3] == ["Nearby:", "FF000A01 Bandit, from you 12 m ahead-left, hostile"]
+    assert "0005A3F1 Wooden Bench, seat, from you 3 m left" in around
+    assert "Places (from you): Pelagia Farm 000C0001 (farm) 120 m ahead-left, Whiterun Stables 000C0002 (stable) 260 m behind" in around
+    assert "Doors (from you): Warmaiden's 0001A6F0 20 m right, Dragonsreach 0001A6F4 140 m ahead-left" in around
+    assert ("- Before the Storm (tracked): Talk to the Jarl of Whiterun "
+            "[target Jarl Balgruuf: behind the door to Dragonsreach 0001A6F4, from you 140 m ahead-left]") in around
+    empty = build_state(is_around_companion=True)
+    empty[game_state.KEY_THINGS] = []
+    assert "Things: nothing within about 10 meters of you" in text_for(empty, things_wanted=True)
+    # The AI asked for its own surroundings, but the game listed those of the player (the companion is far away, or the mod is older)
+    refused = text_for(build_state(), around_wanted=True)
+    assert any(line.startswith("The game listed what is around the player") for line in refused)
+    assert not any(line.startswith("The game listed") for line in text_for(build_state()))
+
+    # The game learns with the request for the state from whom the lists should be seen
+    async def request() -> dict:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, around_companion=True))
+        return (await game)[0]
+
+    assert asyncio.run(request())[consts.KEY_COMMAND_AROUND] == 1
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()})
+        # The game is gone by now, so nothing fresh comes and nothing is said about whose surroundings these are
+        answer = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True, "around": "you"}}))
+        assert answer["around_wanted"] is False and answer["state"]["around_companion"] is False
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[1]["inputSchema"]["properties"]["around"]["enum"] == ["player", "you"]
+
+
+def test_look_at_and_gesture():
+    from pathlib import Path
+
+    from src.companion.fake_game import (DOOR_REF_ID, is_sitting_after, look_target_after, run_command, walk_target_after)
+    from src.companion.gestures import GESTURES, load_gestures, pick_animation
+
+    # The gestures come from the table of Mantella. Animations that are in Mantella.esp are left out
+    assert GESTURES["wave"] == ["0003EA32"] and GESTURES["agree"] == ["000FFA0C"]
+    assert "deescalate" not in GESTURES
+    assert len(GESTURES["applaud"]) == 4 and pick_animation(" Applaud ") in GESTURES["applaud"]
+    assert pick_animation("come this way") == "000F6CCF"
+    assert pick_animation("moonwalk") == ""
+    assert load_gestures(Path("no_such_table.csv")) == {}
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "name of the gesture" in command({"action": "gesture"})["message"]
+        unknown = command({"action": "gesture", "detail": "moonwalk"})
+        assert unknown["status"] == consts.STATUS_FAILED and "wave" in unknown["message"]
+        # What is fine is refused only because no game is there
+        assert command({"action": "gesture", "detail": "wave"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        assert command({"action": "gesture", "detail": "stop"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        # look_at without a target frees the eyes again, so it needs none
+        assert command({"action": "look_at"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        assert "not a ref_id" in command({"action": "look_at", "target": "the door"})["message"]
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {"look_at", "gesture"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
+        assert "come_this_way" in tools[0]["description"]
+
+    # The game gets the ID of the animation in two halves, and the name only for its answer
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You do the gesture 'wave'."}]
+            client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}, consts.KEY_RESULTS: results})
+
+        game_thread = threading.Thread(target=game, daemon=True)
+        game_thread.start()
+        time.sleep(0.3)
+        response = rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "gesture", "detail": "Wave", "target": "000F6845"}})
+        assert tool_payload(response) == {"status": consts.STATUS_DONE, "message": "You do the gesture 'wave'."}
+        sent = received_commands[0]
+        assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TARGET]) == ("gesture", "wave", "")
+        assert (sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == (0x0003, 0xEA32)
+
+    # The fake game answers like the game mod. A walk can lead to a door now
+    assert run_command(consts.ACTION_MOVE_TO, DOOR_REF_ID, "")[1].startswith("You walk to Dragonsreach and wait there.")
+    assert run_command(consts.ACTION_LOOK_AT, "", "")[1] == "You look where you like again."
+    assert "Whiterun Guard" in run_command(consts.ACTION_LOOK_AT, "000F6845", "")[1]
+    assert run_command(consts.ACTION_LOOK_AT, "00000099", "")[0] is False
+    assert run_command(consts.ACTION_GESTURE, "", "", "0003EA32", "wave")[0] is True
+    assert run_command(consts.ACTION_GESTURE, "", "", "", "stop")[1] == "You stand normally again."
+    assert run_command(consts.ACTION_GESTURE, "", "", "00000099", "moonwalk")[0] is False
+    # The look holds until look_at comes without a target. A look and a gesture end neither a walk nor a rest on a seat
+    assert look_target_after(consts.ACTION_LOOK_AT, "000F6845", "") == "000F6845"
+    assert look_target_after(consts.ACTION_FOLLOW, "", "000F6845") == "000F6845"
+    assert look_target_after(consts.ACTION_LOOK_AT, "", "000F6845") == ""
+    assert walk_target_after(consts.ACTION_GESTURE, "", "000F6845") == "000F6845"
+    assert is_sitting_after(consts.ACTION_LOOK_AT, True) is True and is_sitting_after(consts.ACTION_GESTURE, True) is True
