@@ -251,7 +251,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
 
 # What the companion does without changing where it walks, whom it follows or whether it sits
 QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE,
-                            consts.ACTION_SHEATHE, consts.ACTION_DRAW, consts.ACTION_OPEN, consts.ACTION_CLOSE]
+                            consts.ACTION_SHEATHE, consts.ACTION_DRAW, consts.ACTION_OPEN, consts.ACTION_CLOSE,
+                            consts.ACTION_SAY_TALK, consts.ACTION_SAY_END]
 
 
 def name_of(ref_id: str) -> str:
@@ -353,7 +354,11 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
             return True, f"You look at {name_of(target)} now. 'look_at' without a target lets you look around freely again.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_SAY:
+        if target not in ("", PLAYER_REF_ID) and name_of(target) == "":
+            return True, f"You say it aloud. But '{target}' is not around here, so you do not look at them while you speak.", target_ref_id
         return True, "You say it aloud.", target_ref_id
+    if action in (consts.ACTION_SAY_TALK, consts.ACTION_SAY_END):
+        return True, "ok", target_ref_id
     if action == consts.ACTION_SHEATHE:
         return True, ("You put your weapon away. It stays away even when the player draws a weapon, until 'draw'. "
                       "In a fight you draw it all the same."), target_ref_id

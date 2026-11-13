@@ -149,6 +149,41 @@ class companion_constants:
     # (the setting mute_game_lines)
     KEY_COMMAND_MUTE: str = "companion_mute"
     TALK_EVENTS: list[str] = ["IdleDialogueMovingTalkA", "IdleDialogueMovingTalkB", "IdleDialogueMovingTalkC", "IdleDialogueMovingTalkD"]
+    # say without a manner: the animations for the hands the server picks from, never the same one twice in a row.
+    # An animation is the name of an animation event of the game, or the ID of an animation ("Idle") of the game
+    # as eight hex digits (the IDs come from data/Skyrim/skyrim_idles.csv, like those of gesture)
+    TALK_ANIMATIONS: list[str] = TALK_EVENTS + ["IdleDialogueExpressiveStart"]
+    # say with 'manner' = how the companion speaks: the animations for its hands and the look on its face (a name from
+    # EXPRESSIONS, or empty) while it speaks. Change this table to try other animations, the game mod plays what it gets.
+    # How each of them looks in the game is not documented anywhere, so this is a first pick to be corrected by eye
+    MANNERS: dict[str, tuple[list[str], str]] = {
+        "calm": (TALK_EVENTS, ""),
+        "explain": (["IdleDialogueExpressiveStart", "IdleDialogueMovingTalkB", "IdleDialogueMovingTalkD"], ""),
+        "excited": (["IdleDialogueHappyStart", "IdleDialogueExpressiveStart"], "happy"),
+        "angry": (["IdleDialogueAngryStart"], "angry"),
+        "sad": ([], "sad"),
+        "joking": (["IdleDialogueHappyStart", "IdleDialogueMovingTalkA", "IdleDialogueMovingTalkC"], "happy"),
+        # IdlePointClose and IdlePointFar_02
+        "pointing": (["000FFA0C", "000B8F1F"], ""),
+        # IdleStudy
+        "thinking": (["000977ED"], "puzzled"),
+    }
+    # say: a sentence that lasts longer than this gets another animation every so many seconds (a guess to be tuned),
+    # but only if at least TALK_GESTURE_LEAST_SECONDS of the sentence are left for it
+    TALK_GESTURE_SECONDS: float = 4.0
+    TALK_GESTURE_LEAST_SECONDS: float = 2.0
+    # say: how long after the end of the sound the server tells the game that the sentence is over
+    SAY_END_EXTRA_SECONDS: float = 0.4
+    # say: two commands only the server sends: the next animation of a long sentence, and the end of the sentence
+    # (the eyes, the face and the stance of the companion go back to what they were). Game mods from this protocol on know them
+    ACTION_SAY_TALK: str = "say_talk"
+    ACTION_SAY_END: str = "say_end"
+    SAY_END_PROTOCOL: int = 8
+    # say, say_talk and say_end: the number of the sentence, so that an end that comes late does not end the next sentence
+    KEY_COMMAND_SAY_NUMBER: str = "companion_say_number"
+    # say: the number of the look the face takes on while the companion speaks (FACE_NONE = none)
+    KEY_COMMAND_FACE: str = "companion_face"
+    FACE_NONE: int = -1
     # The companion puts its weapon away and keeps it away although the player draws one, until draw
     ACTION_SHEATHE: str = "sheathe"
     ACTION_DRAW: str = "draw"

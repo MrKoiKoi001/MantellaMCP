@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 import time
@@ -1931,7 +1932,7 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
         answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Archers on the tower.", "loud": True}}))
         assert answer == {"status": consts.STATUS_DONE, "message": "You say it aloud."}
         sent = received_commands[0]
-        assert sent[consts.KEY_COMMAND_TALK] in consts.TALK_EVENTS and sent[consts.KEY_COMMAND_DETAIL] == "Archers on the tower."
+        assert sent[consts.KEY_COMMAND_TALK] in consts.TALK_ANIMATIONS and sent[consts.KEY_COMMAND_DETAIL] == "Archers on the tower."
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert {"sheathe", "draw", "open", "close"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
         assert tools[0]["inputSchema"]["properties"]["loud"]["type"] == "boolean"
@@ -1966,3 +1967,48 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
             time.sleep(0.3)
             rpc(client, "tools/call", {"name": "STATE", "arguments": {}})
             assert received[0][consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE and received[0][consts.KEY_COMMAND_MUTE] == int(wanted)
+
+
+def test_say_with_whom_the_companion_speaks_to_and_how(monkeypatch):
+    from src.companion import mcp_route
+    from src.companion.fake_game import run_command
+
+    # The hands: one animation for a short sentence, another one every few seconds of a long one, never the same twice in a row
+    assert len(mcp_route._pick_talk_animations("", 3.0)) == 1
+    assert len(mcp_route._pick_talk_animations("", consts.TALK_GESTURE_SECONDS + consts.TALK_GESTURE_LEAST_SECONDS)) == 2
+    picked = mcp_route._pick_talk_animations("calm", 60.0)
+    assert len(picked) > 10 and set(picked) <= set(consts.TALK_EVENTS)
+    assert all(first != second for first, second in zip(picked, picked[1:]))
+    assert mcp_route._pick_talk_animations("calm", 1.0)[0] != picked[-1]
+    # A manner without hands only has its face. A manner with one animation repeats it
+    assert mcp_route._pick_talk_animations("sad", 60.0) == [] and consts.MANNERS["sad"][1] in consts.EXPRESSIONS
+    assert mcp_route._pick_talk_animations("angry", 7.0) == ["IdleDialogueAngryStart", "IdleDialogueAngryStart"]
+    # An animation goes to the game mod as the name of an animation event or as the ID of an animation
+    assert mcp_route._split_animation("IdleDialogueMovingTalkA") == ("IdleDialogueMovingTalkA", "")
+    assert mcp_route._split_animation("000FFA0C") == ("", "000FFA0C")
+    for animations, face in consts.MANNERS.values():
+        assert face == "" or face in consts.EXPRESSIONS
+
+    # Beside the sentence: the further animations one after the other, then the end, all with the number of the sentence
+    sent: list[tuple] = []
+
+    class Queue:
+        async def send_command(self, action, talk="", item="", say_number=0):
+            sent.append((action, talk, item, say_number))
+            return {"status": consts.STATUS_DONE, "message": "ok"}
+
+    monkeypatch.setattr(consts, "TALK_GESTURE_SECONDS", 0.01)
+    monkeypatch.setattr(consts, "SAY_END_EXTRA_SECONDS", 0.0)
+    asyncio.run(mcp_route._finish_speech(Queue(), 7, 0.05, ["IdleDialogueMovingTalkB", "000B8F1F"]))
+    assert sent == [(consts.ACTION_SAY_TALK, "IdleDialogueMovingTalkB", "", 7), (consts.ACTION_SAY_TALK, "", "000B8F1F", 7),
+                    (consts.ACTION_SAY_END, "", "", 7)]
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Hello.", "manner": "singing"}}))
+        assert answer["status"] == consts.STATUS_FAILED and "calm" in answer["message"]
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[0]["inputSchema"]["properties"]["manner"]["enum"] == list(consts.MANNERS)
+        assert "whom you speak to" in tools[0]["description"] and consts.ACTION_SAY_END not in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+    # The game mod answers the two commands of the server, and speaks even if the one spoken to is not around
+    assert run_command(consts.ACTION_SAY_END, "", "") == (True, "ok", "")
+    assert "not around here" in run_command(consts.ACTION_SAY, "00ABCDEF", "")[1]

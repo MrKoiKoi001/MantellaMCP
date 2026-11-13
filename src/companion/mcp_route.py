@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import random
+import time
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -15,7 +16,14 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.19"
+SERVER_VERSION: str = "0.20"
+# say: the manners of speaking as the AI is told them
+MANNER_NAMES: str = ", ".join(consts.MANNERS)
+# say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
+# another one), and what runs beside the sentence that is being spoken (see _finish_speech)
+_say_number: int = 0
+_last_talk_animation: str = ""
+_speech_task: asyncio.Task | None = None
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -110,9 +118,11 @@ TOOLS: list[dict[str, Any]] = [
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
             "you there. " + SAY_LANGUAGE_NOTE + "One or two sentences at a time. "
             "With 'loud': true you call it out with a raised voice: for a warning, or when the player is far away. "
-            "When you speak to someone other than the player, use look_at on that character first: then you look at them "
-            "while you talk instead of turning to the player (that goes together with expression). Afterwards look_at "
-            "without a target lets you look around freely again. "
+            "target = whom you speak to; nothing = the player. You turn to them and look at them while you speak, and "
+            "afterwards your eyes are free again (or back on what look_at holds; while look_at holds and you name no "
+            "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
+            "manner = how you speak, it moves your hands and face to match for this sentence: " + MANNER_NAMES + ". "
+            "Nothing = neutral, with hands that vary on their own. A look you set with expression stays on your face. "
             "sheathe = put your weapon away and keep it away even when the player draws one (otherwise you draw whenever "
             "the player does). In a fight you draw it all the same. draw = draw your weapon, and from then on draw it and "
             "put it away together with the player again. "
@@ -131,9 +141,10 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
                 "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
+                "manner": {"type": "string", "enum": list(consts.MANNERS), "description": "Only for say: how you speak. It picks how your hands move and the look on your face while you speak. Nothing = neutral."},
             },
             "required": ["action"],
         },
@@ -391,15 +402,35 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
             item = format_ref_id(item_form_id)
         if action == consts.ACTION_SAY:
             is_loud = arguments.get("loud") is True
+            manner = str(arguments.get("manner", "") or "").strip().lower()
+            if manner != "" and manner not in consts.MANNERS:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no manner '{manner}'. The manners: {MANNER_NAMES}. Nothing = neutral."}, True)
             problem, line = await _prepare_speech(detail, queue, voice, is_loud)
             if problem != "":
                 return _tool_json({"status": consts.STATUS_FAILED, "message": problem}, True)
             # The game gets the number of the line to speak, the sound is in its folder already.
             # The text goes along for the subtitle, which would only show the "..." of the line otherwise
-            # Hands that move while talking: the game mod plays the animation event the server picks
-            talk = random.choice(consts.TALK_EVENTS) if voice is not None and voice.has_talk_gestures else ""
-            result = await queue.send_command(action, detail=clean_text(detail), count=line, talk=talk)
-            return _tool_json(result, result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED))
+            # The target is whom the companion speaks to: the game mod makes it look there while it speaks.
+            # Hands that move while talking: the game mod plays the animations the server picks, the first one with say
+            seconds = voice.spoken_seconds if voice is not None else 0.0
+            animations = _pick_talk_animations(manner, seconds) if voice is not None and voice.has_talk_gestures else []
+            face_name = consts.MANNERS[manner][1] if manner != "" else ""
+            talk, idle = _split_animation(animations[0]) if len(animations) > 0 else ("", "")
+            global _say_number, _speech_task
+            _say_number += 1
+            number = _say_number
+            # The sentence before this one is cut off by the new one, so nothing of it is to follow any more
+            if _speech_task is not None:
+                _speech_task.cancel()
+                _speech_task = None
+            result = await queue.send_command(action, target=target, detail=clean_text(detail), count=line, talk=talk, item=idle,
+                                              say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE))
+            is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+            state = await queue.peek_state()
+            protocol = state.get("protocol") if isinstance(state, dict) else 0
+            if is_said and isinstance(protocol, int) and protocol >= consts.SAY_END_PROTOCOL:
+                _speech_task = asyncio.create_task(_finish_speech(queue, number, seconds, animations[1:]))
+            return _tool_json(result, not is_said)
         if action == consts.ACTION_EXPRESSION:
             # The game gets the number of the look and how strong it is, the name only goes along for its answer
             target = ""
@@ -492,6 +523,57 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
 def _direction_word(words: list[str]) -> str:
     """The words the AI wrote for a direction as one word the way the lists of directions have it: 'North East' -> 'north-east'"""
     return "-".join(" ".join(words).lower().replace("_", " ").replace("-", " ").split())
+
+
+def _pick_talk_animations(manner: str, seconds: float) -> list[str]:
+    """Picks the animations for the hands of the companion for one sentence
+
+    Args:
+        manner: How the companion speaks (a name from MANNERS), or empty for neutral
+        seconds: How long the sound of the sentence is
+
+    Returns:
+        The animations in the order they are played: the first one with say, the others TALK_GESTURE_SECONDS apart.
+        Never the same one twice in a row, also not from one sentence to the next. Empty if the manner has none
+    """
+    global _last_talk_animation
+    pool = consts.MANNERS[manner][0] if manner != "" else consts.TALK_ANIMATIONS
+    if len(pool) == 0:
+        return []
+    count = 1
+    while count * consts.TALK_GESTURE_SECONDS + consts.TALK_GESTURE_LEAST_SECONDS <= seconds:
+        count += 1
+    picked: list[str] = []
+    for _ in range(count):
+        choices = [animation for animation in pool if animation != _last_talk_animation] or list(pool)
+        _last_talk_animation = random.choice(choices)
+        picked.append(_last_talk_animation)
+    return picked
+
+
+def _split_animation(animation: str) -> tuple[str, str]:
+    """An animation as the game mod wants it: the name of an animation event, or the ID of an animation. One of the two is empty"""
+    if len(animation) == 8 and parse_ref_id(animation) is not None:
+        return "", animation
+    return animation, ""
+
+
+async def _finish_speech(queue: CompanionCommandQueue, number: int, seconds: float, later_animations: list[str]) -> None:
+    """Runs beside a sentence the companion speaks: sends the further animations of a long sentence one after the other,
+    and tells the game mod when the sound is over, so that the companion's eyes, face and stance go back to what they were
+
+    Args:
+        number: The number of the sentence. The game mod ignores what comes for an older sentence
+        seconds: How long the sound of the sentence is
+        later_animations: The animations after the first one, which went along with say
+    """
+    start = time.monotonic()
+    for index, animation in enumerate(later_animations, start=1):
+        await asyncio.sleep(max(index * consts.TALK_GESTURE_SECONDS - (time.monotonic() - start), 0.0))
+        talk, idle = _split_animation(animation)
+        await queue.send_command(consts.ACTION_SAY_TALK, talk=talk, item=idle, say_number=number)
+    await asyncio.sleep(max(seconds + consts.SAY_END_EXTRA_SECONDS - (time.monotonic() - start), 0.0))
+    await queue.send_command(consts.ACTION_SAY_END, say_number=number)
 
 
 async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: CompanionVoice | None, is_loud: bool = False) -> tuple[str, int]:

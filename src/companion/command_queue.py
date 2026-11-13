@@ -106,7 +106,7 @@ class CompanionCommandQueue:
     async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0,
                            count: int = 1, item: str = "", things: bool = False, around_companion: bool = False,
                            stats: bool = False, visible: bool = False, space: bool = False, find: str = "",
-                           talk: str = "") -> dict[str, Any]:
+                           talk: str = "", say_number: int = 0, face: int = consts.FACE_NONE) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -121,6 +121,9 @@ class CompanionCommandQueue:
             space: For report_state: whether the state should carry what is around the companion as rays find it
             find: For report_state: a name, or a part of one, to look for in the whole loaded area
             talk: For say: the animation event that moves the hands of the companion while it talks, or empty
+                (an animation that goes by an ID instead goes into 'item')
+            say_number: For say, say_talk and say_end: the number of the sentence
+            face: For say: the number of the look on the companion's face while it speaks, FACE_NONE = none
             things: For report_state: whether the state should carry the things close to the player.
                 'count' is then how many characters (and things of each kind) the state should list at most
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
@@ -153,6 +156,8 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_SPACE: int(space),
                 consts.KEY_COMMAND_FIND: find,
                 consts.KEY_COMMAND_TALK: talk,
+                consts.KEY_COMMAND_SAY_NUMBER: say_number,
+                consts.KEY_COMMAND_FACE: face,
                 consts.KEY_COMMAND_MUTE: int(self.mutes_game_lines),
             }
             self.__pending_commands.append(command)

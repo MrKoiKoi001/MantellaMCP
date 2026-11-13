@@ -94,6 +94,16 @@ def clean_text(text: str) -> str:
     return " ".join(text.replace("*", "").split())
 
 
+def measure_seconds(sound_file: str) -> float:
+    """Returns how long the sound in a WAV file is in seconds, or 0 if the file cannot be read"""
+    try:
+        with wave.open(sound_file, "rb") as opened:
+            rate = opened.getframerate()
+            return opened.getnframes() / rate if rate > 0 else 0.0
+    except (OSError, EOFError, wave.Error):
+        return 0.0
+
+
 class CompanionVoice:
     """Makes the sound of what the companion says and puts it into the game folder"""
 
@@ -110,6 +120,8 @@ class CompanionVoice:
         """
         self.__volume: float = max(volume_percent, 1) / FULL_VOLUME_PERCENT
         self.__has_talk_gestures: bool = talk_gestures
+        # How long the sound of the sentence is that was made last, in seconds (0 = not known)
+        self.spoken_seconds: float = 0.0
         self.__xtts: XttsVoice | None = xtts
         # Whether the last sentence had to be made by Piper although XTTS is wanted. Only for the lines the server prints
         self.__is_xtts_down: bool = False
@@ -241,6 +253,7 @@ class CompanionVoice:
                     self.__stop_piper()
                     return False, f"{before}Piper could not make the sound: {error}", 0
             change_volume(sound_file, self.__volume * (LOUD_FACTOR if is_loud else 1.0))
+            self.spoken_seconds = measure_seconds(sound_file)
             # Without a lip file of its own, the sentence gets the placeholder: the lips of the sentence before would not fit
             lip_file = ""
             if self.__lips is not None and self.__are_lips_on:
