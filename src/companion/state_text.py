@@ -7,9 +7,9 @@ the AI needs to decide, instead of the whole state as JSON.
 from typing import Any
 
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import (ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
+from src.companion.game_state import (GAME_PROTOCOL, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
-                                      TARGET_BEHIND_DOOR, TARGET_ELSEWHERE)
+                                      TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM)
 
 DEGREES_PER_DIRECTION: float = 45.0
 # Clockwise, starting straight ahead of whoever looks
@@ -20,6 +20,8 @@ COMPASS_DIRECTIONS: list[str] = ["north", "north-east", "east", "south-east", "s
 MAX_QUEST_LINES: int = 8
 MAX_MISCELLANEOUS_OBJECTIVES: int = 6
 OBJECTIVE_SEPARATOR: str = "; "
+# The lists 'Nearby' and 'Things' have this many lines at most each, unless the AI asked for another number
+DEFAULT_MAX_LINES: int = 10
 # A long list of places must not fill the conversation of the AI either. The game sends the nearest ones first
 MAX_PLACE_MARKERS: int = 6
 MAX_PLACE_DOORS: int = 6
@@ -56,6 +58,11 @@ def describe_state(state_result: dict[str, Any]) -> str:
             lines.append("The game has not sent its state yet. Ask again in a moment.")
         return "\n".join(lines)
 
+    mod_protocol = state.get("protocol")
+    if mod_protocol is not None and mod_protocol != GAME_PROTOCOL:
+        lines.append(f"Warning: the game mod and this server do not fit together (the mod speaks protocol {mod_protocol}, "
+                     f"the server protocol {GAME_PROTOCOL}). Parts of what follows can be missing or wrong. "
+                     "Tell the player to build and install the game mod again (build.py --install) and to restart the server.")
     if not bool(state_result.get("fresh")):
         age = state_result.get("state_age_seconds")
         if is_connected:
@@ -70,19 +77,36 @@ def describe_state(state_result: dict[str, Any]) -> str:
     nearby = state.get("nearby")
     if not isinstance(nearby, list):
         nearby = []
-    lines.append(_describe_companion(state.get("companion"), nearby))
+    things = state.get("things")
+    if not isinstance(things, list):
+        things = []
+    lines.append(_describe_companion(state.get("companion"), nearby + things))
     gear_line = _describe_gear(state.get("player"), state.get("companion"))
     if gear_line != "":
         lines.append(gear_line)
     reports = state_result.get("reports")
     if isinstance(reports, list) and len(reports) > 0:
         lines.append("Since your last STATE: " + " ".join(str(report) for report in reports))
+    max_lines = state_result.get("max_lines")
+    if not isinstance(max_lines, int) or isinstance(max_lines, bool) or max_lines < 1:
+        max_lines = DEFAULT_MAX_LINES
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:
         lines.append("Nearby:")
-        for character in nearby:
+        for character in nearby[:max_lines]:
             lines.append(_describe_nearby_character(character))
+    # Only when the AI asked for them: furniture and containers before loose items, each nearest first
+    if state_result.get("things_wanted"):
+        shown_things = sorted(things, key=lambda thing: (thing.get("kind") == THING_ITEM, thing.get("distance_meters", 0)))
+        if len(shown_things) == 0:
+            lines.append("Things: nothing within about 10 meters")
+        else:
+            lines.append("Things:")
+            for thing in shown_things[:max_lines]:
+                lines.append(_describe_thing(thing))
+    elif state_result.get("things_missed"):
+        lines.append("The game did not send the things in time. Ask again.")
     lines.extend(_describe_places(state.get("places")))
     lines.extend(_describe_quests(state.get("quests")))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
@@ -214,13 +238,19 @@ def _describe_inventory(title: str, inventory: Any) -> list[str]:
 
 
 def _describe_corpse(wanted_ref_id: str, corpse: Any, inventory: Any) -> list[str]:
-    """What the dead character carries that the AI asked about. After each item its ID for the command loot"""
+    """What the dead character carries or the container holds that the AI asked about. After each item its ID for the command loot"""
     if not isinstance(corpse, dict) or corpse.get("ref_id") != wanted_ref_id:
-        return [f"There is no dead character with the ref_id {wanted_ref_id} around. Take the ref_id from the dead in 'Nearby'."]
-    lines = _describe_inventory(f"The body of {corpse.get('name')} {wanted_ref_id} carries", inventory)
-    if len(lines) == 1:
-        return [f"The body of {corpse.get('name')} {wanted_ref_id} carries nothing."]
-    return lines
+        return [f"There is no dead character and no container with the ref_id {wanted_ref_id} around. "
+                "Take the ref_id from the dead or the containers in 'Nearby'."]
+    name = f"{corpse.get('name')} {wanted_ref_id}"
+    if corpse.get("locked"):
+        return [f"{name} is locked."]
+    if corpse.get("container"):
+        lines = _describe_inventory(f"{name} holds", inventory)
+        # The game may not have filled a container nobody has opened yet
+        return lines if len(lines) > 1 else [f"{name}: the game lists nothing in it."]
+    lines = _describe_inventory(f"The body of {name} carries", inventory)
+    return lines if len(lines) > 1 else [f"The body of {name} carries nothing."]
 
 
 def _describe_heard(heard: Any, companion: Any) -> list[str]:
@@ -291,6 +321,8 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
     walk_target_ref_id = companion.get("walk_target_ref_id")
     if walk_target_ref_id is not None:
         parts.append(" ".join(text for text in ["walking to", _name_of(walk_target_ref_id, nearby), walk_target_ref_id] if text != ""))
+    elif companion.get("sitting"):
+        parts.append("sitting")
     else:
         parts.append("waiting" if companion.get("waiting") else "following")
     if companion.get("retreating"):
@@ -312,6 +344,18 @@ def _describe_nearby_character(character: dict[str, Any]) -> str:
     if character.get("hostile"):
         line += ", hostile"
     return line
+
+
+def _describe_thing(thing: dict[str, Any]) -> str:
+    """A piece of furniture, a container or an item that lies around, as a line of the list 'Things'"""
+    kind = thing.get("kind")
+    if kind == THING_FURNITURE:
+        label = "seat" if thing.get("seat") else "furniture"
+    elif kind == THING_CONTAINER:
+        label = "container, locked" if thing.get("locked") else "container"
+    else:
+        label = "item"
+    return f"{thing.get('ref_id')} {thing.get('name')}, {label}, {_describe_where(thing)}{_describe_from_companion(thing)}"
 
 
 def _describe_from_companion(character: dict[str, Any]) -> str:

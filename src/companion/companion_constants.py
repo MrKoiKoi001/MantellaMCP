@@ -33,10 +33,13 @@ class companion_constants:
     KEY_COMMAND_DETAIL: str = PREFIX + "detail"
     # For give and take: how many of the item, 0 = all of them
     KEY_COMMAND_COUNT: str = PREFIX + "count"
+    # For report_state: 1 if the state should carry the things close to the player (furniture, containers, loose items).
+    # KEY_COMMAND_COUNT then says how many characters (and things of each kind) the state should list at most
+    KEY_COMMAND_THINGS: str = PREFIX + "things"
     INVENTORY_OWN: str = "own"
     INVENTORY_PLAYER: str = "player"
     INVENTORY_BOTH: str = "both"
-    # Internal: what the dead character carries that the target of the report_state command names
+    # Internal: what the dead character carries or the container holds that the target of the report_state command names
     INVENTORY_CORPSE: str = "corpse"
     # For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything
     KEY_COMMAND_ITEM_HIGH: str = PREFIX + "item_high"
@@ -57,6 +60,7 @@ class companion_constants:
     ACTION_FLEE: str = "flee"
     ACTION_MOVE_TO: str = "move_to"
     ACTION_LOOT: str = "loot"
+    ACTION_SIT: str = "sit"
     ACTION_EQUIP: str = "equip"
     ACTION_UNEQUIP: str = "unequip"
     ACTION_GIVE: str = "give"
@@ -73,6 +77,7 @@ class companion_constants:
         ACTION_FLEE,
         ACTION_MOVE_TO,
         ACTION_LOOT,
+        ACTION_SIT,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
         ACTION_GIVE,

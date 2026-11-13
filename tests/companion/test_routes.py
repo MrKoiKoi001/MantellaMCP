@@ -117,9 +117,10 @@ def test_state_lists_nearby_characters_nearest_first():
     with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
         client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: game_state_for(nearby)})
         state = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True}}))["state"]
-    assert [character["distance_meters"] for character in state["nearby"]] == [8, 12, 20]
+    # Hostile characters come before the others, however near those are
+    assert [character["distance_meters"] for character in state["nearby"]] == [12, 20, 8]
     # The ref ID came as a negative number, and the name in lower case
-    assert state["nearby"][1] == {"name": "Bandit", "ref_id": "FF000A01", "distance_meters": 12, "angle_degrees": -40, "hostile": True, "dead": False}
+    assert state["nearby"][0] == {"name": "Bandit", "ref_id": "FF000A01", "distance_meters": 12, "angle_degrees": -40, "hostile": True, "dead": False}
     assert state["player"] == {"name": "Koi", "health_percent": 90, "in_combat": True, "position": [100, -200, 30], "facing_degrees": 315}
     assert state["indoors"] is False
     assert (state["build_ms"], state["scan_ms"]) == (640, 410)
@@ -131,9 +132,9 @@ def test_state_lists_nearby_characters_nearest_first():
         "Player Koi: health 90%, fighting, faces north-west, position 100,-200,30",
         "You have no body in the game: the player has no follower.",
         "Nearby:",
-        "000F6845 Whiterun Guard, 8 m right",
         "FF000A01 Bandit, 12 m ahead-left, hostile",
         "FF000A02 Bandit, 20 m behind, hostile",
+        "000F6845 Whiterun Guard, 8 m right",
     ]
 
 
@@ -199,9 +200,9 @@ def test_state_text_describes_the_companion():
         "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, following, fighting Bandit FF000A01",
         "Gear: you hold Steel Sword and Iron Shield, your gold 30, the player's gold 250",
         "Nearby:",
-        "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
         "FF000A01 Bandit, 12 m ahead-left, from you 13 m behind, hostile",
         "FF000A02 Bandit, 20 m behind-right, from you 19 m ahead, hostile",
+        "000F6845 Whiterun Guard, 8 m right, from you 10 m ahead-left",
         "FF000A03 Bandit Outlaw, dead, 5 m ahead, from you 8 m behind-left",
         "Places: Pelagia Farm (farm) 120 m ahead-left, Whiterun Stables (stable) 260 m behind",
         "Doors: Warmaiden's 20 m right, Dragonsreach 140 m ahead-left",
@@ -355,7 +356,10 @@ def test_weather_and_time_of_day():
             game_state.KEY_PLAYER_VALUES: [100, 0, 0, 0, 0, 0, indoors],
             game_state.KEY_WORLD_VALUES: world_values,
         })
-        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()[0]
+        lines = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()
+        # A game mod that sends so few numbers is older than the server, and the text starts with a warning about that
+        assert lines[0].startswith("Warning: the game mod and this server do not fit together (the mod speaks protocol 0, ")
+        return lines[1]
 
     assert first_line([3, 875], 0) == "Riverwood (outdoors), 14:35, snow"
     assert first_line([0, 5], 0) == "Riverwood (outdoors), 00:05, clear"
@@ -439,7 +443,7 @@ def test_heard_lines_are_kept_until_the_ai_asks_and_given_only_once():
         "5\tFF000A01\tbandit\tNever should have come here!\t", "broken", "x\t00000014\tKoi\tHello"]})
     assert state["heard"] == [{"seconds_ago": 5, "ref_id": "FF000A01", "name": "Bandit", "text": "Never should have come here!"}]
     assert game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0], game_state.KEY_HEARD: ["5\t00000014\tKoi\tHello"]}) == {
-        "time": "10:00", "weather": "clear", "quests": [], "hearing": False, "nearby": []}
+        "time": "10:00", "weather": "clear", "quests": [], "protocol": 0, "hearing": False, "nearby": []}
 
 
 def test_heard_lines_of_one_speaker_are_joined_and_old_ones_dropped():
@@ -571,7 +575,7 @@ def test_the_dead_are_listed_after_the_living():
     ]
     state = game_state.read_game_state(game_state_for(nearby))
     assert [(character["name"], character["dead"]) for character in state["nearby"]] == [
-        ("Faendal", False), ("Wolf", False), ("Bandit Chief", True), ("Bandit", True)]
+        ("Wolf", False), ("Faendal", False), ("Bandit Chief", True), ("Bandit", True)]
     lines = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state}).splitlines()
     assert lines[-2:] == ["FF000A05 Bandit Chief, dead, 1 m behind", "FF000A03 Bandit, dead, 2 m ahead"]
     # A list in the shape of an older game mod (four numbers per character) is left out instead of read wrongly
@@ -590,7 +594,7 @@ def test_what_a_body_carries_only_comes_when_asked_for():
                                "corpse_wanted": corpse_wanted}).splitlines()
 
     state = read_game_state(build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id=CORPSE_REF_ID))
-    assert state["corpse"] == {"ref_id": "FF000A03", "name": "Bandit Outlaw"}
+    assert state["corpse"] == {"ref_id": "FF000A03", "name": "Bandit Outlaw", "container": False, "locked": False}
     lines = text_for(state, CORPSE_REF_ID)
     # On a body the gold is something to take, so it is in the list
     assert lines[lines.index("The body of Bandit Outlaw FF000A03 carries:"):] == [
@@ -601,7 +605,8 @@ def test_what_a_body_carries_only_comes_when_asked_for():
     ]
     assert not any("body" in line for line in text_for(state))
     # The game sends nothing for a ref_id that is no body. A body from an earlier question does not count either
-    missing = "There is no dead character with the ref_id 000F6845 around. Take the ref_id from the dead in 'Nearby'."
+    missing = ("There is no dead character and no container with the ref_id 000F6845 around. "
+               "Take the ref_id from the dead or the containers in 'Nearby'.")
     assert text_for(read_game_state(build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id="000F6845")), "000F6845")[-1] == missing
     assert text_for(state, "000F6845")[-1] == missing
     state["inventory_corpse"]["items"] = []
@@ -722,3 +727,149 @@ def test_quest_targets_and_places():
     # An older game mod sends no places at all, and then nothing is said about them
     assert "places" not in game_state.read_game_state({game_state.KEY_LOCATION: "Riverwood"})
     assert game_state.read_game_state({game_state.KEY_PLACES: []})["places"] == []
+
+
+def test_things_only_come_when_asked_for_and_the_lists_have_a_limit():
+    import asyncio
+
+    from src.companion import game_state
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    def lines_from_nearby(raw: dict, **result: object) -> list[str]:
+        state = game_state.read_game_state(raw)
+        lines = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, **result}).splitlines()
+        start = next(index for index, line in enumerate(lines) if line.startswith("Nearby"))
+        return lines[start:]
+
+    def line(*parts: object) -> str:
+        return "\t".join(str(part) for part in parts)
+
+    things = [line(0, "0005A3F1", 3, -90, 1, "wooden bench"), line(1, "0005A400", 4, 30, 0, "Chest"), line(2, "FF00B001", 1, 0, 0, "Sweet Roll"),
+              # Left out: an unknown kind, no ref ID, no name, too few parts
+              line(5, "0005A3F1", 3, 0, 0, "Odd"), line(0, "bench", 3, 0, 0, "Bench"), line(0, "0005A3F1", 3, 0, 0, ""), line(0, "0005A3F1", 3)]
+    state = game_state.read_game_state({game_state.KEY_THINGS: things})
+    assert state["things"] == [
+        {"kind": "furniture", "ref_id": "0005A3F1", "name": "Wooden bench", "distance_meters": 3, "angle_degrees": -90, "seat": True},
+        {"kind": "container", "ref_id": "0005A400", "name": "Chest", "distance_meters": 4, "angle_degrees": 30, "locked": False},
+        {"kind": "item", "ref_id": "FF00B001", "name": "Sweet Roll", "distance_meters": 1, "angle_degrees": 0},
+    ]
+    # Things the AI did not ask for are not shown, even if the kept state carries some
+    assert lines_from_nearby({game_state.KEY_THINGS: things}) == ["Nearby: nobody"]
+    # The sweet roll is nearest, but furniture and containers come before loose items
+    assert lines_from_nearby({game_state.KEY_THINGS: things}, things_wanted=True) == [
+        "Nearby: nobody", "Things:", "0005A3F1 Wooden bench, seat, 3 m left", "0005A400 Chest, container, 4 m ahead-right",
+        "FF00B001 Sweet Roll, item, 1 m ahead"]
+    assert lines_from_nearby({}, things_wanted=True) == ["Nearby: nobody", "Things: nothing within about 10 meters"]
+    assert lines_from_nearby({}, things_missed=True)[-1] == "The game did not send the things in time. Ask again."
+    assert "things" not in game_state.read_game_state({game_state.KEY_LOCATION: "Riverwood"})
+
+    # Each list has its own limit: ten lines if the AI names no number
+    crowd = game_state_for([{"name": f"Guest {number}", "ref_id": f"000B00{number:02d}", "distance_meters": 2 + number, "angle_degrees": 0,
+                             "hostile": False} for number in range(14)])
+    crowd[game_state.KEY_THINGS] = [line(2, f"000C00{number:02d}", 1 + number, 0, 0, f"Cup {number}") for number in range(14)]
+    assert len(lines_from_nearby(crowd)) == 1 + 10
+    assert len(lines_from_nearby(crowd, things_wanted=True)) == 2 * (1 + 10)
+    short = lines_from_nearby(crowd, things_wanted=True, max_lines=2)
+    assert short == ["Nearby:", "000B0000 Guest 0, 2 m ahead", "000B0001 Guest 1, 3 m ahead", "Things:", "000C0000 Cup 0, item, 1 m ahead",
+                     "000C0001 Cup 1, item, 2 m ahead"]
+    assert len(lines_from_nearby(crowd, things_wanted=True, max_lines=30)) == 2 * (1 + 14)
+
+    # The game learns with the request for the state how long the lists may get and whether things are wanted
+    async def requests() -> tuple[dict, dict]:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1))
+        plain = (await game)[0]
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, things=True, max_lines=25))
+        return plain, (await game)[0]
+
+    plain, wide = asyncio.run(requests())
+    assert (plain[consts.KEY_COMMAND_COUNT], plain[consts.KEY_COMMAND_THINGS]) == (10, 0)
+    assert (wide[consts.KEY_COMMAND_COUNT], wide[consts.KEY_COMMAND_THINGS]) == (25, 1)
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()})
+        # A number out of range is brought back into it, and something that is no number counts as none
+        for wanted, used in ((500, 30), (0, 1), ("many", 10)):
+            answer = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True, "max": wanted}}))
+            assert answer["max_lines"] == used
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {"things", "max"} <= set(tools[1]["inputSchema"]["properties"])
+
+    # The fake game mod speaks the protocol of this server, so there is no warning
+    assert not describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0,
+                               "state": game_state.read_game_state(build_state())}).startswith("Warning")
+    newer = build_state()
+    newer[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_PROTOCOL] = game_state.GAME_PROTOCOL + 1
+    assert describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0,
+                           "state": game_state.read_game_state(newer)}).startswith("Warning: the game mod and this server do not fit together")
+
+
+def test_sitting_and_looting_a_container():
+    import asyncio
+
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import (CHEST_REF_ID, LOCKED_CHEST_REF_ID, SEAT_REF_ID, build_state, is_sitting_after,
+                                         is_waiting_after, run_command)
+    from src.companion.game_state import read_game_state
+    from src.companion.mcp_route import _find_nearest_seat
+    from src.companion.state_text import describe_state
+
+    def text_for(state: dict, corpse_wanted: str = "") -> list[str]:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state,
+                               "corpse_wanted": corpse_wanted}).splitlines()
+
+    # What a chest holds comes like what a body carries. Nobody can look into a locked one
+    chest = read_game_state(build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id=CHEST_REF_ID))
+    assert chest["corpse"] == {"ref_id": "0005A400", "name": "Chest", "container": True, "locked": False}
+    assert text_for(chest, CHEST_REF_ID)[-3:] == [
+        "Chest 0005A400 holds:", "- Potions and food: Potion of Minor Healing 0003EADD", "- Other: Gold 0000000F x40"]
+    chest["inventory_corpse"]["items"] = []
+    assert text_for(chest, CHEST_REF_ID)[-1] == "Chest 0005A400: the game lists nothing in it."
+    locked = read_game_state(build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id=LOCKED_CHEST_REF_ID))
+    assert "inventory_corpse" not in locked and text_for(locked, LOCKED_CHEST_REF_ID)[-1] == "Strongbox 0005A401 is locked."
+    # A game mod from before the containers sends the ref ID only, and that is a body
+    older = build_state(inventory=consts.INVENTORY_CORPSE, corpse_ref_id="FF000A03")
+    older["corpse"] = older["corpse"][:1]
+    assert read_game_state(older)["corpse"]["container"] is False
+
+    # The companion sits: the line 'You' says so. A game mod from before sitting sends twelve numbers and says nothing about it
+    seated = read_game_state(build_state(True, is_sitting=True))
+    assert seated["companion"]["sitting"] is True
+    assert text_for(seated)[2] == "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, sitting"
+    assert text_for(read_game_state(build_state(True, "", False, SEAT_REF_ID)))[2].endswith("walking to Wooden Bench 0005A3F1")
+    older = build_state(True)
+    older["companion"] = older["companion"][:12]
+    assert "sitting" not in read_game_state(older)["companion"]
+
+    # sit without a target takes the seat that is nearest to the companion, and what was heard stays kept for the AI
+    async def nearest_seat(state: dict | None) -> tuple[str, list[dict]]:
+        queue = CompanionCommandQueue(hold_seconds=0.05, connection_grace_seconds=0.0)
+        await queue.poll(state, [])
+        return await _find_nearest_seat(queue), (await queue.get_state())["heard"]
+
+    seat, heard = asyncio.run(nearest_seat(read_game_state(build_state(has_heard_lines=True))))
+    assert seat == SEAT_REF_ID and len(heard) == 3
+    assert asyncio.run(nearest_seat({"location": "Whiterun", "things": [{"kind": "container", "ref_id": "0005A400"}]}))[0] == ""
+    assert asyncio.run(nearest_seat(None))[0] == ""
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        # Without a game there is no state to pick a seat from
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "sit"}}))
+        assert answer["status"] == consts.STATUS_FAILED and "no seat" in answer["message"]
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "sit", "target": SEAT_REF_ID}}))
+        assert answer["status"] == consts.STATUS_GAME_NOT_CONNECTED
+
+    # The fake game answers like the game mod
+    assert run_command(consts.ACTION_SIT, SEAT_REF_ID, "")[0] is True
+    assert "nothing to sit on" in run_command(consts.ACTION_SIT, CHEST_REF_ID, "")[1]
+    assert run_command(consts.ACTION_LOOT, CHEST_REF_ID, "")[0] is True
+    assert run_command(consts.ACTION_LOOT, LOCKED_CHEST_REF_ID, "")[1] == "Strongbox is locked."
+    assert is_sitting_after(consts.ACTION_SIT, False) is True and is_waiting_after(consts.ACTION_SIT, False) is True
+    assert is_sitting_after(consts.ACTION_WAIT, True) is True and is_sitting_after(consts.ACTION_GIVE, True) is True
+    assert is_sitting_after(consts.ACTION_FOLLOW, True) is False and is_sitting_after(consts.ACTION_ATTACK, True) is False

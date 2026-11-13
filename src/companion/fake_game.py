@@ -45,7 +45,26 @@ PLACES: list[list[str]] = [
     ["1", "20", "90", "0", "0", "Warmaiden's"],
     ["1", "140", "-40", "0", "0", "Dragonsreach"],
 ]
-NATIVE_PLUGIN_VERSION: int = 3
+# The things close to the player as the plugin writes them: kind (0 = furniture, 1 = container, 2 = item), ref ID,
+# distance and angle from the player, 1 for a seat or a locked container, name
+THINGS: list[list[str]] = [
+    ["0", "0005A3F1", "3", "-90", "1", "Wooden Bench"],
+    ["0", "0005A3F2", "6", "120", "0", "Grindstone"],
+    ["1", "0005A400", "4", "30", "0", "Chest"],
+    ["1", "0005A401", "9", "-150", "1", "Strongbox"],
+    ["2", "0005A410", "2", "60", "0", "Iron Dagger"],
+]
+SEAT_REF_ID: str = "0005A3F1"
+CHEST_REF_ID: str = "0005A400"
+LOCKED_CHEST_REF_ID: str = "0005A401"
+# What the chest among the THINGS holds
+CHEST_ITEMS: list[tuple[str, int, int, int, str]] = [
+    ("0003EADD", 1, 46, 0, "Potion of Minor Healing"), ("0000000F", 40, 32, 0, "Gold"),
+]
+# What the game calls sitting and not sitting (Actor.GetSitState)
+SIT_STATE_SEATED: int = 3
+SIT_STATE_STANDING: int = 0
+NATIVE_PLUGIN_VERSION: int = 4
 # What was said since the last state as the SKSE plugin writes it: seconds ago, ref ID of the speaker, name, text
 HEARD: list[list[str]] = [
     ["12", "00000014", "Dragonborn", "What do you know about dragons?"],
@@ -93,7 +112,8 @@ def to_papyrus_number(ref_id: str) -> int:
 
 
 def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "",
-                has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "") -> dict:
+                has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
+                is_sitting: bool = False, has_things: bool = True) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -101,6 +121,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         inventory: Whose inventory the server asked for (companion_constants.INVENTORY_...), or empty for none
         corpse_ref_id: For INVENTORY_CORPSE: whose body the server asked about
         report: What became of a loot or move_to since the last state, or empty
+        is_sitting: Whether the companion sits on a seat because of the command sit
+        has_things: Whether the server asked for the things close to the player
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -116,7 +138,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_PLAYER_NAME: "Dragonborn",
         game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0],
         # Snow at 14:35
-        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1],
+        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
         game_state.KEY_QUEST_TARGETS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUEST_TARGETS],
         game_state.KEY_PLACES: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in PLACES],
@@ -124,6 +146,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_COMPANION_VALUES: [
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
+            SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -138,10 +161,21 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     for key, items, choices in wanted_inventories:
         if inventory in choices:
             state[key], state[key + game_state.NAMES_SUFFIX] = build_inventory(items)
+    # Three numbers for what the server asked about: ref ID, container or body, locked. A locked container has no inventory
+    names_key = game_state.KEY_INVENTORY_CORPSE + game_state.NAMES_SUFFIX
     if inventory == consts.INVENTORY_CORPSE and corpse_ref_id == CORPSE_REF_ID:
-        state[game_state.KEY_CORPSE] = [to_papyrus_number(CORPSE_REF_ID)]
+        state[game_state.KEY_CORPSE] = [to_papyrus_number(CORPSE_REF_ID), 0, 0]
         state[game_state.KEY_CORPSE_NAME] = "Bandit Outlaw"
-        state[game_state.KEY_INVENTORY_CORPSE], state[game_state.KEY_INVENTORY_CORPSE + game_state.NAMES_SUFFIX] = build_inventory(CORPSE_ITEMS)
+        state[game_state.KEY_INVENTORY_CORPSE], state[names_key] = build_inventory(CORPSE_ITEMS)
+    if inventory == consts.INVENTORY_CORPSE and corpse_ref_id == CHEST_REF_ID:
+        state[game_state.KEY_CORPSE] = [to_papyrus_number(CHEST_REF_ID), 1, 0]
+        state[game_state.KEY_CORPSE_NAME] = "Chest"
+        state[game_state.KEY_INVENTORY_CORPSE], state[names_key] = build_inventory(CHEST_ITEMS)
+    if inventory == consts.INVENTORY_CORPSE and corpse_ref_id == LOCKED_CHEST_REF_ID:
+        state[game_state.KEY_CORPSE] = [to_papyrus_number(LOCKED_CHEST_REF_ID), 1, 1]
+        state[game_state.KEY_CORPSE_NAME] = "Strongbox"
+    if has_things:
+        state[game_state.KEY_THINGS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in THINGS]
     if report != "":
         state[game_state.KEY_REPORT] = report
     if has_heard_lines:
@@ -150,7 +184,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
 
 
 def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str, str]:
-    """Answers attack, move_to, loot, flee and stand_down like the game mod does
+    """Answers attack, move_to, loot, sit, flee and stand_down like the game mod does
 
     Returns:
         Whether it worked, the text for the AI, and whom the companion fights afterwards (ref_id or empty)
@@ -159,19 +193,30 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
         for character in NEARBY:
             if character["ref_id"] == target:
                 return True, f"You attack {character['name']} now.", target
-        return False, f"There is no character with the ref_id '{target}'. Take the ref_id from 'nearby' in STATE.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_MOVE_TO:
         for character in NEARBY:
             if character["ref_id"] == target:
                 return True, f"You walk to {character['name']} and wait there. 'follow' brings you back to the player.", target_ref_id
-        return False, f"There is no character with the ref_id '{target}'. Take the ref_id from 'nearby' in STATE.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_LOOT:
         for character in NEARBY:
             if character["ref_id"] == target:
                 if not character.get("dead", False):
                     return False, f"{character['name']} is alive. You can only loot the dead.", target_ref_id
                 return True, f"You walk to the body of {character['name']} to take everything it carries. Your next STATE tells you what you got.", target_ref_id
-        return False, f"There is no character with the ref_id '{target}'. Take the ref_id from 'nearby' in STATE.", target_ref_id
+        if target == CHEST_REF_ID:
+            return True, "You walk to Chest to take everything in it. Your next STATE tells you what you got.", target_ref_id
+        if target == LOCKED_CHEST_REF_ID:
+            return False, "Strongbox is locked.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_SIT:
+        for kind, ref_id, distance, angle, flag, name in THINGS:
+            if ref_id == target:
+                if kind != "0":
+                    return False, f"{name} is nothing to sit on. Take the ref_id of a seat from 'Nearby' in STATE.", target_ref_id
+                return True, f"You walk to {name} and sit down. 'follow' makes you get up and come along again.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action in consts.ITEM_ACTIONS:
         items = PLAYER_ITEMS if action == consts.ACTION_TAKE else OWN_ITEMS
         for item_id, count, form_type, equipped, name in items:
@@ -187,9 +232,19 @@ def run_command(action: str, target: str, target_ref_id: str) -> tuple[bool, str
     return True, f"Fake game did '{action}'.", target_ref_id
 
 
+def is_sitting_after(action: str, is_sitting: bool) -> bool:
+    """Like the game: 'sit' seats the companion (the simulator's companion is there at once), 'wait', 'stand_down' and
+    what it does with its things leave it seated, every other command makes it get up"""
+    if action == consts.ACTION_SIT:
+        return True
+    if action in (consts.ACTION_WAIT, consts.ACTION_STAND_DOWN) or action in consts.ITEM_ACTIONS:
+        return is_sitting
+    return False
+
+
 def is_waiting_after(action: str, is_waiting: bool) -> bool:
-    """Like the game: 'wait' and 'move_to' make the companion stay, 'follow' makes it come along again, everything else changes nothing"""
-    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO):
+    """Like the game: 'wait', 'move_to' and 'sit' make the companion stay, 'follow' makes it come along again, everything else changes nothing"""
+    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO, consts.ACTION_SIT):
         return True
     if action == consts.ACTION_FOLLOW:
         return False
@@ -216,19 +271,22 @@ def main():
     is_waiting = False
     target_ref_id = ""
     is_fleeing = False
+    is_sitting = False
     walk_target_ref_id = ""
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
     wanted_inventory = ""
     wanted_corpse = ""
+    are_things_wanted = False
     print(f"Fake game polling {url} (Ctrl+C to stop)")
     while True:
         poll_id += 1
         request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results}
         if is_state_wanted:
             # Only the first state has something that was said
-            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse)
+            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted)
+            are_things_wanted = False
             wanted_inventory = ""
             wanted_corpse = ""
         body = json.dumps(request_body).encode("utf-8")
@@ -255,12 +313,14 @@ def main():
                 is_state_wanted = True
                 wanted_inventory = str(detail or "")
                 wanted_corpse = str(target or "")
+                are_things_wanted = bool(command.get(consts.KEY_COMMAND_THINGS))
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             is_ok, message, target_ref_id = run_command(str(action), str(target), target_ref_id)
             if is_ok:
                 is_waiting = is_waiting_after(str(action), is_waiting)
                 is_fleeing = is_fleeing_after(str(action))
+                is_sitting = is_sitting_after(str(action), is_sitting)
                 walk_target_ref_id = walk_target_after(str(action), str(target))
             results.append({
                 consts.KEY_COMMAND_ID: command.get(consts.KEY_COMMAND_ID),

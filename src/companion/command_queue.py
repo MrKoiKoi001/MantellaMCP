@@ -25,6 +25,10 @@ class CompanionCommandQueue:
     # The game shows a longer speech in several pieces. Pieces of one speaker that follow each other this closely become one line
     HEARD_MERGE_SECONDS: float = 15.0
     MAX_MERGED_HEARD_LENGTH: int = 600
+    # How many characters (and how many things) the state lists if the AI names no number, and the most it can ask for.
+    # The game mod has the same two numbers (DefaultListLimit and HighestListLimit in KI_MCP_Gefaehrte_Loop.psc)
+    DEFAULT_MAX_LINES: int = 10
+    HIGHEST_MAX_LINES: int = 30
     # Collecting a whole inventory takes the game several seconds
     INVENTORY_TIMEOUT_SECONDS: float = 15.0
     # What became of commands that take time (loot, move_to) is kept here until the AI asks for the state the next time
@@ -97,13 +101,15 @@ class CompanionCommandQueue:
     # ------------------------------------------------------------------- MCP side
 
     async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0,
-                           count: int = 1, item: str = "") -> dict[str, Any]:
+                           count: int = 1, item: str = "", things: bool = False) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
             target: ref_id of the target character or ID of the item (see ref_ids.py), or empty
             count: For give and take: how many of the item, 0 = all of them
             item: For loot: ID of the one item to take from the body, or empty for everything
+            things: For report_state: whether the state should carry the things close to the player.
+                'count' is then how many characters (and things of each kind) the state should list at most
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
                 unless a request for the state came in together with the command
 
@@ -127,6 +133,7 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_COUNT: count,
                 consts.KEY_COMMAND_ITEM_HIGH: item_high,
                 consts.KEY_COMMAND_ITEM_LOW: item_low,
+                consts.KEY_COMMAND_THINGS: int(things),
             }
             self.__pending_commands.append(command)
             self.__changed.notify_all()
@@ -150,15 +157,21 @@ class CompanionCommandQueue:
             message = str(result.get(consts.KEY_RESULT_MESSAGE, ""))
             return self.__status(consts.STATUS_DONE if is_ok else consts.STATUS_FAILED, message)
 
-    async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "") -> dict[str, Any]:
+    async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "",
+                        is_for_the_ai: bool = True, things: bool = False, max_lines: int = DEFAULT_MAX_LINES) -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
             inventory: Whose inventory the fresh state should carry (companion_constants.INVENTORY_...), or empty for none
-            corpse: ref_id of a dead character. The fresh state then carries what that body has on it, instead of 'inventory'
+            corpse: ref_id of a dead character or a container. The fresh state then carries what is in it, instead of 'inventory'
+            things: Whether the fresh state should carry the things close to the player (furniture, containers, loose items)
+            max_lines: How many characters, and how many things, the fresh state should list at most
+            is_for_the_ai: False if the server itself needs the state (eg to pick a seat). Then what was heard and
+                what became of earlier commands stays kept for the next time the AI asks
 
         Returns:
             A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted', 'corpse_wanted',
+            'things_wanted', 'max_lines',
             'heard' (what the characters in the game said since this was called the last time)
             and 'reports' (what became of loot and move_to since then)
         """
@@ -172,7 +185,7 @@ class CompanionCommandQueue:
 
         is_fresh = False
         if is_connected:
-            request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory)
+            request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory, count=max_lines, things=things)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -191,8 +204,12 @@ class CompanionCommandQueue:
                 "inventory_wanted": inventory if is_fresh else "",
                 "inventory_missed": inventory != "" and not is_fresh,
                 "corpse_wanted": corpse if is_fresh else "",
-                "heard": self.__take_heard(),
-                "reports": self.__take_reports(),
+                # The kept state may still carry things from an earlier question
+                "things_wanted": things and is_fresh,
+                "things_missed": things and not is_fresh,
+                "max_lines": max_lines,
+                "heard": self.__take_heard() if is_for_the_ai else [],
+                "reports": self.__take_reports() if is_for_the_ai else [],
             }
 
     # -------------------------------------------------------------------- helpers
