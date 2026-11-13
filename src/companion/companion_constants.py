@@ -142,6 +142,16 @@ class companion_constants:
     EXPRESSION_FULL_STRENGTH: int = 100
     # The companion speaks the text in 'detail' aloud. For the game: 'count' is the number of the line to speak (see voice.py)
     ACTION_SAY: str = "say"
+    # say: the animation event of the game that moves the hands of the companion while it talks ("" = none).
+    # The server picks one of TALK_EVENTS for every sentence if the setting talk_gestures is on
+    KEY_COMMAND_TALK: str = "companion_talk"
+    TALK_EVENTS: list[str] = ["IdleDialogueMovingTalkA", "IdleDialogueMovingTalkB", "IdleDialogueMovingTalkC", "IdleDialogueMovingTalkD"]
+    # The companion puts its weapon away and keeps it away although the player draws one, until draw
+    ACTION_SHEATHE: str = "sheathe"
+    ACTION_DRAW: str = "draw"
+    # The companion opens or closes a door that only swings (no door into another area). Without a target: the nearest one
+    ACTION_OPEN: str = "open"
+    ACTION_CLOSE: str = "close"
     ACTION_EQUIP: str = "equip"
     ACTION_UNEQUIP: str = "unequip"
     ACTION_GIVE: str = "give"
@@ -159,6 +169,8 @@ class companion_constants:
         ACTION_MOVE_TO,
         ACTION_MOVE,
         ACTION_ENTER,
+        ACTION_OPEN,
+        ACTION_CLOSE,
         ACTION_MAKE_ROOM,
         ACTION_FACE,
         ACTION_LOOT,
@@ -168,6 +180,8 @@ class companion_constants:
         ACTION_GESTURE,
         ACTION_EXPRESSION,
         ACTION_SAY,
+        ACTION_SHEATHE,
+        ACTION_DRAW,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
         ACTION_GIVE,

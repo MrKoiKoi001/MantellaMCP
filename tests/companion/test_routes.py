@@ -1820,3 +1820,133 @@ def test_the_xtts_server_is_started_when_asked_for(tmp_path):
     assert load_settings(str(file))[0].xtts_start == "" and "xtts_start =\n" in file.read_text(encoding="utf-8")
     file.write_text("[companion]\nvoice = xtts\nxtts_start = \"D:\\xtts\\start-xtts-server.bat\"\n", encoding="utf-8")
     assert load_settings(str(file))[0].xtts_start == "D:\\xtts\\start-xtts-server.bat"
+
+
+def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
+    import array
+    import sys
+    import wave
+
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, run_command
+    from src.companion.loudness import change_volume, scale_sample
+    from src.companion.settings import load_settings
+    from src.companion.state_text import describe_state
+    from src.companion.voice import LINE_FILES, CompanionVoice
+
+    def state_text(raw: dict) -> str:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": game_state.read_game_state(raw)})
+
+    # The state tells whether the player sits or sleeps, and whether the companion keeps its weapon put away
+    plain = game_state.read_game_state(build_state())
+    assert (plain["player"]["sitting"], plain["player"]["sleeping"], plain["companion"]["weapon_kept_away"]) == (False, False, False)
+    seated = build_state(is_player_sitting=True, is_weapon_kept_away=True)
+    read = game_state.read_game_state(seated)
+    assert read["player"]["sitting"] is True and read["companion"]["weapon_kept_away"] is True
+    text = state_text(seated)
+    player_line = [line for line in text.splitlines() if line.startswith("Player")][0]
+    assert "sitting" in player_line and "weapon kept away (sheathe)" in text
+    asleep = build_state()
+    asleep[game_state.KEY_PLAYER_VALUES][game_state.PLAYER_PLACE_OF_SLEEPING] = 3
+    assert "lying asleep" in state_text(asleep)
+    # A drawn weapon counts, whatever sheathe set before (a fight)
+    assert "weapon kept away" not in state_text(build_state(are_weapons_drawn=True, is_weapon_kept_away=True))
+    # An older game mod sends fewer numbers and says nothing about all that
+    older = build_state()
+    older[game_state.KEY_PLAYER_VALUES] = older[game_state.KEY_PLAYER_VALUES][:game_state.PLAYER_VALUE_COUNT_WITHOUT_SITTING]
+    older[game_state.KEY_COMPANION_VALUES] = older[game_state.KEY_COMPANION_VALUES][:game_state.COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON]
+    read = game_state.read_game_state(older)
+    assert "sitting" not in read["player"] and "weapon_drawn" in read["player"] and "weapon_kept_away" not in read["companion"]
+
+    # The fake game answers the new commands like the game mod
+    assert run_command(consts.ACTION_SHEATHE, "", "")[1].startswith("You put your weapon away.")
+    assert run_command(consts.ACTION_DRAW, "", "")[1].startswith("You draw your weapon.")
+    assert run_command(consts.ACTION_OPEN, "", "")[:2] == (True, "You open the door.")
+    assert run_command(consts.ACTION_CLOSE, "", "")[:2] == (True, "You close the door.")
+    assert "'enter' takes you through it" in run_command(consts.ACTION_OPEN, "0001A6F4", "")[1]
+
+    # Louder: the quiet parts in full, the loud parts pressed together so that nothing is cut off
+    assert scale_sample(0.1, 2.5) == 0.25 and 0.9 < scale_sample(0.9, 2.5) < 1.0 and scale_sample(-0.9, 2.5) < -0.9
+
+    def write_sound(file, values: list[int]) -> None:
+        with wave.open(str(file), "wb") as sound:
+            sound.setnchannels(1)
+            sound.setsampwidth(2)
+            sound.setframerate(24000)
+            sound.writeframes(array.array("h", values).tobytes())
+
+    def read_sound(file) -> list[int]:
+        with wave.open(str(file), "rb") as sound:
+            samples = array.array("h")
+            samples.frombytes(sound.readframes(sound.getnframes()))
+        return list(samples)
+
+    sound_file = tmp_path / "sound.wav"
+    write_sound(sound_file, [1000, -1000, 30000, -30000])
+    assert change_volume(str(sound_file), 1.0) is False and read_sound(sound_file) == [1000, -1000, 30000, -30000]
+    assert change_volume(str(sound_file), 0.5) is True and read_sound(sound_file) == [500, -500, 15000, -15000]
+    write_sound(sound_file, [1000, -1000, 30000, -30000])
+    assert change_volume(str(sound_file), 2.5) is True
+    louder = read_sound(sound_file)
+    assert louder[:2] == [2500, -2500] and 30000 < louder[2] <= 32767 and -32768 <= louder[3] < -30000
+
+    # say: the setting voice_volume counts for every sentence, 'loud' comes on top and ends the sentence with "!"
+    piper = tmp_path / "stand_in_piper.py"
+    piper.write_text(
+        "import sys, wave, array\n"
+        "for line in sys.stdin:\n"
+        "    if line.startswith('load_model'):\n"
+        "        print('Model loaded', flush=True)\n"
+        "    elif line.startswith('synthesize '):\n"
+        "        with open('said.txt', 'a', encoding='utf-8') as said:\n"
+        "            said.write(line)\n"
+        "        with wave.open('out.wav', 'wb') as sound:\n"
+        "            sound.setnchannels(1); sound.setsampwidth(2); sound.setframerate(22050)\n"
+        "            sound.writeframes(array.array('h', [1000] * 50).tobytes())\n", encoding="utf-8")
+    game_folder = tmp_path / "game"
+    voice_folder = game_folder / "Data" / "Sound" / "Voice" / "KI_MCP_Gefaehrte.esp" / "FemaleEvenToned"
+    voice_folder.mkdir(parents=True)
+    voice = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(piper)],
+                           volume_percent=200, talk_gestures=True)
+    assert voice.speak("Follow me.", "FemaleEvenToned") == (True, "", 1)
+    assert read_sound(voice_folder / LINE_FILES[0])[0] == 2000
+    assert voice.speak("Watch out, a trap.", "FemaleEvenToned", True) == (True, "", 2)
+    # 200 % times what 'loud' adds would be five times as loud, and four times is the most there is
+    assert read_sound(voice_folder / LINE_FILES[1])[0] == 4000
+    quiet = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(piper)])
+    assert quiet.speak("Halt!", "FemaleEvenToned", True)[0] is True and quiet.has_talk_gestures is False
+
+    # The game gets the animation event for the hands with say, and the AI can ask for a raised voice
+    with TestClient(create_app(TOKEN, hold_seconds=5, voice=voice)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You say it aloud."}]
+            client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Archers on the tower.", "loud": True}}))
+        assert answer == {"status": consts.STATUS_DONE, "message": "You say it aloud."}
+        sent = received_commands[0]
+        assert sent[consts.KEY_COMMAND_TALK] in consts.TALK_EVENTS and sent[consts.KEY_COMMAND_DETAIL] == "Archers on the tower."
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {"sheathe", "draw", "open", "close"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
+        assert tools[0]["inputSchema"]["properties"]["loud"]["type"] == "boolean"
+        assert "about 200 meters" in tools[1]["description"] and "lying asleep" in tools[1]["description"]
+    # What Piper was given: the sentence that is called out ends with an exclamation mark, the others stay as written
+    said_files = list(tmp_path.glob("**/said.txt")) + list(__import__("pathlib").Path(__import__("tempfile").gettempdir()).glob("companion_voice_*/said.txt"))
+    said = "".join(file.read_text(encoding="utf-8") for file in said_files)
+    assert "synthesize Follow me.\n" in said and "synthesize Watch out, a trap!\n" in said and "synthesize Archers on the tower!\n" in said
+
+    # The settings: the volume in percent within its limits, the hands move unless they are switched off
+    file = tmp_path / "companion.ini"
+    settings, _ = load_settings(str(file))
+    assert (settings.voice_volume, settings.talk_gestures) == (100, True) and load_settings(str(file))[0] == settings
+    file.write_text("[companion]\nvoice_volume = 250 %\ntalk_gestures = off\n", encoding="utf-8")
+    settings, _ = load_settings(str(file))
+    assert (settings.voice_volume, settings.talk_gestures) == (250, False)
+    file.write_text("[companion]\nvoice_volume = 9000\n", encoding="utf-8")
+    assert load_settings(str(file))[0].voice_volume == 400 and load_settings(str(file))[0].talk_gestures is True

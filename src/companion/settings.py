@@ -20,6 +20,11 @@ KEY_XTTS_URL: str = "xtts_url"
 KEY_XTTS_VOICE: str = "xtts_voice"
 KEY_XTTS_LANGUAGE: str = "xtts_language"
 KEY_XTTS_START: str = "xtts_start"
+KEY_VOICE_VOLUME: str = "voice_volume"
+KEY_TALK_GESTURES: str = "talk_gestures"
+DEFAULT_VOICE_VOLUME: int = 100
+LOWEST_VOICE_VOLUME: int = 10
+HIGHEST_VOICE_VOLUME: int = 400
 VOICE_PIPER: str = "piper"
 VOICE_XTTS: str = "xtts"
 KEY_LIPS: str = "lips"
@@ -67,6 +72,16 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 ; Empty: the XTTS server is not started, start it yourself
 {KEY_XTTS_START} =
 
+; How loud the voice of the companion is put into the game, in percent: 100 = as the voice makes it, 200 = twice as loud
+; ({LOWEST_VOICE_VOLUME} to {HIGHEST_VOICE_VOLUME}). Above 100 the loud parts are pressed together, so that nothing crackles.
+; A sentence the companion calls out (say with loud) is louder still.
+; Empty: {DEFAULT_VOICE_VOLUME}
+{KEY_VOICE_VOLUME} =
+
+; on = the companion moves its hands while it talks, as long as it stands around.
+; off = it keeps still.
+{KEY_TALK_GESTURES} = on
+
 ; on = the lips of the companion move while it speaks. That takes a moment longer for every sentence.
 ; off = the mouth stays shut.
 ; After changing this, start the server first and then the game: the game only finds lip files that are there when it starts.
@@ -97,6 +112,8 @@ class CompanionSettings:
     xtts_voice: str = DEFAULT_XTTS_VOICE
     xtts_language: str = DEFAULT_XTTS_LANGUAGE
     xtts_start: str = ""
+    voice_volume: int = DEFAULT_VOICE_VOLUME
+    talk_gestures: bool = True
     lips: bool = False
     lipgen_folder: str = ""
     facefx_folder: str = ""
@@ -140,6 +157,12 @@ def load_settings(file: str = SETTINGS_FILE) -> tuple[CompanionSettings, str]:
     settings.xtts_voice = read(KEY_XTTS_VOICE) or DEFAULT_XTTS_VOICE
     settings.xtts_language = read(KEY_XTTS_LANGUAGE) or DEFAULT_XTTS_LANGUAGE
     settings.xtts_start = read(KEY_XTTS_START)
+    volume_text = read(KEY_VOICE_VOLUME).rstrip("%").strip()
+    if volume_text.isdecimal():
+        settings.voice_volume = min(max(int(volume_text), LOWEST_VOICE_VOLUME), HIGHEST_VOICE_VOLUME)
+    # A file from before this setting says nothing about it, and then the hands move
+    talk_text = read(KEY_TALK_GESTURES).lower()
+    settings.talk_gestures = talk_text in ON_WORDS or talk_text == ""
     settings.lips = read(KEY_LIPS).lower() in ON_WORDS
     settings.lipgen_folder = read(KEY_LIPGEN_FOLDER)
     settings.facefx_folder = read(KEY_FACEFX_FOLDER)

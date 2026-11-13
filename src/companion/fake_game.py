@@ -146,7 +146,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
                 is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
-                has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False, find: str = "") -> dict:
+                has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False, find: str = "",
+                is_player_sitting: bool = False, is_weapon_kept_away: bool = False) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -165,6 +166,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         has_stats: Whether the server asked for the level, the skills and so on of the player
         is_visible_only: Whether the server asked only for what can be seen. The simulator sends the same characters
             and only says that it filtered them
+        is_player_sitting: Whether the player sits on a seat
+        is_weapon_kept_away: Whether the companion keeps its weapon put away because of the command sheathe
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -178,7 +181,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     state: dict = {
         game_state.KEY_LOCATION: "Whiterun, Plains District",
         game_state.KEY_PLAYER_NAME: "Dragonborn",
-        game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0, int(are_weapons_drawn)],
+        game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0, int(are_weapons_drawn),
+                                       SIT_STATE_SEATED if is_player_sitting else SIT_STATE_STANDING, 0],
         # Snow at 14:35
         game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL, int(is_around_companion), int(is_visible_only)],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
@@ -191,6 +195,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
             SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
             int(are_weapons_drawn), to_papyrus_number(look_target_ref_id), to_papyrus_number(leader_ref_id),
+            int(is_weapon_kept_away),
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -245,7 +250,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
 
 
 # What the companion does without changing where it walks, whom it follows or whether it sits
-QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE]
+QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE,
+                            consts.ACTION_SHEATHE, consts.ACTION_DRAW, consts.ACTION_OPEN, consts.ACTION_CLOSE]
 
 
 def name_of(ref_id: str) -> str:
@@ -348,6 +354,16 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_SAY:
         return True, "You say it aloud.", target_ref_id
+    if action == consts.ACTION_SHEATHE:
+        return True, ("You put your weapon away. It stays away even when the player draws a weapon, until 'draw'. "
+                      "In a fight you draw it all the same."), target_ref_id
+    if action == consts.ACTION_DRAW:
+        return True, "You draw your weapon. From now on you draw it and put it away together with the player again.", target_ref_id
+    if action in (consts.ACTION_OPEN, consts.ACTION_CLOSE):
+        # The fake game has one door that swings, right next to the companion, and the doors of 'Doors' lead elsewhere
+        if target != "":
+            return False, f"That door leads into another place (ref_id {target}). 'enter' takes you through it.", target_ref_id
+        return True, ("You open the door." if action == consts.ACTION_OPEN else "You close the door."), target_ref_id
     if action == consts.ACTION_GESTURE:
         if item_id == "":
             return True, "You stand normally again.", target_ref_id

@@ -356,6 +356,10 @@ def _describe_player(player: Any) -> str:
         parts.append("fighting" if player["in_combat"] else "not fighting")
     if player.get("weapon_drawn"):
         parts.append("weapon drawn")
+    if player.get("sleeping"):
+        parts.append("lying asleep")
+    elif player.get("sitting"):
+        parts.append("sitting")
     if "facing_degrees" in player:
         parts.append(f"faces {compass_direction(player['facing_degrees'])}")
     if "position" in player:
@@ -404,6 +408,8 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append("fighting")
     if companion.get("weapon_drawn"):
         parts.append("weapon drawn")
+    elif companion.get("weapon_kept_away"):
+        parts.append("weapon kept away (sheathe)")
     if "expression" in companion:
         parts.append(f"face {companion['expression']}")
     look_target_ref_id = companion.get("look_target_ref_id")

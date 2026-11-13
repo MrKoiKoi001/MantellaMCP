@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import random
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -14,7 +15,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.18"
+SERVER_VERSION: str = "0.19"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -108,6 +109,16 @@ TOOLS: list[dict[str, Any]] = [
             "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
             "you there. " + SAY_LANGUAGE_NOTE + "One or two sentences at a time. "
+            "With 'loud': true you call it out with a raised voice: for a warning, or when the player is far away. "
+            "When you speak to someone other than the player, use look_at on that character first: then you look at them "
+            "while you talk instead of turning to the player (that goes together with expression). Afterwards look_at "
+            "without a target lets you look around freely again. "
+            "sheathe = put your weapon away and keep it away even when the player draws one (otherwise you draw whenever "
+            "the player does). In a fight you draw it all the same. draw = draw your weapon, and from then on draw it and "
+            "put it away together with the player again. "
+            "open and close = open or close a door that only swings, like the door of a room or a gate. The target is its "
+            "ref_id, without a target it is the door nearest to you. You have to stand within about 5 meters of it; if not, "
+            "the answer names its ref_id for move_to. The doors from 'Doors' lead into another place, those are for 'enter'. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
             "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
             "unequip = put the item away, "
@@ -122,6 +133,7 @@ TOOLS: list[dict[str, Any]] = [
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
                 "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell."},
+                "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
             },
             "required": ["action"],
         },
@@ -132,14 +144,15 @@ TOOLS: list[dict[str, Any]] = [
             "Get the current situation in the game as a few short lines. "
             "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
             "(clear, cloudy, rain or snow). "
-            "'Player': health, fighting or not, 'weapon drawn' if so, the compass direction the player faces, and the position x,y,z "
+            "'Player': health, fighting or not, 'weapon drawn' if so, 'sitting' or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
             "seen from you, waiting, following (the player, or the character named behind it), sitting or walking to someone, "
-            "retreating, whom it fights, 'weapon drawn' if so, the look on its face and what it looks at because of look_at. "
+            "retreating, whom it fights, 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
             "If you are not where the player is, the line names the place you are in instead. "
             "Without a follower of the player you have no body. "
-            "'Nearby': up to 10 lines (more with 'max'), one per character within about 50 meters of the player: first the living, hostile "
+            "'Nearby': up to 10 lines (more with 'max'), one per character, people and animals, within about 50 meters of the player (outdoors about 200 meters, so that "
+            "archers on a tower and game far off are in it): first the living, hostile "
             "ones before the others, then the dead (marked 'dead'), each nearest first. "
             "ref_id, name, distance and direction from the player, after 'from you' the same seen from your own character, "
             "and 'hostile' if it is hostile to the player. "
@@ -377,12 +390,15 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                 return _tool_json({"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True)
             item = format_ref_id(item_form_id)
         if action == consts.ACTION_SAY:
-            problem, line = await _prepare_speech(detail, queue, voice)
+            is_loud = arguments.get("loud") is True
+            problem, line = await _prepare_speech(detail, queue, voice, is_loud)
             if problem != "":
                 return _tool_json({"status": consts.STATUS_FAILED, "message": problem}, True)
             # The game gets the number of the line to speak, the sound is in its folder already.
             # The text goes along for the subtitle, which would only show the "..." of the line otherwise
-            result = await queue.send_command(action, detail=clean_text(detail), count=line)
+            # Hands that move while talking: the game mod plays the animation event the server picks
+            talk = random.choice(consts.TALK_EVENTS) if voice is not None and voice.has_talk_gestures else ""
+            result = await queue.send_command(action, detail=clean_text(detail), count=line, talk=talk)
             return _tool_json(result, result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED))
         if action == consts.ACTION_EXPRESSION:
             # The game gets the number of the look and how strong it is, the name only goes along for its answer
@@ -478,7 +494,7 @@ def _direction_word(words: list[str]) -> str:
     return "-".join(" ".join(words).lower().replace("_", " ").replace("-", " ").split())
 
 
-async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: CompanionVoice | None) -> tuple[str, int]:
+async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: CompanionVoice | None, is_loud: bool = False) -> tuple[str, int]:
     """Makes the sound of what the companion says and puts it into the game folder (see voice.py)
 
     Returns:
@@ -500,7 +516,7 @@ async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: Compan
         return (f"The game did not tell which voice {companion.get('name')} has. That needs the newest plugin of the game mod "
                 "(KI_MCP_Gefaehrte.dll, interface version 6)."), 0
     # Making the sound takes a moment (seconds with XTTS), and the server has to keep answering the game meanwhile
-    is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder)
+    is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder, is_loud)
     return ("" if is_ok else problem), line
 
 

@@ -128,10 +128,17 @@ NAMES_SUFFIX: str = "_names"
 # How long the game mod took in milliseconds: for the whole state, and for the characters nearby alone
 KEY_TIMES: str = "times_ms"
 
-PLAYER_VALUE_COUNT: int = 8
-# Older game mods say nothing about the weapon
+PLAYER_VALUE_COUNT: int = 10
+# Older game mods say nothing about sitting and sleeping, still older ones nothing about the weapon
+PLAYER_VALUE_COUNT_WITHOUT_SITTING: int = 8
 PLAYER_VALUE_COUNT_WITHOUT_WEAPON: int = 7
-COMPANION_VALUE_COUNT: int = 16
+PLAYER_PLACE_OF_WEAPON: int = 7
+PLAYER_PLACE_OF_SITTING: int = 8
+PLAYER_PLACE_OF_SLEEPING: int = 9
+COMPANION_VALUE_COUNT: int = 17
+# Older game mods say nothing about a weapon that is kept put away (sheathe)
+COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON: int = 16
+COMPANION_PLACE_OF_KEPT_WEAPON: int = 16
 # Older game mods say nothing about whom the companion follows, still older ones nothing about the weapon and the look,
 # and the oldest nothing about sitting either
 COMPANION_VALUE_COUNT_WITHOUT_LEADER: int = 15
@@ -152,6 +159,8 @@ COMPANION_STATS_COUNT: int = 6
 NEARBY_LINE_PART_COUNT: int = 5
 # What the game calls sitting (Actor.GetSitState): 3 = seated, 4 = seated and about to get up
 SIT_STATES_SEATED: tuple[int, ...] = (3, 4)
+# What the game calls sleeping (Actor.GetSleepState): 3 = asleep, 4 = asleep and about to wake up
+SLEEP_STATES_ASLEEP: tuple[int, ...] = (3, 4)
 WORLD_VALUE_COUNT: int = 7
 WORLD_PLACE_OF_PROTOCOL: int = 4
 WORLD_PLACE_OF_AROUND: int = 5
@@ -161,7 +170,7 @@ WORLD_PLACE_OF_VISIBLE: int = 6
 VISIBLE_HALF_ANGLE_DEGREES: int = 60
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 6
+GAME_PROTOCOL: int = 7
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -266,15 +275,18 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     if isinstance(player_name, str):
         player["name"] = player_name
     player_values = _numbers(raw.get(KEY_PLAYER_VALUES))
-    if player_values is not None and len(player_values) in (PLAYER_VALUE_COUNT, PLAYER_VALUE_COUNT_WITHOUT_WEAPON):
+    if player_values is not None and len(player_values) in (PLAYER_VALUE_COUNT, PLAYER_VALUE_COUNT_WITHOUT_SITTING, PLAYER_VALUE_COUNT_WITHOUT_WEAPON):
         health, in_combat, position_x, position_y, position_z, facing, indoors = player_values[:PLAYER_VALUE_COUNT_WITHOUT_WEAPON]
         player["health_percent"] = health
         player["in_combat"] = in_combat != 0
         player["position"] = [position_x, position_y, position_z]
         player["facing_degrees"] = facing % 360
         state["indoors"] = indoors != 0
-        if len(player_values) == PLAYER_VALUE_COUNT:
-            player["weapon_drawn"] = player_values[-1] != 0
+        if len(player_values) > PLAYER_PLACE_OF_WEAPON:
+            player["weapon_drawn"] = player_values[PLAYER_PLACE_OF_WEAPON] != 0
+        if len(player_values) > PLAYER_PLACE_OF_SLEEPING:
+            player["sitting"] = player_values[PLAYER_PLACE_OF_SITTING] in SIT_STATES_SEATED
+            player["sleeping"] = player_values[PLAYER_PLACE_OF_SLEEPING] in SLEEP_STATES_ASLEEP
     if len(player) > 0:
         state["player"] = player
 
@@ -370,7 +382,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     """No companion in the result means: the player has no follower at the moment"""
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
-    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
+    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
                                              COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
         return None
     (form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id, facing, retreating,
@@ -406,6 +418,8 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
             companion["look_target_ref_id"] = _ref_id(values[COMPANION_PLACE_OF_LOOK_TARGET])
     if len(values) > COMPANION_PLACE_OF_LEADER and values[COMPANION_PLACE_OF_LEADER] != 0:
         companion["leader_ref_id"] = _ref_id(values[COMPANION_PLACE_OF_LEADER])
+    if len(values) > COMPANION_PLACE_OF_KEPT_WEAPON:
+        companion["weapon_kept_away"] = values[COMPANION_PLACE_OF_KEPT_WEAPON] != 0
     for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() != "":

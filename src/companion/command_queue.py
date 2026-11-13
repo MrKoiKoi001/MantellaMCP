@@ -102,7 +102,8 @@ class CompanionCommandQueue:
 
     async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0,
                            count: int = 1, item: str = "", things: bool = False, around_companion: bool = False,
-                           stats: bool = False, visible: bool = False, space: bool = False, find: str = "") -> dict[str, Any]:
+                           stats: bool = False, visible: bool = False, space: bool = False, find: str = "",
+                           talk: str = "") -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -116,6 +117,7 @@ class CompanionCommandQueue:
             visible: For report_state: whether the list of characters should only hold those the viewer can see
             space: For report_state: whether the state should carry what is around the companion as rays find it
             find: For report_state: a name, or a part of one, to look for in the whole loaded area
+            talk: For say: the animation event that moves the hands of the companion while it talks, or empty
             things: For report_state: whether the state should carry the things close to the player.
                 'count' is then how many characters (and things of each kind) the state should list at most
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
@@ -147,6 +149,7 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_VISIBLE: int(visible),
                 consts.KEY_COMMAND_SPACE: int(space),
                 consts.KEY_COMMAND_FIND: find,
+                consts.KEY_COMMAND_TALK: talk,
             }
             self.__pending_commands.append(command)
             self.__changed.notify_all()

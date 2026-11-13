@@ -70,7 +70,8 @@ def main():
     lips = LipSync(game_folder, settings.lipgen_folder, settings.facefx_folder, settings.fonix_file) if settings.lips else None
     xtts = XttsVoice(settings.xtts_url, settings.xtts_voice, settings.xtts_language) if settings.voice == VOICE_XTTS else None
     xtts_start = xtts.start_server(settings.xtts_start) if xtts is not None and settings.xtts_start != "" else ""
-    voice = CompanionVoice(game_folder, args.piper_folder or settings.piper_folder, lips=lips, xtts=xtts)
+    voice = CompanionVoice(game_folder, args.piper_folder or settings.piper_folder, lips=lips, xtts=xtts,
+                           volume_percent=settings.voice_volume, talk_gestures=settings.talk_gestures)
     lip_files_change = voice.prepare_lip_files()
     app = create_app(token, args.hold_seconds, voice)
 
@@ -83,6 +84,7 @@ def main():
     if xtts_start != "":
         print(f"  XTTS server: {xtts_start}")
     print(f"  Voice of the companion (command say): {voice.describe_setup()}")
+    print(f"  Volume of the voice: {settings.voice_volume} %, hands move while talking: {'on' if settings.talk_gestures else 'off'}")
     print(f"  Lips of the companion: {voice.describe_lips()}")
     if lip_files_change != "":
         print(f"  Lip files: {lip_files_change}")

@@ -13,6 +13,9 @@ Mantella's own class is not used, because it needs all of Mantella's settings to
 Instead of Piper, an XTTS server can make the sound (see xtts.py, voice = xtts in companion.ini). It speaks other
 languages too. If it does not answer, Piper makes the sentence, so that the companion never falls silent.
 
+The sound can be made louder or quieter (voice_volume in companion.ini), and louder still for a sentence that is
+called out (say with 'loud', see loudness.py).
+
 If the lip movement is switched on, a lip file made from the sound goes next to the sound file (see lips.py).
 """
 import csv
@@ -27,6 +30,7 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from src.companion.lips import LIP_ENDING, PLACEHOLDER_FILE, SOUND_ENDING, LipSync
+from src.companion.loudness import LOUD_FACTOR, change_volume
 from src.companion.xtts import XttsVoice
 
 GAME_PLUGIN_NAME: str = "KI_MCP_Gefaehrte.esp"
@@ -41,6 +45,9 @@ OUTPUT_FILE: str = "out.wav"
 XTTS_OUTPUT_FILE: str = "out_xtts.wav"
 # The language Piper's voices of the game pronounce
 PIPER_LANGUAGE_NAME: str = "English"
+FULL_VOLUME_PERCENT: int = 100
+# What ends a sentence. A sentence that is called out gets an exclamation mark, which XTTS speaks with more force
+SENTENCE_ENDINGS: str = ".!?"
 MODEL_LOADED_TEXT: str = "Model loaded"
 LOAD_TIMEOUT_SECONDS: float = 20.0
 SYNTHESIZE_TIMEOUT_SECONDS: float = 15.0
@@ -91,13 +98,18 @@ class CompanionVoice:
     """Makes the sound of what the companion says and puts it into the game folder"""
 
     def __init__(self, game_folder: str = DEFAULT_GAME_FOLDER, piper_folder: str = DEFAULT_PIPER_FOLDER,
-                 piper_command: list[str] | None = None, lips: LipSync | None = None, xtts: XttsVoice | None = None) -> None:
+                 piper_command: list[str] | None = None, lips: LipSync | None = None, xtts: XttsVoice | None = None,
+                 volume_percent: int = FULL_VOLUME_PERCENT, talk_gestures: bool = False) -> None:
         """
         Args:
             piper_command: The command that starts Piper. Only tests set it, to put a stand-in in Piper's place
             lips: Makes the lip movement for what is said. Without it the mouth of the companion stays shut
             xtts: Makes the sound instead of Piper, as long as its server answers. Without it Piper always speaks
+            volume_percent: How loud the sound is put into the game: 100 = as the voice makes it, 200 = twice as loud
+            talk_gestures: Whether the companion should move its hands while it talks (the game mod plays an animation then)
         """
+        self.__volume: float = max(volume_percent, 1) / FULL_VOLUME_PERCENT
+        self.__has_talk_gestures: bool = talk_gestures
         self.__xtts: XttsVoice | None = xtts
         # Whether the last sentence had to be made by Piper although XTTS is wanted. Only for the lines the server prints
         self.__is_xtts_down: bool = False
@@ -132,6 +144,11 @@ class CompanionVoice:
                         f"Wanted: {self.__xtts.describe_setup()}, sound goes to {self.voice_root}")
             return f"on: {self.__xtts.describe_setup()} (Piper steps in if it stops answering), sound goes to {self.voice_root}"
         return f"on: Piper in {self.__piper_folder}, sound goes to {self.voice_root}"
+
+    @property
+    def has_talk_gestures(self) -> bool:
+        """Whether the companion should move its hands while it talks"""
+        return self.__has_talk_gestures
 
     @property
     def spoken_language(self) -> str:
@@ -187,11 +204,12 @@ class CompanionVoice:
                          "if a permission is missing, run build.py --install of the game mod again as administrator)")
         return ", ".join(parts)
 
-    def speak(self, text: str, voice_folder: str) -> tuple[bool, str, int]:
+    def speak(self, text: str, voice_folder: str, is_loud: bool = False) -> tuple[bool, str, int]:
         """Turns the text into sound and puts it into the game folder. Takes about a second, so call it from a thread.
 
         Args:
             voice_folder: The voice of the companion as the game names it (eg FemaleEvenToned)
+            is_loud: Whether the companion calls it out: the sound is made louder, and the sentence ends with an exclamation mark
 
         Returns:
             Whether it worked, the text for the AI if it did not, and the number of the line the game mod has to speak (1 or 2)
@@ -199,12 +217,14 @@ class CompanionVoice:
         cleaned = clean_text(text)
         if cleaned == "":
             return False, "There is nothing to say.", 0
+        # What is shown and what the lips are made from stays as the AI wrote it
+        spoken = self.__called_out(cleaned) if is_loud else cleaned
         with self.__lock:
             target_folder = os.path.join(self.voice_root, voice_folder)
             if not os.path.isdir(target_folder):
                 return False, (f"The game has no folder for your voice '{voice_folder}' ({target_folder}). The player has to add the voice "
                                "to voice_folders.txt of the game mod if it is missing there, run build.py --install and restart the game."), 0
-            sound_file, xtts_problem = self.__make_with_xtts(cleaned)
+            sound_file, xtts_problem = self.__make_with_xtts(spoken)
             if sound_file == "":
                 # Piper speaks: always without XTTS, and in its place when XTTS does not answer
                 before = "" if xtts_problem == "" else f"XTTS could not speak ({xtts_problem}), and Piper could not step in. "
@@ -216,10 +236,11 @@ class CompanionVoice:
                     if not model.is_file():
                         return False, f"{before}Piper has no voice model for your voice '{voice_folder}' ({model}).", 0
                 try:
-                    sound_file = self.__synthesize(cleaned, str(model))
+                    sound_file = self.__synthesize(spoken, str(model))
                 except (OSError, RuntimeError) as error:
                     self.__stop_piper()
                     return False, f"{before}Piper could not make the sound: {error}", 0
+            change_volume(sound_file, self.__volume * (LOUD_FACTOR if is_loud else 1.0))
             # Without a lip file of its own, the sentence gets the placeholder: the lips of the sentence before would not fit
             lip_file = ""
             if self.__lips is not None and self.__are_lips_on:
@@ -243,6 +264,13 @@ class CompanionVoice:
                 return True, "", line
             return False, (f"The server could not write the sound into {target_folder}: {last_error}. If that is a missing permission, "
                            "the player has to run build.py --install of the game mod again (as administrator)."), 0
+
+    @staticmethod
+    def __called_out(text: str) -> str:
+        """The text the way a voice calls it out: with an exclamation mark at its end"""
+        if text.endswith("!"):
+            return text
+        return text.rstrip(SENTENCE_ENDINGS + " ") + "!"
 
     def __make_with_xtts(self, text: str) -> tuple[str, str]:
         """Lets the XTTS server speak, if one is wanted
