@@ -82,6 +82,12 @@ KEY_TRAPS: str = "traps"
 # what the ray met (see SPACE_OBSTACLES), how far away in meters, after how many meters the ground drops away (SPACE_NO_DROP = it does not).
 # The SKSE plugin of the game mod measures this (GetSurroundings in plugin.cpp of the plugin repository)
 KEY_SPACE: str = "space"
+# Only when the server asked for a search by name: the text that was looked for, and one text per match, nearest first,
+# built like the lines of the things: kind (see FOUND_KINDS), ref ID, distance, angle, for a character 1 if it is dead, name
+# (for a door: of the place it leads to). No list means nothing was found.
+# The SKSE plugin of the game mod searches (FindByName in plugin.cpp of the plugin repository)
+KEY_FOUND_FOR: str = "found_for"
+KEY_FOUND: str = "found"
 # One text per line a character near the player said since the last state (the subtitles of the game), oldest first.
 # Its parts are separated by tabs: how many seconds ago, ref ID of the speaker as eight hex digits, name of the speaker,
 # what was said. A line the player picked in a dialogue menu has the player as its speaker.
@@ -204,6 +210,8 @@ THING_CONTAINER: str = "container"
 THING_ITEM: str = "item"
 THING_KINDS: dict[int, str] = {0: THING_FURNITURE, 1: THING_CONTAINER, 2: THING_ITEM}
 THING_TRAP_NUMBER: int = 3
+FOUND_CHARACTER: str = "character"
+FOUND_KINDS: dict[int, str] = {0: FOUND_CHARACTER, 1: "door", 2: "place", 3: "thing"}
 # The folders the game keeps the models of its traps in, by what they are. A folder that is not here goes out as it is
 TRAP_NAMES: dict[str, str] = {"tripwire": "tripwire", "pressureplate": "pressure plate", "beartrap": "bear trap",
                               "macetrap": "swinging mace", "skullram": "battering ram"}
@@ -343,6 +351,11 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     # Only a game mod whose plugin knows about traps sends this list, and only if there are any
     if isinstance(raw.get(KEY_TRAPS), list):
         state["traps"] = _read_traps(raw.get(KEY_TRAPS))
+    # Only a game mod whose plugin can search by name sends back what it looked for
+    found_for = raw.get(KEY_FOUND_FOR)
+    if isinstance(found_for, str) and found_for.strip() != "":
+        state["found_for"] = found_for.strip()
+        state["found"] = _read_found(raw.get(KEY_FOUND))
     space = _read_space(raw.get(KEY_SPACE))
     if len(space) > 0:
         state["space"] = space
@@ -592,6 +605,30 @@ def _read_traps(raw_traps: list) -> list[dict[str, Any]]:
     return traps
 
 
+def _read_found(raw_found: Any) -> list[dict[str, Any]]:
+    """What a search by name found, in the order the game sent it (nearest first)"""
+    found: list[dict[str, Any]] = []
+    if not isinstance(raw_found, list):
+        return found
+    for entry in raw_found:
+        if not isinstance(entry, str):
+            continue
+        parts = entry.split(QUEST_PART_SEPARATOR, THING_PART_COUNT - 1)
+        if len(parts) != THING_PART_COUNT:
+            continue
+        kind_number, distance, angle, flag = (_whole_number(text) for text in (parts[0], parts[2], parts[3], parts[4]))
+        form_id = parse_ref_id(parts[1])
+        name = parts[5].strip()
+        if None in (distance, angle, flag, form_id) or name == "" or kind_number not in FOUND_KINDS:
+            continue
+        match: dict[str, Any] = {"kind": FOUND_KINDS[kind_number], "ref_id": format_ref_id(form_id), "name": _tidy_name(name),
+                                 "distance_meters": distance, "angle_degrees": angle}
+        if match["kind"] == FOUND_CHARACTER:
+            match["dead"] = flag != 0
+        found.append(match)
+    return found
+
+
 def _read_space(raw_space: Any) -> list[dict[str, Any]]:
     """What the rays found around the companion, one entry per direction, clockwise from straight ahead.
     An empty list if the game sent nothing that can be read"""
@@ -714,7 +751,7 @@ def _add_view_of_companion(state: dict[str, Any]) -> None:
         return
     # A target with a distance is in the area of the player, or it is behind a door that is
     targets = [target for quest in state.get("quests", []) for target in quest.get("targets", []) if "distance_meters" in target]
-    for character in state["nearby"] + state.get("things", []) + state.get("traps", []) + targets:
+    for character in state["nearby"] + state.get("things", []) + state.get("traps", []) + state.get("found", []) + targets:
         east, north = _map_offset(character["distance_meters"], player_facing + character["angle_degrees"])
         east -= companion_east
         north -= companion_north

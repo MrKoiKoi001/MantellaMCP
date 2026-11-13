@@ -130,6 +130,11 @@ def describe_state(state_result: dict[str, Any]) -> str:
             lines.append("Traps:")
             for trap in traps:
                 lines.append(f"{trap.get('ref_id')} {trap.get('name')}, trap, {_describe_position(trap, is_from_companion)}")
+    find_wanted = state_result.get("find_wanted")
+    if isinstance(find_wanted, str) and find_wanted != "":
+        lines.extend(_describe_found(find_wanted, state.get("found_for"), state.get("found"), is_from_companion))
+    elif state_result.get("find_missed"):
+        lines.append("The game did not send what it found in time. Ask again.")
     if state_result.get("space_wanted"):
         lines.append(_describe_space(state.get("space")))
     elif state_result.get("space_missed"):
@@ -430,6 +435,22 @@ def _describe_stats(player_stats: Any, companion_stats: Any) -> list[str]:
         lines.append(f"Your stats: level {companion_stats.get('level')}, health {companion_stats.get('health')}, "
                      f"magicka {companion_stats.get('magicka')} ({companion_stats.get('magicka_percent')}%), "
                      f"stamina {companion_stats.get('stamina')} ({companion_stats.get('stamina_percent')}%)")
+    return lines
+
+
+def _describe_found(wanted: str, found_for: Any, found: Any, is_from_companion: bool) -> list[str]:
+    """What the game found for the name the AI asked for, one line per match"""
+    if not isinstance(found_for, str) or found_for.lower() != wanted.lower():
+        return [f"The game could not look for '{wanted}': that needs the newest plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version 10)."]
+    if not isinstance(found, list) or len(found) == 0:
+        return [f"Found for '{wanted}': nothing with that name in the loaded area. Names are as the game shows them. "
+                "Who or what is inside a building is only found from inside: look for the door to that building instead."]
+    lines = [f"Found for '{wanted}':"]
+    for match in found:
+        label = str(match.get("kind"))
+        if match.get("dead"):
+            label += ", dead"
+        lines.append(f"{match.get('ref_id')} {match.get('name')}, {label}, {_describe_position(match, is_from_companion)}")
     return lines
 
 

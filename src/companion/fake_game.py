@@ -69,6 +69,15 @@ TRAPS: list[list[str]] = [
 ]
 # What the rays of the plugin find around the companion, three numbers per direction, clockwise from straight ahead:
 # what (0 = nothing, 1 = a wall, 2 = rising ground), how far in meters, after how many meters the ground drops (-1 = not)
+# What the plugin finds by name: kind (0 = character, 1 = door, 2 = map marker, 3 = thing), ref ID, distance and angle
+# from the player, 1 for a dead character, name
+FINDABLE: list[list[str]] = [
+    ["1", "0001A6F0", "20", "90", "0", "Warmaiden's"],
+    ["0", "000A2C8E", "85", "-20", "0", "Balgruuf the Greater"],
+    ["2", "000C0002", "260", "170", "0", "Whiterun Stables"],
+    ["3", "0005A400", "4", "30", "0", "Chest"],
+    ["0", "FF000A03", "9", "140", "1", "Bandit Outlaw"],
+]
 SPACE: list[int] = [1, 3, -1,  0, 0, -1,  0, 0, 4,  2, 8, -1,  0, 0, -1,  0, 0, -1,  1, 5, -1,  1, 2, -1]
 CHEST_REF_ID: str = "0005A400"
 LOCKED_CHEST_REF_ID: str = "0005A401"
@@ -137,7 +146,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
                 is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
-                has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False) -> dict:
+                has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False, find: str = "") -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -221,6 +230,13 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         state[game_state.KEY_TRAPS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in TRAPS]
     if has_space:
         state[game_state.KEY_SPACE] = SPACE
+    if find != "":
+        # Like the plugin: every word has to be in the name, capitals do not matter, nearest first
+        words = find.lower().split()
+        matches = sorted((parts for parts in FINDABLE if all(word in parts[5].lower() for word in words)), key=lambda parts: int(parts[2]))
+        state[game_state.KEY_FOUND_FOR] = find
+        if len(matches) > 0:
+            state[game_state.KEY_FOUND] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in matches]
     if report != "":
         state[game_state.KEY_REPORT] = report
     if has_heard_lines:
@@ -316,6 +332,12 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     if action == consts.ACTION_MOVE_TO:
         # A walk can lead to a character, a thing, a door or a place
         if name_of(target) != "" and target != PLAYER_REF_ID:
+            # Like the game mod: in front of a character the companion stops a little away, unless 'detail' says how far
+            is_character = any(character["ref_id"] == target for character in NEARBY)
+            meters = int(detail) if detail.isdecimal() else (consts.MOVE_TO_PERSON_METERS if is_character else 0)
+            if meters > 0:
+                return True, (f"You walk to {name_of(target)}, stop about {meters} meters in front, and wait there. "
+                              "'follow' brings you back to the player."), target_ref_id
             return True, f"You walk to {name_of(target)} and wait there. 'follow' brings you back to the player.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_LOOK_AT:
@@ -440,6 +462,7 @@ def main():
     are_stats_wanted = False
     is_visible_wanted = False
     is_space_wanted = False
+    wanted_find = ""
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
@@ -455,7 +478,8 @@ def main():
             request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
                                                          is_around_companion, target_ref_id != "", look_target_ref_id,
                                                          leader_ref_id, expression, are_stats_wanted, is_visible_wanted,
-                                                         has_traps=True, has_space=is_space_wanted)
+                                                         has_traps=True, has_space=is_space_wanted, find=wanted_find)
+            wanted_find = ""
             are_things_wanted = False
             is_space_wanted = False
             is_around_companion = False
@@ -492,6 +516,7 @@ def main():
                 are_stats_wanted = bool(command.get(consts.KEY_COMMAND_STATS))
                 is_visible_wanted = bool(command.get(consts.KEY_COMMAND_VISIBLE))
                 is_space_wanted = bool(command.get(consts.KEY_COMMAND_SPACE))
+                wanted_find = str(command.get(consts.KEY_COMMAND_FIND) or "")
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it

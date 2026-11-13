@@ -102,7 +102,7 @@ class CompanionCommandQueue:
 
     async def send_command(self, action: str, target: str = "", detail: str = "", result_timeout_seconds: float = 8.0,
                            count: int = 1, item: str = "", things: bool = False, around_companion: bool = False,
-                           stats: bool = False, visible: bool = False, space: bool = False) -> dict[str, Any]:
+                           stats: bool = False, visible: bool = False, space: bool = False, find: str = "") -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -115,6 +115,7 @@ class CompanionCommandQueue:
             stats: For report_state: whether the state should carry the level, the skills and so on of the player
             visible: For report_state: whether the list of characters should only hold those the viewer can see
             space: For report_state: whether the state should carry what is around the companion as rays find it
+            find: For report_state: a name, or a part of one, to look for in the whole loaded area
             things: For report_state: whether the state should carry the things close to the player.
                 'count' is then how many characters (and things of each kind) the state should list at most
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
@@ -145,6 +146,7 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_STATS: int(stats),
                 consts.KEY_COMMAND_VISIBLE: int(visible),
                 consts.KEY_COMMAND_SPACE: int(space),
+                consts.KEY_COMMAND_FIND: find,
             }
             self.__pending_commands.append(command)
             self.__changed.notify_all()
@@ -171,7 +173,7 @@ class CompanionCommandQueue:
     async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "",
                         is_for_the_ai: bool = True, things: bool = False, max_lines: int = DEFAULT_MAX_LINES,
                         around_companion: bool = False, stats: bool = False, visible: bool = False,
-                        space: bool = False) -> dict[str, Any]:
+                        space: bool = False, find: str = "") -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
@@ -184,12 +186,13 @@ class CompanionCommandQueue:
             stats: Whether the fresh state should carry the level, the skills and so on of the player
             visible: Whether the fresh state should only list what the viewer can see
             space: Whether the fresh state should carry what is around the companion as rays find it (walls, drops)
+            find: A name, or a part of one, the game should look for in the whole loaded area (empty = no search)
             is_for_the_ai: False if the server itself needs the state (eg to pick a seat). Then what was heard and
                 what became of earlier commands stays kept for the next time the AI asks
 
         Returns:
             A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted', 'corpse_wanted',
-            'things_wanted', 'max_lines', 'around_wanted', 'stats_wanted', 'visible_wanted', 'space_wanted',
+            'things_wanted', 'max_lines', 'around_wanted', 'stats_wanted', 'visible_wanted', 'space_wanted', 'find_wanted',
             'heard' (what the characters in the game said since this was called the last time)
             and 'reports' (what became of loot and move_to since then)
         """
@@ -204,7 +207,8 @@ class CompanionCommandQueue:
         is_fresh = False
         if is_connected:
             request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory, count=max_lines, things=things,
-                                              around_companion=around_companion, stats=stats, visible=visible, space=space)
+                                              around_companion=around_companion, stats=stats, visible=visible, space=space,
+                                              find=find)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -237,6 +241,9 @@ class CompanionCommandQueue:
                 # The kept state may still carry the surroundings from an earlier question, and the companion has moved since
                 "space_wanted": space and is_fresh,
                 "space_missed": space and not is_fresh,
+                # What the search was for. Whether the game did it is in the state itself ('found_for')
+                "find_wanted": find if is_fresh else "",
+                "find_missed": find != "" and not is_fresh,
                 "heard": self.__take_heard() if is_for_the_ai else [],
                 "reports": self.__take_reports() if is_for_the_ai else [],
             }

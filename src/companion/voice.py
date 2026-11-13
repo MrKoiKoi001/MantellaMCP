@@ -41,7 +41,7 @@ POLL_SECONDS: float = 0.01
 # A longer speech would keep the companion talking for minutes
 MAX_TEXT_LENGTH: int = 600
 CHARACTERS_FILE: Path = Path(__file__).resolve().parents[2] / "data" / "Skyrim" / "skyrim_characters.csv"
-DEFAULT_GAME_FOLDER: str = r"C:\Program Files (x86)\Steam\steamapps\common\SkyrimVR"
+DEFAULT_GAME_FOLDER: str = r"F:\SteamLibrary\steamapps\common\SkyrimVR"
 DEFAULT_PIPER_FOLDER: str = str(Path(__file__).resolve().parents[2] / "piper")
 
 _voice_folders_by_name: dict[str, str] | None = None

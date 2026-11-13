@@ -1596,3 +1596,72 @@ def test_traps_come_with_every_state_and_the_space_only_when_asked_for():
         answer = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"space": True}}))
         assert received_commands[0][consts.KEY_COMMAND_SPACE] == 1
         assert "Space around you (rays at chest height, about 15 m far): wall ahead 3 m" in answer and "Traps:" in answer
+
+
+def test_find_by_name_and_move_to_keeps_a_distance():
+    from src.companion.fake_game import CHEST_REF_ID, build_state, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **result: object) -> list[str]:
+        return describe_state({"connected": True, "fresh": True, "state": read_game_state(raw), **result}).split("\n")
+
+    # What the game found, nearest first, each with what it is and where
+    lines = text_for(build_state(find="wa"), find_wanted="wa")
+    start = lines.index("Found for 'wa':")
+    assert lines[start + 1].startswith("0001A6F0 Warmaiden's, door, 20 m right, from you ")
+    assert start < lines.index("Nearby:")
+    assert any(line.startswith("000C0002 Whiterun Stables, place, 260 m behind") for line in text_for(build_state(find="stables"), find_wanted="stables"))
+    # Every word has to be in the name, and a dead character is marked
+    assert [line for line in text_for(build_state(find="the BALGRUUF"), find_wanted="the BALGRUUF") if line.startswith("000A2C8E")] == [
+        "000A2C8E Balgruuf the Greater, character, 85 m ahead, from you 87 m behind-left"]
+    assert any(line.startswith("FF000A03 Bandit Outlaw, character, dead, 9 m") for line in text_for(build_state(find="bandit"), find_wanted="bandit"))
+    nothing = text_for(build_state(find="Belethor"), find_wanted="Belethor")
+    assert any(line.startswith("Found for 'Belethor': nothing with that name in the loaded area.") for line in nothing)
+    # An older plugin does not answer the search, and a search nobody asked for is not shown
+    assert any("could not look for 'wa'" in line and "interface version 10" in line for line in text_for(build_state(), find_wanted="wa"))
+    assert not any(line.startswith("Found for") for line in text_for(build_state(find="wa")))
+    assert "did not send what it found" in "\n".join(text_for(build_state(), find_missed=True))
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "how many meters in front" in command({"action": "move_to", "target": "000F6845", "detail": "close"})["message"]
+        assert "how many meters in front" in command({"action": "move_to", "target": "000F6845", "detail": "50"})["message"]
+        assert command({"action": "move_to", "target": "000F6845", "detail": "3 m"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "find" in tools[1]["inputSchema"]["properties"]
+
+    # The server passes the text on to the game, and for move_to how far to stay away
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            # The first request picks up the question for the state, the next one answers it and picks up a command,
+            # and each one after that brings the result of the command before
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_POLL_ID: 1}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            body: dict = {consts.KEY_STATE: build_state(find="maiden")}
+            for _ in range(2):
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                body = {consts.KEY_RESULTS: [{consts.KEY_COMMAND_ID: received_commands[-1][consts.KEY_COMMAND_ID],
+                                              consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}]}
+            client.post(consts.ROUTE_GAME, json=body)
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        answer = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"find": "  Maiden \n"}}))
+        assert received_commands[0][consts.KEY_COMMAND_FIND] == "Maiden"
+        assert "Found for 'Maiden':\n0001A6F0 Warmaiden's, door, 20 m right" in answer
+        assert tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "move_to", "target": "000F6845", "detail": "3m"}}))["status"] == consts.STATUS_DONE
+        assert (received_commands[1][consts.KEY_COMMAND_COUNT], received_commands[1][consts.KEY_COMMAND_DETAIL]) == (3, "3")
+        assert tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "move_to", "target": "000F6845"}}))["status"] == consts.STATUS_DONE
+        assert received_commands[2][consts.KEY_COMMAND_COUNT] == consts.MOVE_TO_USUAL_DISTANCE
+
+    # The fake game answers like the game mod: a little away from a character, right up to a thing, or as far as told
+    assert run_command(consts.ACTION_MOVE_TO, "000F6845", "")[1].startswith("You walk to Whiterun Guard, stop about 2 meters in front, and wait there.")
+    assert run_command(consts.ACTION_MOVE_TO, CHEST_REF_ID, "")[1] == "You walk to Chest and wait there. 'follow' brings you back to the player."
+    assert run_command(consts.ACTION_MOVE_TO, CHEST_REF_ID, "", "", "4")[1].startswith("You walk to Chest, stop about 4 meters in front")
+    assert run_command(consts.ACTION_MOVE_TO, "000F6845", "", "", "0")[1] == "You walk to Whiterun Guard and wait there. 'follow' brings you back to the player."

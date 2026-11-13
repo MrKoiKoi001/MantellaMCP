@@ -45,6 +45,8 @@ class companion_constants:
     KEY_COMMAND_VISIBLE: str = PREFIX + "visible"
     # For report_state: 1 if the state should carry what is around the companion as rays find it (walls, drops)
     KEY_COMMAND_SPACE: str = PREFIX + "space"
+    # For report_state: a name, or a part of one, to look for in the whole loaded area (empty = no search)
+    KEY_COMMAND_FIND: str = PREFIX + "find"
     # What the AI can name as the centre of those lists
     AROUND_PLAYER: str = "player"
     AROUND_COMPANION: str = "you"
@@ -73,6 +75,11 @@ class companion_constants:
     ACTION_STAND_DOWN: str = "stand_down"
     ACTION_FLEE: str = "flee"
     ACTION_MOVE_TO: str = "move_to"
+    # For move_to: 'count' is how many meters in front of the target the companion stops. MOVE_TO_USUAL_DISTANCE lets
+    # the game mod decide: a little away from a character (MOVE_TO_PERSON_METERS), right up to a thing
+    MOVE_TO_USUAL_DISTANCE: int = -1
+    MOVE_TO_PERSON_METERS: int = 2
+    MOVE_TO_HIGHEST_KEEP_METERS: int = 10
     # The companion walks to a door that leads into another area and goes through it on its own
     ACTION_ENTER: str = "enter"
     # The companion steps a few meters out of the way. For the game: 'count' is the number of the direction (see

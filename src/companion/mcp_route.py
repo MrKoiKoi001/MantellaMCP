@@ -13,7 +13,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.16"
+SERVER_VERSION: str = "0.17"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -28,6 +28,8 @@ ARGUMENT_AROUND: str = "around"
 ARGUMENT_STATS: str = "stats"
 ARGUMENT_VISIBLE: str = "visible"
 ARGUMENT_SPACE: str = "space"
+ARGUMENT_FIND: str = "find"
+MAX_FIND_LENGTH: int = 60
 COMPASS_NAMES: str = ", ".join(consts.COMPASS_NAMES)
 RELATIVE_NAMES: str = ", ".join(consts.RELATIVE_NAMES)
 EXPRESSION_NAMES: str = ", ".join(consts.EXPRESSIONS)
@@ -65,6 +67,8 @@ TOOLS: list[dict[str, Any]] = [
             "move_to = walk to the target and wait there until 'follow'. The target is anything with a ref_id in STATE: "
             "a character, a thing, a door from 'Doors', a place from 'Places' (only if it is close enough to be loaded) "
             "or the target of a quest. You stop at a door, you do not go through it. "
+            f"In front of a character you stop about {consts.MOVE_TO_PERSON_METERS} meters away; 'detail' can name another distance in meters "
+            f"(0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, also for a thing). If the target is not in your lists, look for it with STATE and 'find'. "
             "move = walk a number of meters in a direction and wait there until 'follow', for when there is nothing with a "
             f"ref_id to walk to. 'detail' is the direction and behind it the meters, eg 'north 10' or 'ahead-left 6' "
             f"(nothing = {consts.MOVE_DEFAULT_METERS}, at most {consts.MOVE_HIGHEST_METERS}). Directions: a point of the compass ({COMPASS_NAMES}) "
@@ -77,7 +81,8 @@ TOOLS: list[dict[str, Any]] = [
             "make_room = step a few meters out of the way, for when you stand in the player's way. 'detail' says where to: "
             "back (away from the player, also if you name nothing), left or right (as the player sees it who looks at you), "
             f"with the meters behind it if you like, eg 'left 5' (nothing = {consts.ROOM_DEFAULT_METERS}, at most {consts.ROOM_HIGHEST_METERS}). "
-            "Apart from that you wait or follow as before. "
+            "If that side is blocked you try another one yourself, and your next STATE tells you. "
+            "If you were following the player, you stay at the new spot for a moment and then follow again. "
             "face = turn your whole body to the target (anything with a ref_id, also a place or a quest target far away) "
             f"or to the point of the compass in 'detail' ({COMPASS_NAMES}). Do this before you point at something with a gesture. "
             "Only while you stand: not while you walk, fight or sit. "
@@ -112,7 +117,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, the point of the compass for face, the text to speak for say, the spell name for cast_spell."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -137,6 +142,11 @@ TOOLS: list[dict[str, Any]] = [
             "'Traps': tripwires, pressure plates, bear traps and other parts of traps within about 15 meters, each with its "
             "ref_id, distance and direction. The lines only come when there are any, without asking. Warn the player in time: "
             "a tripwire or a pressure plate sets the trap off for whoever steps on it, you included. "
+            "'Found for' only comes when you ask for it with 'find': everything in the loaded area (up to about 300 meters) "
+            "whose name holds the text you gave: characters, doors (by the place they lead to), places of the map and things, "
+            "nearest first, each with its ref_id, distance and direction. Use it when someone or a shop is not in 'Nearby' or 'Doors', "
+            "then walk there with move_to or enter. Names are as the game shows them (in the language of the game), a part of the name "
+            "is enough. A character inside a building is only found from inside: from outside, find the door to the building. "
             "'Space around you' only comes when you ask for it with 'space': what rays from your character find within about "
             "15 meters in eight directions seen from where you face: a wall or another upright obstacle with its distance, "
             "ground that rises, a DROP (the ground falls away after that many meters) and the directions that are open. "
@@ -191,6 +201,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_THINGS: {"type": "boolean", "description": "true = also list the furniture, containers and loose items within about 10 meters of the player. Only when you need them."},
                 ARGUMENT_AROUND: {"type": "string", "enum": consts.AROUND_CHOICES, "description": "Whose surroundings the lists show: player (the default) or you = your own character."},
                 ARGUMENT_STATS: {"type": "boolean", "description": "true = also give the level, the skills and so on of the player, and your own level. Only when the talk is about that."},
+                ARGUMENT_FIND: {"type": "string", "description": "A name or a part of one: also list everything in the loaded area with that name (characters, doors, places, things), eg 'Warmaiden' or 'Balgruuf'."},
                 ARGUMENT_SPACE: {"type": "boolean", "description": "true = also say where walls, rising ground and drops are around your own character (rays in eight directions). Only when you need it."},
                 ARGUMENT_VISIBLE: {"type": "boolean", "description": "true = only what can be seen: in front of the viewer and not behind a wall. The viewer is the one 'around' names."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
@@ -294,11 +305,13 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
             max_lines = CompanionCommandQueue.DEFAULT_MAX_LINES
         max_lines = min(max(max_lines, 1), CompanionCommandQueue.HIGHEST_MAX_LINES)
         around = str(arguments.get(ARGUMENT_AROUND, "") or "").strip().lower()
+        # The text goes into a line for the game mod, so it stays one short line
+        find = " ".join(str(arguments.get(ARGUMENT_FIND, "") or "").split())[:MAX_FIND_LENGTH]
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
                                              max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS,
                                              stats=arguments.get(ARGUMENT_STATS) is True,
                                              visible=arguments.get(ARGUMENT_VISIBLE) is True,
-                                             space=arguments.get(ARGUMENT_SPACE) is True)
+                                             space=arguments.get(ARGUMENT_SPACE) is True, find=find)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)
@@ -321,6 +334,18 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                 return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{target}' is not a ref_id or item ID. Use one from STATE, eg 000A2C94."}, True)
             target = format_ref_id(target_form_id)
         count = 1
+        if action == consts.ACTION_MOVE_TO:
+            # How far in front of the target to stop. Without a number the game mod decides
+            count = consts.MOVE_TO_USUAL_DISTANCE
+            words = detail.lower().split()
+            if len(words) > 1 and words[-1] in ("m", "meter", "meters"):
+                words.pop()
+            if len(words) > 0:
+                number = words[0].removesuffix("m")
+                if len(words) != 1 or not number.isdecimal() or int(number) > consts.MOVE_TO_HIGHEST_KEEP_METERS:
+                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"For move_to 'detail' is how many meters in front of the target you stop: a number from 0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, or nothing."}, True)
+                count = int(number)
+                detail = number
         if action in consts.ACTIONS_WITH_COUNT and detail != "":
             if detail.lower() == consts.COUNT_ALL_TEXT:
                 count = consts.COUNT_ALL
