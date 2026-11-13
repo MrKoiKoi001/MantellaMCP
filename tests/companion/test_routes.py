@@ -1326,3 +1326,148 @@ def test_visible_only_lists_what_can_be_seen():
         assert answer["visible_wanted"] is False
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert tools[1]["inputSchema"]["properties"]["visible"]["type"] == "boolean"
+
+
+def test_make_room_carries_the_direction_and_how_far():
+    from src.companion.fake_game import (is_sitting_after, is_waiting_after, leader_after, run_command, walk_target_after)
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        unknown = command({"action": "make_room", "detail": "up"})
+        assert unknown["status"] == consts.STATUS_FAILED and "back, left, right" in unknown["message"]
+        assert "how far in meters" in command({"action": "make_room", "detail": "left 50"})["message"]
+        assert "how far in meters" in command({"action": "make_room", "detail": "left far"})["message"]
+        # What is fine is refused only because no game is there
+        for arguments in ({"action": "make_room"}, {"action": "make_room", "detail": "Right"}, {"action": "make_room", "detail": "back 10"}):
+            assert command(arguments)["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "make_room" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+
+    # The game gets the number of the direction, and how far where loot has the lower half of an item ID
+    def sent_for(arguments: dict) -> dict:
+        with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+            received_commands: list[dict] = []
+
+            def game():
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You step."}]
+                client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results})
+
+            threading.Thread(target=game, daemon=True).start()
+            time.sleep(0.3)
+            answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+            assert answer == {"status": consts.STATUS_DONE, "message": "You step."}
+            return received_commands[0]
+
+    sent = sent_for({"action": "make_room", "detail": "Left 5", "target": "000F6845"})
+    assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TARGET]) == ("make_room", "left", "")
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == (1, 0, 5)
+    sent = sent_for({"action": "make_room"})
+    assert (sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_ITEM_LOW]) == ("back", 0, consts.ROOM_DEFAULT_METERS)
+
+    # The fake game answers like the game mod. Stepping aside ends a walk and a seat, but not waiting or following someone
+    assert run_command(consts.ACTION_MAKE_ROOM, "", "", "00000005", "right")[1].startswith("You step about 5 meters to the right")
+    assert run_command(consts.ACTION_MAKE_ROOM, "", "", "", "back")[1].startswith("You step back about 3 meters")
+    assert walk_target_after(consts.ACTION_MAKE_ROOM, "", "000F6845") == "" and is_sitting_after(consts.ACTION_MAKE_ROOM, True) is False
+    assert is_waiting_after(consts.ACTION_MAKE_ROOM, True) is True and is_waiting_after(consts.ACTION_MAKE_ROOM, False) is False
+    assert leader_after(consts.ACTION_MAKE_ROOM, "", "000F6845") == "000F6845"
+
+
+def test_settings_come_from_a_file_that_is_made_when_missing(tmp_path):
+    from src.companion.settings import load_settings
+    from src.companion.voice import DEFAULT_GAME_FOLDER, DEFAULT_PIPER_FOLDER
+
+    file = tmp_path / "companion.ini"
+    settings, source = load_settings(str(file))
+    assert file.is_file() and "new" in source
+    assert (settings.game_folder, settings.piper_folder, settings.lips) == (DEFAULT_GAME_FOLDER, DEFAULT_PIPER_FOLDER, False)
+    # The file that was made reads as the same settings, and says so in its notes
+    again, source = load_settings(str(file))
+    assert again == settings and "new" not in source and "lips = off" in file.read_text(encoding="utf-8")
+
+    file.write_text("[companion]\ngame_folder = \"D:\\Games\\Skyrim 100%\"\nlips = On\nfonix_file = D:\\CK\\FonixData.cdf\n", encoding="utf-8")
+    settings, source = load_settings(str(file))
+    assert (settings.game_folder, settings.lips, settings.fonix_file) == ("D:\\Games\\Skyrim 100%", True, "D:\\CK\\FonixData.cdf")
+    assert (settings.piper_folder, settings.lipgen_folder, settings.facefx_folder) == (DEFAULT_PIPER_FOLDER, "", "")
+
+    # A file nobody can make sense of leaves everything as it would be without it
+    file.write_text("game_folder = D:\\Games\n", encoding="utf-8")
+    settings, source = load_settings(str(file))
+    assert settings.game_folder == DEFAULT_GAME_FOLDER and "could not be read" in source
+    file.write_text("[other]\nlips = on\n", encoding="utf-8")
+    settings, source = load_settings(str(file))
+    assert settings.lips is False and "[companion]" in source
+
+
+def test_lips_get_a_file_next_to_the_sound_when_switched_on(tmp_path):
+    import sys
+
+    from src.companion.lips import PLACEHOLDER_FILE, LipSync
+    from src.companion.voice import LINE_FILES, CompanionVoice, lip_file_of
+
+    piper = tmp_path / "stand_in_piper.py"
+    piper.write_text(
+        "import sys, wave\n"
+        "for line in sys.stdin:\n"
+        "    if line.startswith('load_model'):\n"
+        "        print('Model loaded', flush=True)\n"
+        "    elif line.startswith('synthesize '):\n"
+        "        with wave.open('out.wav', 'wb') as sound:\n"
+        "            sound.setnchannels(1); sound.setsampwidth(2); sound.setframerate(22050)\n"
+        "            sound.writeframes(b'\\x00\\x00' * len(line))\n", encoding="utf-8")
+    # A stand-in for the lip program: it writes the text into the lip file, and gives up on the sentence 'Hm.'
+    lip_program = tmp_path / "stand_in_lips.py"
+    lip_program.write_text(
+        "import sys\n"
+        "if sys.argv[3] != 'Hm.':\n"
+        "    open(sys.argv[2], 'w', encoding='utf-8').write(sys.argv[3])\n", encoding="utf-8")
+    game_folder = tmp_path / "game"
+    voice_folder = game_folder / "Data" / "Sound" / "Voice" / "KI_MCP_Gefaehrte.esp" / "FemaleEvenToned"
+    voice_folder.mkdir(parents=True)
+    other_folder = voice_folder.parent / "MaleNord"
+    other_folder.mkdir()
+    for folder in (voice_folder, other_folder):
+        for line_file in LINE_FILES:
+            (folder / line_file).write_bytes(b"sound")
+    lip_files = [voice_folder / lip_file_of(line_file) for line_file in LINE_FILES]
+    assert lip_files[0].name == "KI_MCP_Say_KI_MCP_SayOne_00000805_1.lip"
+    assert PLACEHOLDER_FILE.is_file()
+    piper_command = [sys.executable, str(piper)]
+
+    # Neither of the two programs is there: the lips count as switched off, and the start of the server says why
+    missing = LipSync(str(game_folder))
+    assert "neither" in missing.find_problem() and missing.describe_setup().startswith("off:")
+    (game_folder / "Data" / "Sound" / "Voice" / "Processing").mkdir()
+    (game_folder / "Data" / "Sound" / "Voice" / "Processing" / "FaceFXWrapper.exe").write_bytes(b"program")
+    assert "FonixData.cdf" in LipSync(str(game_folder)).find_problem()
+    assert LipSync(str(game_folder), fonix_file=str(piper)).find_problem() == ""
+    silent = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=piper_command, lips=missing)
+    assert silent.describe_lips().startswith("off:") and silent.prepare_lip_files() == ""
+    assert silent.speak("Hello there.", "FemaleEvenToned") == (True, "", 1) and not lip_files[0].exists()
+
+    # Switched on: every line of every voice gets a lip file to begin with, because the game only finds what is there when it starts
+    lips = LipSync(str(game_folder), lip_command=[sys.executable, str(lip_program)])
+    voice = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=piper_command, lips=lips)
+    assert voice.describe_lips().startswith("on:")
+    change = voice.prepare_lip_files()
+    assert change.startswith("4 lip files put next to the sound files") and "started anew" in change
+    assert lip_files[0].read_bytes() == PLACEHOLDER_FILE.read_bytes() and (other_folder / lip_files[1].name).is_file()
+    assert voice.prepare_lip_files() == ""
+    # Each sentence brings its own lips. The text goes to the program without quotation marks
+    assert voice.speak('He said "no" to me.', "FemaleEvenToned") == (True, "", 1)
+    assert lip_files[0].read_text(encoding="utf-8") == "He said no to me."
+    assert voice.speak("I am sworn to carry your burdens.", "FemaleEvenToned") == (True, "", 2)
+    assert lip_files[1].read_text(encoding="utf-8") == "I am sworn to carry your burdens."
+    # A sentence the program gives up on gets the placeholder instead of the lips of the sentence before
+    assert voice.speak("Hm.", "FemaleEvenToned") == (True, "", 1)
+    assert lip_files[0].read_bytes() == PLACEHOLDER_FILE.read_bytes()
+
+    # Switched off again: the lip files go, so that the mouth stays shut, and speaking leaves it at that
+    off = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=piper_command)
+    assert off.describe_lips().startswith("off")
+    assert off.prepare_lip_files().startswith("4 lip files of the lines taken away")
+    assert off.speak("Hello again.", "FemaleEvenToned")[0] is True
+    assert not lip_files[0].exists() and not lip_files[1].exists() and (voice_folder / LINE_FILES[0]).is_file()

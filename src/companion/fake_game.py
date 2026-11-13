@@ -265,6 +265,12 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if name_of(target) != "":
             return False, f"{name_of(target)} is not a door. Take the ref_id from 'Doors' in STATE.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_MAKE_ROOM:
+        # The server sends how far where loot has the item ID, as eight hex digits
+        meters = int(item_id, 16) if item_id != "" else consts.ROOM_DEFAULT_METERS
+        if detail in ("left", "right"):
+            return True, f"You step about {meters} meters to the {detail}, as the player sees it. Apart from that you wait or follow as before.", target_ref_id
+        return True, f"You step back about {meters} meters, away from the player. Apart from that you wait or follow as before.", target_ref_id
     if action == consts.ACTION_EXPRESSION:
         if detail in consts.EXPRESSION_NONE_TEXTS:
             return True, "Your face is your own again.", target_ref_id
@@ -356,11 +362,11 @@ def walk_target_after(action: str, target: str, walk_target_ref_id: str = "") ->
 
 
 def leader_after(action: str, target: str, leader_ref_id: str) -> str:
-    """Like the game: 'follow' with a target makes the companion follow that character. A fight, and what the companion
-    does without moving from the spot, leaves that as it is. Every other command ends it"""
+    """Like the game: 'follow' with a target makes the companion follow that character. A fight, stepping out of the way
+    and what the companion does without moving from the spot leave that as it is. Every other command ends it"""
     if action == consts.ACTION_FOLLOW:
         return target if target != PLAYER_REF_ID else ""
-    if action in QUIET_ACTIONS + [consts.ACTION_ATTACK, consts.ACTION_STAND_DOWN] or action in consts.ITEM_ACTIONS:
+    if action in QUIET_ACTIONS + [consts.ACTION_ATTACK, consts.ACTION_STAND_DOWN, consts.ACTION_MAKE_ROOM] or action in consts.ITEM_ACTIONS:
         return leader_ref_id
     return ""
 
@@ -452,8 +458,8 @@ def main():
             is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""))
             if is_ok:
                 is_waiting = is_waiting_after(str(action), is_waiting)
-                # Looking somewhere and a gesture do not end a retreat
-                if action not in QUIET_ACTIONS:
+                # Looking somewhere, a gesture and stepping out of the way do not end a retreat
+                if action not in QUIET_ACTIONS + [consts.ACTION_MAKE_ROOM]:
                     is_fleeing = is_fleeing_after(str(action))
                 is_sitting = is_sitting_after(str(action), is_sitting)
                 walk_target_ref_id = walk_target_after(str(action), str(target or ""), walk_target_ref_id)

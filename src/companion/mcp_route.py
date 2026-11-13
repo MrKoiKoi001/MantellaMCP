@@ -13,7 +13,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, CompanionVoice, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.14"
+SERVER_VERSION: str = "0.15"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -28,6 +28,7 @@ ARGUMENT_AROUND: str = "around"
 ARGUMENT_STATS: str = "stats"
 ARGUMENT_VISIBLE: str = "visible"
 EXPRESSION_NAMES: str = ", ".join(consts.EXPRESSIONS)
+ROOM_DIRECTION_NAMES: str = ", ".join(consts.ROOM_DIRECTIONS)
 # What the AI may also write for 'around' if it means its own character
 AROUND_COMPANION_WORDS: list[str] = [consts.AROUND_COMPANION, "me", "companion", "self"]
 GESTURE_NAMES: str = ", ".join(sorted(GESTURES))
@@ -65,6 +66,10 @@ TOOLS: list[dict[str, Any]] = [
             "until 'follow', which brings you back out. The player stays outside, so the game does not load the place you are in: "
             "STATE with around 'you' then only shows what the game keeps of it in memory (the characters who live there, the doors), "
             "not everything that is really there. Say so when you report what is inside. "
+            "make_room = step a few meters out of the way, for when you stand in the player's way. 'detail' says where to: "
+            "back (away from the player, also if you name nothing), left or right (as the player sees it who looks at you), "
+            f"with the meters behind it if you like, eg 'left 5' (nothing = {consts.ROOM_DEFAULT_METERS}, at most {consts.ROOM_HIGHEST_METERS}). "
+            "Apart from that you wait or follow as before. "
             "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
             "everything, or only the kind of item whose ID is in 'detail' (see what is in it with STATE and 'corpse' first). "
             "The walk takes a while, your next STATE tells you what you got. Afterwards you follow or wait as before. "
@@ -93,7 +98,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at), a container (loot, move_to), a seat (sit, move_to), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the text to speak for say, the spell name for cast_spell."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the text to speak for say, the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -116,7 +121,7 @@ TOOLS: list[dict[str, Any]] = [
             "ref_id, name, distance and direction from the player, after 'from you' the same seen from your own character, "
             "and 'hostile' if it is hostile to the player. "
             "'Things' only comes when you ask for it with 'things': what stands and lies within about 10 meters of the player, "
-            "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit), containers such as "
+            "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; tables are just called 'Table'), containers such as "
             "chests and barrels (see the command loot; 'locked' if you cannot open it) and items that lie around. "
             "Ask for it when you look for a seat or a chest or the player asks what is around, not every time. "
             "Directions are relative to where the player (after 'from you': your character) faces: "
@@ -148,7 +153,7 @@ TOOLS: list[dict[str, Any]] = [
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
-            "'Since your last STATE': what became of a loot, move_to, enter or sit you started (what you took, or that you did not get there). "
+            "'Since your last STATE': what became of a loot, move_to, enter, make_room or sit you started (what you took, or that you did not get there). "
             "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
             "characters in front with no wall in between, living first, then the dead, then the things in front. "
             "Use it when the talk is about what someone sees, not for an overview. "
@@ -330,6 +335,20 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                 item = format_ref_id(strength)
             else:
                 return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no look '{detail}'. The looks: {EXPRESSION_NAMES}"}, True)
+        if action == consts.ACTION_MAKE_ROOM:
+            # The game gets the number of the direction and how far, the name only goes along for its answer
+            target = ""
+            words = detail.lower().split()
+            detail = words[0] if len(words) > 0 else consts.ROOM_DIRECTION_BACK
+            if detail not in consts.ROOM_DIRECTIONS:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no direction '{detail}' to make room in. The directions: {ROOM_DIRECTION_NAMES}"}, True)
+            count = consts.ROOM_DIRECTIONS[detail]
+            meters = consts.ROOM_DEFAULT_METERS
+            if len(words) > 1:
+                if not words[1].isdecimal() or not 1 <= int(words[1]) <= consts.ROOM_HIGHEST_METERS:
+                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"What stands behind the direction is how far in meters: a number from 1 to {consts.ROOM_HIGHEST_METERS}."}, True)
+                meters = int(words[1])
+            item = format_ref_id(meters)
         if action == consts.ACTION_GESTURE:
             # The game gets the ID of the animation, the name only goes along for its answer
             target = ""

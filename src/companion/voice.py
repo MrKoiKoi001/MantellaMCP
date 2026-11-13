@@ -9,6 +9,8 @@ for the sound of one of the two lines the game mod can make the companion speak:
 Piper is talked to the same way src/tts/piper.py of Mantella does it: the program keeps running, takes
 "load_model <file>" and "synthesize <text>" as lines, answers "Model loaded" and writes out.wav into its working folder.
 Mantella's own class is not used, because it needs all of Mantella's settings to start.
+
+If the lip movement is switched on, a lip file made from the sound goes next to the sound file (see lips.py).
 """
 import csv
 import os
@@ -20,6 +22,8 @@ import time
 import wave
 from pathlib import Path
 from queue import Empty, Queue
+
+from src.companion.lips import LIP_ENDING, PLACEHOLDER_FILE, SOUND_ENDING, LipSync
 
 GAME_PLUGIN_NAME: str = "KI_MCP_Gefaehrte.esp"
 # The names the game gives the sound files of the two lines (see VOICE_LINE_FILES in build.py of the game mod).
@@ -41,6 +45,11 @@ DEFAULT_GAME_FOLDER: str = r"C:\Program Files (x86)\Steam\steamapps\common\Skyri
 DEFAULT_PIPER_FOLDER: str = str(Path(__file__).resolve().parents[2] / "piper")
 
 _voice_folders_by_name: dict[str, str] | None = None
+
+
+def lip_file_of(line_file: str) -> str:
+    """The name of the lip file that belongs to the sound file of a line"""
+    return line_file[:-len(SOUND_ENDING)] + LIP_ENDING
 
 
 def find_voice_folder(character_name: str, file: Path = CHARACTERS_FILE) -> str:
@@ -75,11 +84,15 @@ class CompanionVoice:
     """Makes the sound of what the companion says and puts it into the game folder"""
 
     def __init__(self, game_folder: str = DEFAULT_GAME_FOLDER, piper_folder: str = DEFAULT_PIPER_FOLDER,
-                 piper_command: list[str] | None = None) -> None:
+                 piper_command: list[str] | None = None, lips: LipSync | None = None) -> None:
         """
         Args:
             piper_command: The command that starts Piper. Only tests set it, to put a stand-in in Piper's place
+            lips: Makes the lip movement for what is said. Without it the mouth of the companion stays shut
         """
+        self.__lips: LipSync | None = lips
+        # Lips that are wanted but cannot be made count as switched off. describe_lips says why
+        self.__are_lips_on: bool = lips is not None and lips.find_problem() == ""
         self.__game_folder: str = game_folder
         self.__piper_folder: Path = Path(piper_folder)
         self.__piper_command: list[str] = piper_command if piper_command is not None else [str(self.__piper_folder / PIPER_PROGRAM)]
@@ -98,10 +111,59 @@ class CompanionVoice:
     def describe_setup(self) -> str:
         """One line for the start of the server: whether speaking can work"""
         if not self.__is_stand_in and not os.path.isfile(self.__piper_command[0]):
-            return f"off: {self.__piper_command[0]} not found (see --piper-folder)"
+            return f"off: {self.__piper_command[0]} not found (see piper_folder in companion.ini)"
         if not os.path.isdir(self.voice_root):
-            return f"off: {self.voice_root} not found (run build.py --install of the game mod, or see --game-folder)"
+            return f"off: {self.voice_root} not found (run build.py --install of the game mod, or see game_folder in companion.ini)"
         return f"on: Piper in {self.__piper_folder}, sound goes to {self.voice_root}"
+
+    def describe_lips(self) -> str:
+        """One line for the start of the server: whether the lips of the companion move"""
+        if self.__lips is None:
+            return "off (lips = off in companion.ini)"
+        return self.__lips.describe_setup()
+
+    def prepare_lip_files(self) -> str:
+        """Makes the folders of the voices fit the setting for the lips. Call it once when the server starts.
+
+        The game only finds the files that are there when it starts. So with the lips switched on, every line gets a
+        lip file to begin with (the placeholder), which speak then writes over. With the lips switched off, the lip files
+        of the lines are taken away, so that the mouth stays shut instead of moving to an old sentence.
+
+        Returns:
+            What was changed as one line for the start of the server, or an empty text if nothing was
+        """
+        if not os.path.isdir(self.voice_root):
+            return ""
+        added_count = 0
+        removed_count = 0
+        failed_count = 0
+        for folder_name in sorted(os.listdir(self.voice_root)):
+            folder = os.path.join(self.voice_root, folder_name)
+            if not os.path.isdir(folder):
+                continue
+            for line_file in LINE_FILES:
+                lip_file = os.path.join(folder, lip_file_of(line_file))
+                try:
+                    if not self.__are_lips_on:
+                        if os.path.isfile(lip_file):
+                            os.remove(lip_file)
+                            removed_count += 1
+                    elif not os.path.isfile(lip_file) and os.path.isfile(os.path.join(folder, line_file)):
+                        shutil.copyfile(PLACEHOLDER_FILE, lip_file)
+                        added_count += 1
+                except OSError:
+                    failed_count += 1
+        parts: list[str] = []
+        if added_count > 0:
+            parts.append(f"{added_count} lip files put next to the sound files of the lines")
+        if removed_count > 0:
+            parts.append(f"{removed_count} lip files of the lines taken away")
+        if len(parts) > 0:
+            parts.append("if the game is running, it has to be started anew for this to count")
+        if failed_count > 0:
+            parts.append(f"{failed_count} lip files could not be changed (while the game runs it may hold on to them; "
+                         "if a permission is missing, run build.py --install of the game mod again as administrator)")
+        return ", ".join(parts)
 
     def speak(self, text: str, voice_folder: str) -> tuple[bool, str, int]:
         """Turns the text into sound and puts it into the game folder. Takes about a second, so call it from a thread.
@@ -124,7 +186,7 @@ class CompanionVoice:
             if not self.__is_stand_in:
                 if not os.path.isfile(self.__piper_command[0]):
                     return False, (f"Piper is not installed where the server looks for it ({self.__piper_command[0]}). The player has to copy "
-                                   "the folder 'piper' of the Mantella download there, or start the server with --piper-folder."), 0
+                                   "the folder 'piper' of the Mantella download there, or name its folder as piper_folder in companion.ini."), 0
                 if not model.is_file():
                     return False, f"Piper has no voice model for your voice '{voice_folder}' ({model}).", 0
             try:
@@ -132,6 +194,10 @@ class CompanionVoice:
             except (OSError, RuntimeError) as error:
                 self.__stop_piper()
                 return False, f"Piper could not make the sound: {error}", 0
+            # Without a lip file of its own, the sentence gets the placeholder: the lips of the sentence before would not fit
+            lip_file = ""
+            if self.__lips is not None and self.__are_lips_on:
+                lip_file = self.__lips.make(sound_file, cleaned) or str(PLACEHOLDER_FILE)
 
             # The game may still hold on to the file of the line that was spoken last, so the two lines take turns
             last_error = ""
@@ -141,6 +207,12 @@ class CompanionVoice:
                 except OSError as error:
                     last_error = str(error)
                     continue
+                if lip_file != "":
+                    try:
+                        shutil.copyfile(lip_file, os.path.join(target_folder, lip_file_of(LINE_FILES[line - 1])))
+                    except OSError:
+                        # The sound counts. Without the new lip file the mouth moves wrongly at worst
+                        pass
                 self.__next_line = 3 - line
                 return True, "", line
             return False, (f"The server could not write the sound into {target_folder}: {last_error}. If that is a missing permission, "

@@ -73,6 +73,15 @@ class companion_constants:
     ACTION_MOVE_TO: str = "move_to"
     # The companion walks to a door that leads into another area and goes through it on its own
     ACTION_ENTER: str = "enter"
+    # The companion steps a few meters out of the way. For the game: 'count' is the number of the direction (see
+    # ROOM_DIRECTIONS), and how far in meters is where loot has the lower half of an item ID
+    ACTION_MAKE_ROOM: str = "make_room"
+    # The directions by the numbers the game mod knows them by. Back is away from the player,
+    # left and right are as the player sees them who looks at the companion
+    ROOM_DIRECTION_BACK: str = "back"
+    ROOM_DIRECTIONS: dict[str, int] = {ROOM_DIRECTION_BACK: 0, "left": 1, "right": 2}
+    ROOM_DEFAULT_METERS: int = 3
+    ROOM_HIGHEST_METERS: int = 10
     ACTION_LOOT: str = "loot"
     ACTION_SIT: str = "sit"
     ACTION_LOOK_AT: str = "look_at"
@@ -108,6 +117,7 @@ class companion_constants:
         ACTION_FLEE,
         ACTION_MOVE_TO,
         ACTION_ENTER,
+        ACTION_MAKE_ROOM,
         ACTION_LOOT,
         ACTION_SIT,
         ACTION_LOOK_AT,

@@ -4,6 +4,9 @@ Starts only what the companion needs: the long polling route for the game and th
 Nothing of Mantella's speech-to-text, LLM or text-to-speech code is loaded.
 
 Run from the repo root:  python companion_main.py
+
+The settings (folder of the game, folder of Piper, lip movement on or off) are in companion.ini next to this file.
+The server makes that file with its notes when it is missing (see src/companion/settings.py).
 """
 import argparse
 import os
@@ -16,7 +19,9 @@ from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.game_route import add_game_route
 from src.companion.mcp_route import add_mcp_route
-from src.companion.voice import DEFAULT_GAME_FOLDER, DEFAULT_PIPER_FOLDER, CompanionVoice
+from src.companion.lips import LipSync
+from src.companion.settings import SETTINGS_FILE, load_settings
+from src.companion.voice import CompanionVoice
 
 TOKEN_FILE: str = "companion_token.txt"
 DEFAULT_PORT: int = 4998 # Mantella itself uses 4999
@@ -52,12 +57,17 @@ def main():
     parser = argparse.ArgumentParser(description="AI companion server for Skyrim")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port for the game and the MCP route (default {DEFAULT_PORT})")
     parser.add_argument("--hold-seconds", type=float, default=DEFAULT_HOLD_SECONDS, help="How long a request of the game is held open while there is no command")
-    parser.add_argument("--game-folder", default=DEFAULT_GAME_FOLDER, help="Folder of the game, for the voice of the companion (default: %(default)s)")
-    parser.add_argument("--piper-folder", default=DEFAULT_PIPER_FOLDER, help="Folder with piper.exe from the Mantella download, for the voice of the companion (default: %(default)s)")
+    parser.add_argument("--settings", default=SETTINGS_FILE, help="File with the settings (default: %(default)s). It is made if it is missing")
+    parser.add_argument("--game-folder", default="", help="Folder of the game, for the voice of the companion. Counts instead of the one in the settings")
+    parser.add_argument("--piper-folder", default="", help="Folder with piper.exe from the Mantella download. Counts instead of the one in the settings")
     args = parser.parse_args()
 
     token = load_or_create_token(TOKEN_FILE)
-    voice = CompanionVoice(args.game_folder, args.piper_folder)
+    settings, settings_source = load_settings(args.settings)
+    game_folder = args.game_folder or settings.game_folder
+    lips = LipSync(game_folder, settings.lipgen_folder, settings.facefx_folder, settings.fonix_file) if settings.lips else None
+    voice = CompanionVoice(game_folder, args.piper_folder or settings.piper_folder, lips=lips)
+    lip_files_change = voice.prepare_lip_files()
     app = create_app(token, args.hold_seconds, voice)
 
     print("")
@@ -65,7 +75,11 @@ def main():
     print(f"  Game route (this machine only): http://localhost:{args.port}{consts.ROUTE_GAME}")
     print(f"  MCP route:                      http://localhost:{args.port}{consts.ROUTE_MCP_PREFIX}{token}")
     print(f"  For the AI app, put the tunnel address in front: https://<tunnel-address>{consts.ROUTE_MCP_PREFIX}{token}")
+    print(f"  Settings: {settings_source}")
     print(f"  Voice of the companion (command say): {voice.describe_setup()}")
+    print(f"  Lips of the companion: {voice.describe_lips()}")
+    if lip_files_change != "":
+        print(f"  Lip files: {lip_files_change}")
     print("")
 
     uvicorn.run(app, host="127.0.0.1", port=args.port)

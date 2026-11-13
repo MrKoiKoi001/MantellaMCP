@@ -7,6 +7,8 @@
 Run from the repo root:  python companion_start.py --fake-game
 Stop everything with Ctrl+C.
 
+The settings of the server (folder of the game, lip movement on or off ...) are in companion.ini next to this file.
+
 Needs cloudflared (Windows: winget install --id Cloudflare.cloudflared).
 """
 import argparse
@@ -98,8 +100,9 @@ def main() -> int:
     parser.add_argument("--fake-game", action="store_true", help="Also start the fake game (for testing without Skyrim)")
     parser.add_argument("--no-tunnel", action="store_true", help="Do not start the Cloudflare tunnel")
     parser.add_argument("--cloudflared", default="cloudflared", help="Name or path of the cloudflared program")
-    parser.add_argument("--game-folder", default="", help="Folder of the game, for the voice of the companion (see companion_main.py)")
-    parser.add_argument("--piper-folder", default="", help="Folder with piper.exe, for the voice of the companion (see companion_main.py)")
+    parser.add_argument("--settings", default="", help="File with the settings of the server (see companion_main.py). Nothing = companion.ini")
+    parser.add_argument("--game-folder", default="", help="Folder of the game. Counts instead of the one in the settings (see companion_main.py)")
+    parser.add_argument("--piper-folder", default="", help="Folder with piper.exe. Counts instead of the one in the settings (see companion_main.py)")
     args = parser.parse_args()
 
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -115,6 +118,8 @@ def main() -> int:
 
     try:
         server_command = [sys.executable, "companion_main.py", "--port", str(args.port)]
+        if args.settings != "":
+            server_command += ["--settings", args.settings]
         if args.game_folder != "":
             server_command += ["--game-folder", args.game_folder]
         if args.piper_folder != "":
