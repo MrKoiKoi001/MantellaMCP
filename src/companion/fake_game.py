@@ -127,7 +127,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
                 is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
-                has_stats: bool = False) -> dict:
+                has_stats: bool = False, is_visible_only: bool = False) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -144,6 +144,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         leader_ref_id: Whom the companion follows because of the command follow with a target, or empty
         expression: The look on the companion's face because of the command expression, or empty
         has_stats: Whether the server asked for the level, the skills and so on of the player
+        is_visible_only: Whether the server asked only for what can be seen. The simulator sends the same characters
+            and only says that it filtered them
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -159,7 +161,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_PLAYER_NAME: "Dragonborn",
         game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0, int(are_weapons_drawn)],
         # Snow at 14:35
-        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL, int(is_around_companion)],
+        game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL, int(is_around_companion), int(is_visible_only)],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
         game_state.KEY_QUEST_TARGETS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUEST_TARGETS],
         game_state.KEY_PLACES: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in PLACES],
@@ -392,6 +394,7 @@ def main():
     expression = ""
     is_around_companion = False
     are_stats_wanted = False
+    is_visible_wanted = False
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
@@ -406,10 +409,11 @@ def main():
             # Only the first state has something that was said
             request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
                                                          is_around_companion, target_ref_id != "", look_target_ref_id,
-                                                         leader_ref_id, expression, are_stats_wanted)
+                                                         leader_ref_id, expression, are_stats_wanted, is_visible_wanted)
             are_things_wanted = False
             is_around_companion = False
             are_stats_wanted = False
+            is_visible_wanted = False
             wanted_inventory = ""
             wanted_corpse = ""
         body = json.dumps(request_body).encode("utf-8")
@@ -439,6 +443,7 @@ def main():
                 are_things_wanted = bool(command.get(consts.KEY_COMMAND_THINGS))
                 is_around_companion = bool(command.get(consts.KEY_COMMAND_AROUND))
                 are_stats_wanted = bool(command.get(consts.KEY_COMMAND_STATS))
+                is_visible_wanted = bool(command.get(consts.KEY_COMMAND_VISIBLE))
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it

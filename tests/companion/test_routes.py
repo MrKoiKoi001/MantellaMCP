@@ -443,7 +443,7 @@ def test_heard_lines_are_kept_until_the_ai_asks_and_given_only_once():
         "5\tFF000A01\tbandit\tNever should have come here!\t", "broken", "x\t00000014\tKoi\tHello"]})
     assert state["heard"] == [{"seconds_ago": 5, "ref_id": "FF000A01", "name": "Bandit", "text": "Never should have come here!"}]
     assert game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0], game_state.KEY_HEARD: ["5\t00000014\tKoi\tHello"]}) == {
-        "time": "10:00", "weather": "clear", "quests": [], "protocol": 0, "around_companion": False, "hearing": False, "nearby": []}
+        "time": "10:00", "weather": "clear", "quests": [], "protocol": 0, "around_companion": False, "visible_only": False, "hearing": False, "nearby": []}
 
 
 def test_heard_lines_of_one_speaker_are_joined_and_old_ones_dropped():
@@ -1275,3 +1275,54 @@ def test_stats_of_the_player_only_come_when_asked_for():
         assert answer["stats_wanted"] is False and answer["stats_missed"] is True
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert tools[1]["inputSchema"]["properties"]["stats"]["type"] == "boolean"
+
+
+def test_visible_only_lists_what_can_be_seen():
+    import asyncio
+
+    from src.companion import game_state
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **result: object) -> list[str]:
+        state = game_state.read_game_state(raw)
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, **result}).splitlines()
+
+    assert game_state.read_game_state(build_state(is_visible_only=True))["visible_only"] is True
+    assert game_state.read_game_state(build_state())["visible_only"] is False
+    # The game filtered the characters. Of the things only those in front stay: the bench (left) and the strongbox (behind) go
+    seen = text_for(build_state(is_visible_only=True), visible_wanted=True, things_wanted=True)
+    assert any(line.startswith("Only what the player can see: characters in front of the player") for line in seen)
+    start = seen.index("Things:")
+    assert seen[start + 1:start + 4] == ["0005A400 Chest, container, 4 m ahead-right, from you 7 m left",
+                                         "0005A410 Iron Dagger, item, 2 m ahead-right, from you 5 m left",
+                                         "Places: Pelagia Farm 000C0001 (farm) 120 m ahead-left, Whiterun Stables 000C0002 (stable) 260 m behind"]
+    shown = "\n".join(seen)
+    assert "Wooden Bench" not in shown and "Strongbox" not in shown and "Grindstone" not in shown
+    # Seen from the companion
+    assert any(line.startswith("Only what you can see:") for line in
+               text_for(build_state(is_around_companion=True, is_visible_only=True), visible_wanted=True, around_wanted=True))
+    # The game could not filter (an older game mod, or inside a place it has not loaded): everything stays, and that is said
+    unfiltered = text_for(build_state(), visible_wanted=True, things_wanted=True)
+    assert any(line.startswith("The game could not check what can be seen") for line in unfiltered)
+    assert "Wooden Bench" in "\n".join(unfiltered)
+    # Not asked for: no line, no filter, even if the kept state was filtered
+    plain = text_for(build_state(is_visible_only=True), things_wanted=True)
+    assert not any(line.startswith(("Only what", "The game could not check")) for line in plain) and "Wooden Bench" in "\n".join(plain)
+
+    async def request(**wanted: bool) -> dict:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, **wanted))
+        return (await game)[0]
+
+    assert asyncio.run(request(visible=True))[consts.KEY_COMMAND_VISIBLE] == 1
+    assert asyncio.run(request())[consts.KEY_COMMAND_VISIBLE] == 0
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()})
+        answer = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True, "visible": True}}))
+        assert answer["visible_wanted"] is False
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[1]["inputSchema"]["properties"]["visible"]["type"] == "boolean"

@@ -45,7 +45,8 @@ KEY_STATS_COMPANION: str = "stats_companion"
 # whether that plugin listens to what characters say (0 or 1),
 # number of the protocol the game mod speaks (see GAME_PROTOCOL; older game mods leave this number out),
 # whether the lists of this state are seen from the companion (1) or from the player (0; older game mods leave this out).
-# "The viewer" below is the one of the two from whom they are seen
+# "The viewer" below is the one of the two from whom they are seen,
+# whether the list of characters only holds those the viewer can see (1; older game mods leave this out)
 KEY_WORLD_VALUES: str = "world"
 # One text per open quest of the journal, tracked ones first. Its parts are separated by tabs:
 # tracked (1 or 0), type of the quest as the game numbers it, name of the quest, then the text of each open objective.
@@ -136,12 +137,16 @@ COMPANION_STATS_COUNT: int = 6
 NEARBY_LINE_PART_COUNT: int = 5
 # What the game calls sitting (Actor.GetSitState): 3 = seated, 4 = seated and about to get up
 SIT_STATES_SEATED: tuple[int, ...] = (3, 4)
-WORLD_VALUE_COUNT: int = 6
+WORLD_VALUE_COUNT: int = 7
 WORLD_PLACE_OF_PROTOCOL: int = 4
 WORLD_PLACE_OF_AROUND: int = 5
+WORLD_PLACE_OF_VISIBLE: int = 6
+# What the viewer can see lies within this many degrees to the left and right of where it faces
+# (VisibleHalfAngleDegrees in KI_MCP_Gefaehrte_Loop.psc). The things are filtered by it here
+VISIBLE_HALF_ANGLE_DEGREES: int = 60
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 4
+GAME_PROTOCOL: int = 5
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -261,6 +266,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["protocol"] = world_values[WORLD_PLACE_OF_PROTOCOL] if len(world_values) > WORLD_PLACE_OF_PROTOCOL else 0
         # From whom the lists below are seen: distances and directions are measured from the companion then
         state["around_companion"] = len(world_values) > WORLD_PLACE_OF_AROUND and world_values[WORLD_PLACE_OF_AROUND] != 0
+        # Whether the game only listed the characters the viewer can see
+        state["visible_only"] = len(world_values) > WORLD_PLACE_OF_VISIBLE and world_values[WORLD_PLACE_OF_VISIBLE] != 0
         if len(world_values) > WORLD_PLACE_OF_HEARING:
             state["hearing"] = world_values[WORLD_PLACE_OF_HEARING] != 0
             if state["hearing"]:

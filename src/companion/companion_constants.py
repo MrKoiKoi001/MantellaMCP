@@ -41,6 +41,8 @@ class companion_constants:
     KEY_COMMAND_AROUND: str = PREFIX + "around"
     # For report_state: 1 if the state should carry the level, the skills and so on of the player
     KEY_COMMAND_STATS: str = PREFIX + "stats"
+    # For report_state: 1 if the list of characters should only hold those the viewer can see
+    KEY_COMMAND_VISIBLE: str = PREFIX + "visible"
     # What the AI can name as the centre of those lists
     AROUND_PLAYER: str = "player"
     AROUND_COMPANION: str = "you"

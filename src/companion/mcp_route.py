@@ -13,7 +13,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, CompanionVoice, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.13"
+SERVER_VERSION: str = "0.14"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -26,6 +26,7 @@ ARGUMENT_THINGS: str = "things"
 ARGUMENT_MAX: str = "max"
 ARGUMENT_AROUND: str = "around"
 ARGUMENT_STATS: str = "stats"
+ARGUMENT_VISIBLE: str = "visible"
 EXPRESSION_NAMES: str = ", ".join(consts.EXPRESSIONS)
 # What the AI may also write for 'around' if it means its own character
 AROUND_COMPANION_WORDS: list[str] = [consts.AROUND_COMPANION, "me", "companion", "self"]
@@ -148,6 +149,9 @@ TOOLS: list[dict[str, Any]] = [
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
             "'Since your last STATE': what became of a loot, move_to, enter or sit you started (what you took, or that you did not get there). "
+            "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
+            "characters in front with no wall in between, living first, then the dead, then the things in front. "
+            "Use it when the talk is about what someone sees, not for an overview. "
             "With 'stats' you get the level of the player, whether a level-up is waiting, perk points to spend, health, magicka, "
             "stamina, the weight carried and all skills (highest first), and your own level, health, magicka and stamina."
         ),
@@ -159,6 +163,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_THINGS: {"type": "boolean", "description": "true = also list the furniture, containers and loose items within about 10 meters of the player. Only when you need them."},
                 ARGUMENT_AROUND: {"type": "string", "enum": consts.AROUND_CHOICES, "description": "Whose surroundings the lists show: player (the default) or you = your own character."},
                 ARGUMENT_STATS: {"type": "boolean", "description": "true = also give the level, the skills and so on of the player, and your own level. Only when the talk is about that."},
+                ARGUMENT_VISIBLE: {"type": "boolean", "description": "true = only what can be seen: in front of the viewer and not behind a wall. The viewer is the one 'around' names."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
@@ -262,7 +267,8 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
         around = str(arguments.get(ARGUMENT_AROUND, "") or "").strip().lower()
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
                                              max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS,
-                                             stats=arguments.get(ARGUMENT_STATS) is True)
+                                             stats=arguments.get(ARGUMENT_STATS) is True,
+                                             visible=arguments.get(ARGUMENT_VISIBLE) is True)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)

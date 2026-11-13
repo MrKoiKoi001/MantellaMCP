@@ -7,7 +7,7 @@ the AI needs to decide, instead of the whole state as JSON.
 from typing import Any
 
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import (GAME_PROTOCOL, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
+from src.companion.game_state import (GAME_PROTOCOL, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
                                       TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM)
 
@@ -110,6 +110,16 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.append("The lists below show what is around you, not around the player.")
     elif state_result.get("around_wanted"):
         lines.append("The game listed what is around the player: your character is not close enough to look around on its own.")
+    # 'visible': the game has left out the characters the viewer cannot see. The things are left out here, by their direction
+    is_visible_only = bool(state_result.get("visible_wanted")) and bool(state.get("visible_only"))
+    if is_visible_only:
+        viewer = "you" if is_from_companion else "the player"
+        lines.append(f"Only what {viewer} can see: characters in front of {viewer} with no wall in between, "
+                     f"things within {VISIBLE_HALF_ANGLE_DEGREES} degrees left and right (for things walls are not checked).")
+        things = [thing for thing in things if abs(thing.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
+    elif state_result.get("visible_wanted"):
+        lines.append("The game could not check what can be seen (inside a place it has not loaded, or an older game mod). "
+                     "The lists below hold everything around.")
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:
