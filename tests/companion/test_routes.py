@@ -1035,3 +1035,96 @@ def test_look_at_and_gesture():
     assert look_target_after(consts.ACTION_LOOK_AT, "", "000F6845") == ""
     assert walk_target_after(consts.ACTION_GESTURE, "", "000F6845") == "000F6845"
     assert is_sitting_after(consts.ACTION_LOOK_AT, True) is True and is_sitting_after(consts.ACTION_GESTURE, True) is True
+
+
+def test_say_makes_the_sound_and_tells_the_game_which_line_to_speak(tmp_path):
+    import sys
+    import wave
+
+    from src.companion.fake_game import build_state, is_sitting_after, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.voice import LINE_FILES, CompanionVoice, clean_text, find_voice_folder
+
+    # A stand-in for Piper that talks the same way: it answers "Model loaded" and writes out.wav into its working folder
+    stand_in = tmp_path / "stand_in_piper.py"
+    stand_in.write_text(
+        "import sys, wave\n"
+        "for line in sys.stdin:\n"
+        "    if line.startswith('load_model'):\n"
+        "        print('Model loaded', flush=True)\n"
+        "    elif line.startswith('synthesize '):\n"
+        "        with wave.open('out.wav', 'wb') as sound:\n"
+        "            sound.setnchannels(1); sound.setsampwidth(2); sound.setframerate(22050)\n"
+        "            sound.writeframes(b'\\x00\\x00' * len(line))\n", encoding="utf-8")
+    game_folder = tmp_path / "game"
+    voice = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(stand_in)])
+    voice_folder = game_folder / "Data" / "Sound" / "Voice" / "KI_MCP_Gefaehrte.esp" / "FemaleEvenToned"
+
+    def frames(file_name: str) -> int:
+        with wave.open(str(voice_folder / file_name), "rb") as sound:
+            return sound.getnframes()
+
+    # Without the folder the game mod's installer makes, there is nowhere to put the sound
+    assert voice.describe_setup().startswith("off:")
+    is_ok, problem, line = voice.speak("Hello there.", "FemaleEvenToned")
+    assert is_ok is False and "build.py --install" in problem
+    voice_folder.mkdir(parents=True)
+    assert voice.describe_setup().startswith("on:")
+    # The two lines of the game mod take turns, because the game may still hold on to the file it played last
+    assert voice.speak("Hello there.", "FemaleEvenToned") == (True, "", 1)
+    assert voice.speak("I am sworn to carry your burdens, my Thane.", "FemaleEvenToned") == (True, "", 2)
+    assert voice.speak("Short.", "FemaleEvenToned") == (True, "", 1)
+    assert frames(LINE_FILES[1]) > frames(LINE_FILES[0]) > 0
+    assert voice.speak("  * ", "FemaleEvenToned")[:2] == (False, "There is nothing to say.")
+    assert clean_text("*She waves.*\nHello,   you.") == "She waves. Hello, you."
+    # Mantella's list of characters knows the voice of the characters of the game by their names
+    assert find_voice_folder("lydia") == "FemaleEvenToned" and find_voice_folder("Nobody At All") == ""
+    assert read_game_state(build_state())["companion"]["voice"] == "FemaleEvenToned"
+    # The game mod's own line carries '...' as its text. That is not something the AI has to hear
+    own_line = build_state()
+    own_line["heard"] = ["2\t000A2C94\tLydia\t...", "1\t000F6845\tWhiterun Guard\tNo lollygaggin'."]
+    assert [heard["name"] for heard in read_game_state(own_line)["heard"]] == ["Whiterun Guard"]
+
+    def command(client: TestClient, arguments: dict) -> dict:
+        return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        assert "without a voice" in command(client, {"action": "say", "detail": "Hello."})["message"]
+    with TestClient(create_app(TOKEN, hold_seconds=0.1, voice=voice)) as client:
+        assert "text to speak" in command(client, {"action": "say"})["message"]
+        assert "too long" in command(client, {"action": "say", "detail": "word " * 200})["message"]
+        assert "Get STATE first" in command(client, {"action": "say", "detail": "Hello."})["message"]
+        # An older plugin does not tell the voice, and nobody of that name is in Mantella's list
+        stranger = build_state()
+        del stranger["companion_voice"]
+        stranger["companion_name"] = "Nobody At All"
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: stranger})
+        assert "which voice" in command(client, {"action": "say", "detail": "Hello."})["message"]
+        # The sound is made, and only then the game turns out not to pick the command up
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()})
+        time.sleep(0.2)
+        before = (voice_folder / LINE_FILES[1]).stat().st_mtime_ns
+        assert command(client, {"action": "say", "detail": "Follow me."})["status"] in (consts.STATUS_NOT_DELIVERED, consts.STATUS_GAME_NOT_CONNECTED)
+        assert (voice_folder / LINE_FILES[1]).stat().st_mtime_ns > before
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "say" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+
+    # The game is told the number of the line, not the text
+    with TestClient(create_app(TOKEN, hold_seconds=5, voice=voice)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You say it aloud."}]
+            client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        assert command(client, {"action": "say", "detail": "Watch out!"}) == {"status": consts.STATUS_DONE, "message": "You say it aloud."}
+        sent = received_commands[0]
+        assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL]) == ("say", "")
+        assert sent[consts.KEY_COMMAND_COUNT] in (1, 2)
+
+    assert run_command(consts.ACTION_SAY, "", "") == (True, "You say it aloud.", "")
+    assert is_sitting_after(consts.ACTION_SAY, True) is True

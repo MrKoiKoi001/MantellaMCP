@@ -222,6 +222,11 @@ class CompanionCommandQueue:
                 "reports": self.__take_reports() if is_for_the_ai else [],
             }
 
+    async def peek_state(self) -> dict[str, Any] | None:
+        """Returns the state the game sent last, without asking the game for a fresh one (None = it sent none yet)"""
+        async with self.__changed:
+            return self.__state
+
     # -------------------------------------------------------------------- helpers
 
     def __is_game_connected(self) -> bool:

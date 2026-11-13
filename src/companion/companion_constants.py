@@ -73,6 +73,8 @@ class companion_constants:
     ACTION_GESTURE: str = "gesture"
     # For gesture: what 'detail' says to end a gesture that goes on and on
     GESTURE_STOP_TEXT: str = "stop"
+    # The companion speaks the text in 'detail' aloud. For the game: 'count' is the number of the line to speak (see voice.py)
+    ACTION_SAY: str = "say"
     ACTION_EQUIP: str = "equip"
     ACTION_UNEQUIP: str = "unequip"
     ACTION_GIVE: str = "give"
@@ -92,6 +94,7 @@ class companion_constants:
         ACTION_SIT,
         ACTION_LOOK_AT,
         ACTION_GESTURE,
+        ACTION_SAY,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
         ACTION_GIVE,

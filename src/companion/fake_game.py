@@ -153,6 +153,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_QUEST_TARGETS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUEST_TARGETS],
         game_state.KEY_PLACES: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in PLACES],
         game_state.KEY_COMPANION_NAME: "Lydia",
+        game_state.KEY_COMPANION_VOICE: "FemaleEvenToned",
         game_state.KEY_COMPANION_VALUES: [
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
@@ -233,6 +234,8 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if name_of(target) != "":
             return True, f"You look at {name_of(target)} now. 'look_at' without a target lets you look around freely again.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_SAY:
+        return True, "You say it aloud.", target_ref_id
     if action == consts.ACTION_GESTURE:
         if item_id == "":
             return True, "You stand normally again.", target_ref_id
@@ -277,7 +280,7 @@ def is_sitting_after(action: str, is_sitting: bool) -> bool:
     'look_at', 'gesture' and what it does with its things leave it seated, every other command makes it get up"""
     if action == consts.ACTION_SIT:
         return True
-    if action in (consts.ACTION_WAIT, consts.ACTION_STAND_DOWN, consts.ACTION_LOOK_AT, consts.ACTION_GESTURE) or action in consts.ITEM_ACTIONS:
+    if action in (consts.ACTION_WAIT, consts.ACTION_STAND_DOWN, consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_SAY) or action in consts.ITEM_ACTIONS:
         return is_sitting
     return False
 
@@ -301,7 +304,7 @@ def is_fleeing_after(action: str) -> bool:
 def walk_target_after(action: str, target: str, walk_target_ref_id: str = "") -> str:
     """Like the game: every new command ends the walk, except for 'look_at', 'gesture' and what the companion does
     with its things. The simulator's companion never arrives, so it keeps walking until then"""
-    if action in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE) or action in consts.ITEM_ACTIONS:
+    if action in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_SAY) or action in consts.ITEM_ACTIONS:
         return walk_target_ref_id
     return target if action in (consts.ACTION_MOVE_TO, consts.ACTION_LOOT) else ""
 
@@ -378,7 +381,7 @@ def main():
             if is_ok:
                 is_waiting = is_waiting_after(str(action), is_waiting)
                 # Looking somewhere and a gesture do not end a retreat
-                if action not in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE):
+                if action not in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_SAY):
                     is_fleeing = is_fleeing_after(str(action))
                 is_sitting = is_sitting_after(str(action), is_sitting)
                 walk_target_ref_id = walk_target_after(str(action), str(target or ""), walk_target_ref_id)

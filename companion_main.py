@@ -16,6 +16,7 @@ from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.game_route import add_game_route
 from src.companion.mcp_route import add_mcp_route
+from src.companion.voice import DEFAULT_GAME_FOLDER, DEFAULT_PIPER_FOLDER, CompanionVoice
 
 TOKEN_FILE: str = "companion_token.txt"
 DEFAULT_PORT: int = 4998 # Mantella itself uses 4999
@@ -35,11 +36,15 @@ def load_or_create_token(token_file: str) -> str:
     return token
 
 
-def create_app(token: str, hold_seconds: float = DEFAULT_HOLD_SECONDS) -> FastAPI:
+def create_app(token: str, hold_seconds: float = DEFAULT_HOLD_SECONDS, voice: CompanionVoice | None = None) -> FastAPI:
+    """
+    Args:
+        voice: Makes the sound for the command say (see src/companion/voice.py). Without it the companion cannot speak
+    """
     app = FastAPI()
     queue = CompanionCommandQueue(hold_seconds=hold_seconds)
     add_game_route(app, queue)
-    add_mcp_route(app, queue, token)
+    add_mcp_route(app, queue, token, voice)
     return app
 
 
@@ -47,16 +52,20 @@ def main():
     parser = argparse.ArgumentParser(description="AI companion server for Skyrim")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port for the game and the MCP route (default {DEFAULT_PORT})")
     parser.add_argument("--hold-seconds", type=float, default=DEFAULT_HOLD_SECONDS, help="How long a request of the game is held open while there is no command")
+    parser.add_argument("--game-folder", default=DEFAULT_GAME_FOLDER, help="Folder of the game, for the voice of the companion (default: %(default)s)")
+    parser.add_argument("--piper-folder", default=DEFAULT_PIPER_FOLDER, help="Folder with piper.exe from the Mantella download, for the voice of the companion (default: %(default)s)")
     args = parser.parse_args()
 
     token = load_or_create_token(TOKEN_FILE)
-    app = create_app(token, args.hold_seconds)
+    voice = CompanionVoice(args.game_folder, args.piper_folder)
+    app = create_app(token, args.hold_seconds, voice)
 
     print("")
     print("AI companion server")
     print(f"  Game route (this machine only): http://localhost:{args.port}{consts.ROUTE_GAME}")
     print(f"  MCP route:                      http://localhost:{args.port}{consts.ROUTE_MCP_PREFIX}{token}")
     print(f"  For the AI app, put the tunnel address in front: https://<tunnel-address>{consts.ROUTE_MCP_PREFIX}{token}")
+    print(f"  Voice of the companion (command say): {voice.describe_setup()}")
     print("")
 
     uvicorn.run(app, host="127.0.0.1", port=args.port)

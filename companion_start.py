@@ -98,6 +98,8 @@ def main() -> int:
     parser.add_argument("--fake-game", action="store_true", help="Also start the fake game (for testing without Skyrim)")
     parser.add_argument("--no-tunnel", action="store_true", help="Do not start the Cloudflare tunnel")
     parser.add_argument("--cloudflared", default="cloudflared", help="Name or path of the cloudflared program")
+    parser.add_argument("--game-folder", default="", help="Folder of the game, for the voice of the companion (see companion_main.py)")
+    parser.add_argument("--piper-folder", default="", help="Folder with piper.exe, for the voice of the companion (see companion_main.py)")
     args = parser.parse_args()
 
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -112,7 +114,12 @@ def main() -> int:
             return 1
 
     try:
-        server = start_process("server", [sys.executable, "companion_main.py", "--port", str(args.port)])
+        server_command = [sys.executable, "companion_main.py", "--port", str(args.port)]
+        if args.game_folder != "":
+            server_command += ["--game-folder", args.game_folder]
+        if args.piper_folder != "":
+            server_command += ["--piper-folder", args.piper_folder]
+        server = start_process("server", server_command)
         if not wait_for_port(args.port, SERVER_START_TIMEOUT_SECONDS):
             print(f"The companion server did not start on port {args.port}. See the [server] lines above.")
             return 1

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -9,9 +10,10 @@ from src.companion.companion_constants import companion_constants as consts
 from src.companion.gestures import GESTURES, pick_animation
 from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
+from src.companion.voice import MAX_TEXT_LENGTH, CompanionVoice, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.11"
+SERVER_VERSION: str = "0.12"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -65,6 +67,8 @@ TOOLS: list[dict[str, Any]] = [
             "It holds until look_at without a target, which lets you look around freely again. "
             "gesture = play the gesture named in 'detail': " + GESTURE_NAMES + ". "
             "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
+            "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
+            "you there. Write it in English: the voice cannot pronounce other languages. One or two sentences at a time. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
             "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
             "unequip = put the item away, "
@@ -78,7 +82,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, loot, look_at), a container (loot, move_to), a seat (sit, move_to), a door, a place or a quest target (move_to, look_at). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the spell name for cast_spell."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the text to speak for say, the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -147,7 +151,7 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str):
+def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str, voice: CompanionVoice | None = None):
     """Adds a minimal MCP server (Streamable HTTP, stateless, JSON replies) that the AI app connects to
 
     This is written by hand instead of using the MCP SDK on purpose: the SDK needs newer
@@ -156,6 +160,7 @@ def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str):
     Args:
         token: Secret part of the URL. The route is reachable from the internet through a tunnel,
             so only someone who knows the full URL can control the companion.
+        voice: Makes the sound for the command say. Without it the companion cannot speak
     """
     route = consts.ROUTE_MCP_PREFIX + token
 
@@ -167,12 +172,12 @@ def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str):
             return JSONResponse(status_code=400, content=_error(None, -32700, "Parse error"))
 
         if isinstance(body, list):
-            replies = [reply for reply in [await _handle_message(message, queue) for message in body] if reply is not None]
+            replies = [reply for reply in [await _handle_message(message, queue, voice) for message in body] if reply is not None]
             if len(replies) == 0:
                 return Response(status_code=202)
             return JSONResponse(content=replies)
 
-        reply = await _handle_message(body, queue)
+        reply = await _handle_message(body, queue, voice)
         if reply is None:
             return Response(status_code=202)
         return JSONResponse(content=reply)
@@ -187,7 +192,7 @@ def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str):
         return Response(status_code=405, headers={"Allow": "POST"})
 
 
-async def _handle_message(message: Any, queue: CompanionCommandQueue) -> dict[str, Any] | None:
+async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any] | None:
     """Handles one JSON-RPC message. Returns None for notifications (they get no reply)"""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _error(None, -32600, "Invalid request")
@@ -216,11 +221,11 @@ async def _handle_message(message: Any, queue: CompanionCommandQueue) -> dict[st
     if method == "tools/list":
         return _result(message_id, {"tools": TOOLS})
     if method == "tools/call":
-        return _result(message_id, await _call_tool(params.get("name"), params.get("arguments"), queue))
+        return _result(message_id, await _call_tool(params.get("name"), params.get("arguments"), queue, voice))
     return _error(message_id, -32601, f"Method not found: {method}")
 
 
-async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) -> dict[str, Any]:
+async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         arguments = {}
 
@@ -276,6 +281,13 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
             if item_form_id is None or item_form_id == 0:
                 return _tool_json({"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True)
             item = format_ref_id(item_form_id)
+        if action == consts.ACTION_SAY:
+            problem, line = await _prepare_speech(detail, queue, voice)
+            if problem != "":
+                return _tool_json({"status": consts.STATUS_FAILED, "message": problem}, True)
+            # The game only gets the number of the line to speak. The sound is in its folder already
+            result = await queue.send_command(action, count=line)
+            return _tool_json(result, result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED))
         if action == consts.ACTION_GESTURE:
             # The game gets the ID of the animation, the name only goes along for its answer
             target = ""
@@ -293,6 +305,32 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue) ->
         return _tool_json(result, is_error)
 
     return _tool_json({"status": consts.STATUS_FAILED, "message": f"Unknown tool '{name}'."}, True)
+
+
+async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: CompanionVoice | None) -> tuple[str, int]:
+    """Makes the sound of what the companion says and puts it into the game folder (see voice.py)
+
+    Returns:
+        Why that did not work as text for the AI (empty if it worked), and the number of the line the game has to speak
+    """
+    if voice is None:
+        return "This server was started without a voice, so you cannot speak in the game.", 0
+    if text == "":
+        return "say needs the text to speak in 'detail'.", 0
+    if len(text) > MAX_TEXT_LENGTH:
+        return f"That is too long to say in one go ({len(text)} characters, at most {MAX_TEXT_LENGTH}). Say it in parts.", 0
+    state = await queue.peek_state()
+    companion = state.get("companion") if isinstance(state, dict) else None
+    if not isinstance(companion, dict):
+        return "The game has not told who your character is yet. Get STATE first. Without a follower of the player you have no voice.", 0
+    # The plugin of the game mod tells the voice. For an older one, Mantella's list of characters knows the voice by the name
+    voice_folder = str(companion.get("voice") or find_voice_folder(str(companion.get("name", ""))))
+    if voice_folder == "":
+        return (f"The game did not tell which voice {companion.get('name')} has. That needs the newest plugin of the game mod "
+                "(KI_MCP_Gefaehrte.dll, interface version 6)."), 0
+    # Piper takes a moment, and the server has to keep answering the game meanwhile
+    is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder)
+    return ("" if is_ok else problem), line
 
 
 async def _find_nearest_seat(queue: CompanionCommandQueue) -> str:

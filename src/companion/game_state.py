@@ -18,6 +18,9 @@ KEY_PLAYER_NAME: str = "player_name"
 # weapon drawn (0 or 1; older game mods leave this number out)
 KEY_PLAYER_VALUES: str = "player"
 KEY_COMPANION_NAME: str = "companion_name"
+# The name of the companion's voice as the files of the game know it (eg FemaleEvenToned), for the command say.
+# Only from a game mod whose SKSE plugin can tell it
+KEY_COMPANION_VOICE: str = "companion_voice"
 # ref ID, health in percent, dead, in combat, waiting, in the loaded area (each 0 or 1), distance to the player in meters,
 # angle from where the player faces to the companion in degrees (negative = left), ref ID of its combat target (0 = none),
 # direction the companion faces in degrees (0 = north, 90 = east), retreating because of the command flee (0 or 1),
@@ -119,6 +122,9 @@ WORLD_VALUE_COUNT_WITHOUT_HEARING: int = 3
 WORLD_PLACE_OF_PLUGIN_VERSION: int = 2
 WORLD_PLACE_OF_HEARING: int = 3
 HEARD_PART_COUNT: int = 4
+# The text the game mod's own lines for the command say carry. The sound of such a line is what the AI itself said,
+# so it does not have to hear it again
+OWN_LINE_TEXT: str = "..."
 GOLD_VALUE_COUNT: int = 2
 VALUES_PER_ITEM: int = 4
 # The game mod lists at most this many kinds of items of one inventory (MaxInventoryItems in KI_MCP_Gefaehrte_Loop.psc)
@@ -295,6 +301,9 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     name = raw.get(KEY_COMPANION_NAME)
     companion["name"] = _tidy_name(name) if isinstance(name, str) else UNKNOWN_NAME
     companion["ref_id"] = _ref_id(form_id)
+    voice = raw.get(KEY_COMPANION_VOICE)
+    if isinstance(voice, str) and voice.strip() != "":
+        companion["voice"] = voice.strip()
     companion["health_percent"] = health
     companion["dead"] = dead != 0
     companion["in_combat"] = in_combat != 0
@@ -514,7 +523,7 @@ def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:
             continue
         age_text, ref_id_text, name, text = parts
         form_id = parse_ref_id(ref_id_text)
-        if not age_text.isdecimal() or form_id is None or text.strip() == "":
+        if not age_text.isdecimal() or form_id is None or text.strip() in ("", OWN_LINE_TEXT):
             continue
         heard.append({
             "seconds_ago": int(age_text),

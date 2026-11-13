@@ -29,3 +29,4 @@ data/voice_model_data_log_xtts.csv
 .coverage
 moonshine/
 companion_token.txt
+/piper/
