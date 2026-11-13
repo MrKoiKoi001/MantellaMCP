@@ -16,7 +16,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.20"
+SERVER_VERSION: str = "0.21"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -91,6 +91,9 @@ TOOLS: list[dict[str, Any]] = [
             "until 'follow', which brings you back out. The player stays outside, so the game does not load the place you are in: "
             "STATE with around 'you' then only shows what the game keeps of it in memory (the characters who live there, the doors), "
             "not everything that is really there. Say so when you report what is inside. "
+            "run = true: run instead of walk (move_to, move, enter, follow). With move_to, move and enter you run there. "
+            "With follow you keep running after the player until your next command; when you fall more than about 10 meters "
+            "behind the player you run to catch up on your own, also without run. "
             "make_room = step a few meters out of the way, for when you stand in the player's way. 'detail' says where to: "
             "back (away from the player, also if you name nothing), left or right (as the player sees it who looks at you), "
             f"with the meters behind it if you like, eg 'left 5' (nothing = {consts.ROOM_DEFAULT_METERS}, at most {consts.ROOM_HIGHEST_METERS}). "
@@ -123,6 +126,7 @@ TOOLS: list[dict[str, Any]] = [
             "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
             "manner = how you speak, it moves your hands and face to match for this sentence: " + MANNER_NAMES + ". "
             "Nothing = neutral, with hands that vary on their own. A look you set with expression stays on your face. "
+            "While you walk or fight you keep moving and only your lips, head and face move. "
             "sheathe = put your weapon away and keep it away even when the player draws one (otherwise you draw whenever "
             "the player does). In a fight you draw it all the same. draw = draw your weapon, and from then on draw it and "
             "put it away together with the player again. "
@@ -144,6 +148,7 @@ TOOLS: list[dict[str, Any]] = [
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
                 "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
+                "run": {"type": "boolean", "description": "Only for move_to, move, enter and follow: true = run instead of walk."},
                 "manner": {"type": "string", "enum": list(consts.MANNERS), "description": "Only for say: how you speak. It picks how your hands move and the look on your face while you speak. Nothing = neutral."},
             },
             "required": ["action"],
@@ -159,7 +164,7 @@ TOOLS: list[dict[str, Any]] = [
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
             "seen from you, waiting, following (the player, or the character named behind it), sitting or walking to someone, "
-            "retreating, whom it fights, 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
+            "retreating, whom it fights, 'running' while you run, 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
             "If you are not where the player is, the line names the place you are in instead. "
             "Without a follower of the player you have no body. "
             "'Nearby': up to 10 lines (more with 'max'), one per character, people and animals, within about 50 meters of the player (outdoors about 200 meters, so that "
@@ -513,7 +518,8 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                     return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}"}, True)
         if action == consts.ACTION_CAST_SPELL and detail == "":
             return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the spell name in 'detail'."}, True)
-        result = await queue.send_command(action, target, detail, count=count, item=item)
+        is_run = arguments.get("run") is True and action in consts.ACTIONS_WITH_RUN
+        result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run)
         is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
         return _tool_json(result, is_error)
 

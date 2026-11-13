@@ -147,7 +147,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
                 has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False, find: str = "",
-                is_player_sitting: bool = False, is_weapon_kept_away: bool = False) -> dict:
+                is_player_sitting: bool = False, is_weapon_kept_away: bool = False,
+                is_running: bool = False) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -168,6 +169,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             and only says that it filtered them
         is_player_sitting: Whether the player sits on a seat
         is_weapon_kept_away: Whether the companion keeps its weapon put away because of the command sheathe
+        is_running: Whether the companion runs at the moment
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -195,7 +197,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
             SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
             int(are_weapons_drawn), to_papyrus_number(look_target_ref_id), to_papyrus_number(leader_ref_id),
-            int(is_weapon_kept_away),
+            int(is_weapon_kept_away), int(is_running),
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,

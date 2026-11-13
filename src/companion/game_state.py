@@ -135,7 +135,10 @@ PLAYER_VALUE_COUNT_WITHOUT_WEAPON: int = 7
 PLAYER_PLACE_OF_WEAPON: int = 7
 PLAYER_PLACE_OF_SITTING: int = 8
 PLAYER_PLACE_OF_SLEEPING: int = 9
-COMPANION_VALUE_COUNT: int = 17
+COMPANION_VALUE_COUNT: int = 18
+# Older game mods say nothing about running
+COMPANION_VALUE_COUNT_WITHOUT_RUNNING: int = 17
+COMPANION_PLACE_OF_RUNNING: int = 17
 # Older game mods say nothing about a weapon that is kept put away (sheathe)
 COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON: int = 16
 COMPANION_PLACE_OF_KEPT_WEAPON: int = 16
@@ -170,7 +173,7 @@ WORLD_PLACE_OF_VISIBLE: int = 6
 VISIBLE_HALF_ANGLE_DEGREES: int = 60
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 8
+GAME_PROTOCOL: int = 9
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -382,7 +385,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     """No companion in the result means: the player has no follower at the moment"""
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
-    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
+    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_RUNNING, COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
                                              COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
         return None
     (form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id, facing, retreating,
@@ -420,6 +423,8 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
         companion["leader_ref_id"] = _ref_id(values[COMPANION_PLACE_OF_LEADER])
     if len(values) > COMPANION_PLACE_OF_KEPT_WEAPON:
         companion["weapon_kept_away"] = values[COMPANION_PLACE_OF_KEPT_WEAPON] != 0
+    if len(values) > COMPANION_PLACE_OF_RUNNING:
+        companion["running"] = values[COMPANION_PLACE_OF_RUNNING] != 0
     for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() != "":

@@ -162,6 +162,8 @@ class companion_constants:
         "excited": (["IdleDialogueHappyStart", "IdleDialogueExpressiveStart"], "happy"),
         "angry": (["IdleDialogueAngryStart"], "angry"),
         "sad": ([], "sad"),
+        # No hands and no look: only the lips, and the eyes on whom the companion speaks to
+        "none": ([], ""),
         "joking": (["IdleDialogueHappyStart", "IdleDialogueMovingTalkA", "IdleDialogueMovingTalkC"], "happy"),
         # IdlePointClose and IdlePointFar_02
         "pointing": (["000FFA0C", "000B8F1F"], ""),
@@ -183,6 +185,8 @@ class companion_constants:
     KEY_COMMAND_SAY_NUMBER: str = "companion_say_number"
     # say: the number of the look the face takes on while the companion speaks (FACE_NONE = none)
     KEY_COMMAND_FACE: str = "companion_face"
+    # move_to, move, enter and follow: 1 = the companion runs instead of walking (the argument 'run' of COMMAND)
+    KEY_COMMAND_RUN: str = "companion_run"
     FACE_NONE: int = -1
     # The companion puts its weapon away and keeps it away although the player draws one, until draw
     ACTION_SHEATHE: str = "sheathe"
@@ -230,6 +234,8 @@ class companion_constants:
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
     # 'detail' says how many
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
+    # These take 'run': the companion runs instead of walking
+    ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW]
     ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side

@@ -2012,3 +2012,45 @@ def test_say_with_whom_the_companion_speaks_to_and_how(monkeypatch):
     # The game mod answers the two commands of the server, and speaks even if the one spoken to is not around
     assert run_command(consts.ACTION_SAY_END, "", "") == (True, "ok", "")
     assert "not around here" in run_command(consts.ACTION_SAY, "00ABCDEF", "")[1]
+
+
+def test_run_goes_to_the_game_and_the_state_tells_who_runs():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    def state_text(raw: dict) -> str:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": game_state.read_game_state(raw)})
+
+    # The state: one more number about the companion, and the line 'You' says so
+    assert game_state.read_game_state(build_state())["companion"]["running"] is False
+    assert game_state.read_game_state(build_state(is_running=True))["companion"]["running"] is True
+    assert "running" in state_text(build_state(is_running=True)) and "running" not in state_text(build_state())
+    # An older game mod sends one number less and says nothing about running
+    older = build_state()
+    older[game_state.KEY_COMPANION_VALUES] = older[game_state.KEY_COMPANION_VALUES][:game_state.COMPANION_VALUE_COUNT_WITHOUT_RUNNING]
+    read = game_state.read_game_state(older)
+    assert "running" not in read["companion"] and "weapon_kept_away" in read["companion"]
+
+    # The command: 'run' goes along for the actions that walk, and for no other
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            # Like the game mod: the request that brings the results of one command is the one that waits for the next
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()}).json()
+            for _ in range(2):
+                commands = reply[consts.KEY_COMMANDS]
+                received_commands.extend(commands)
+                results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "ok"} for sent in commands]
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results}).json()
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        assert tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "follow", "run": True}}))["status"] == consts.STATUS_DONE
+        assert tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "wait", "run": True}}))["status"] == consts.STATUS_DONE
+        assert [(sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_RUN]) for sent in received_commands] == [("follow", 1), ("wait", 0)]
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[0]["inputSchema"]["properties"]["run"]["type"] == "boolean"
+        assert "run instead of walk" in tools[0]["description"] and "only your lips, head and face move" in tools[0]["description"]
+        assert "none" in tools[0]["inputSchema"]["properties"]["manner"]["enum"]

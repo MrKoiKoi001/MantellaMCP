@@ -398,6 +398,8 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append(" ".join(text for text in ["following", _name_of(leader_ref_id, nearby), leader_ref_id] if text != ""))
     else:
         parts.append("waiting" if companion.get("waiting") else "following")
+    if companion.get("running"):
+        parts.append("running")
     if companion.get("retreating"):
         parts.append("retreating")
     target_ref_id = companion.get("target_ref_id")
