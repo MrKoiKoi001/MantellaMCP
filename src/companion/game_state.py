@@ -73,6 +73,15 @@ KEY_PLACES: str = "places"
 # angle as above, for furniture 1 if a character can sit on it and for a container 1 if it is locked, name.
 # The SKSE plugin of the game mod writes these lines (GetNearbyThings in plugin.cpp of the plugin repository)
 KEY_THINGS: str = "things"
+# One text per trap close to the viewer, nearest first, built like the lines of the things: kind (always THING_TRAP_NUMBER),
+# ref ID, distance, angle, 0, and the kind of trap as the game files its model (see TRAP_NAMES). They come with every state.
+# The SKSE plugin of the game mod writes these lines (GetNearbyTraps in plugin.cpp of the plugin repository)
+KEY_TRAPS: str = "traps"
+# Only when the server asked for it. What rays found around the companion: SPACE_VALUES_PER_DIRECTION numbers per direction,
+# the first direction straight ahead of the companion and the others clockwise from there, evenly spread:
+# what the ray met (see SPACE_OBSTACLES), how far away in meters, after how many meters the ground drops away (SPACE_NO_DROP = it does not).
+# The SKSE plugin of the game mod measures this (GetSurroundings in plugin.cpp of the plugin repository)
+KEY_SPACE: str = "space"
 # One text per line a character near the player said since the last state (the subtitles of the game), oldest first.
 # Its parts are separated by tabs: how many seconds ago, ref ID of the speaker as eight hex digits, name of the speaker,
 # what was said. A line the player picked in a dialogue menu has the player as its speaker.
@@ -146,7 +155,7 @@ WORLD_PLACE_OF_VISIBLE: int = 6
 VISIBLE_HALF_ANGLE_DEGREES: int = 60
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 5
+GAME_PROTOCOL: int = 6
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -194,6 +203,16 @@ THING_FURNITURE: str = "furniture"
 THING_CONTAINER: str = "container"
 THING_ITEM: str = "item"
 THING_KINDS: dict[int, str] = {0: THING_FURNITURE, 1: THING_CONTAINER, 2: THING_ITEM}
+THING_TRAP_NUMBER: int = 3
+# The folders the game keeps the models of its traps in, by what they are. A folder that is not here goes out as it is
+TRAP_NAMES: dict[str, str] = {"tripwire": "tripwire", "pressureplate": "pressure plate", "beartrap": "bear trap",
+                              "macetrap": "swinging mace", "skullram": "battering ram"}
+SPACE_VALUES_PER_DIRECTION: int = 3
+SPACE_WALL: str = "wall"
+SPACE_SLOPE: str = "slope"
+SPACE_OBSTACLES: dict[int, str] = {0: "", 1: SPACE_WALL, 2: SPACE_SLOPE}
+SPACE_NO_DROP: int = -1
+FULL_CIRCLE_DEGREES: int = 360
 # What the map markers of the game stand for (RE::MARKER_TYPE in CommonLibSSE-NG, file ExtraMapMarker.h).
 # From 35 to 52 the game has one marker per hold capital and one per castle in it
 MARKER_TYPES: dict[int, str] = {
@@ -321,6 +340,12 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     # The same goes for the things close to the player
     if isinstance(raw.get(KEY_THINGS), list):
         state["things"] = _read_things(raw.get(KEY_THINGS))
+    # Only a game mod whose plugin knows about traps sends this list, and only if there are any
+    if isinstance(raw.get(KEY_TRAPS), list):
+        state["traps"] = _read_traps(raw.get(KEY_TRAPS))
+    space = _read_space(raw.get(KEY_SPACE))
+    if len(space) > 0:
+        state["space"] = space
     _add_view_of_companion(state)
 
     times = _numbers(raw.get(KEY_TIMES))
@@ -548,6 +573,45 @@ def _read_things(raw_things: Any) -> list[dict[str, Any]]:
     return things
 
 
+def _read_traps(raw_traps: list) -> list[dict[str, Any]]:
+    """The traps close to the viewer in the order the game sent them (nearest first)"""
+    traps: list[dict[str, Any]] = []
+    for entry in raw_traps:
+        if not isinstance(entry, str):
+            continue
+        parts = entry.split(QUEST_PART_SEPARATOR, THING_PART_COUNT - 1)
+        if len(parts) != THING_PART_COUNT:
+            continue
+        kind_number, distance, angle = (_whole_number(text) for text in (parts[0], parts[2], parts[3]))
+        form_id = parse_ref_id(parts[1])
+        name = parts[5].strip().lower()
+        if None in (distance, angle, form_id) or name == "" or kind_number != THING_TRAP_NUMBER:
+            continue
+        traps.append({"ref_id": format_ref_id(form_id), "name": TRAP_NAMES.get(name, name),
+                      "distance_meters": distance, "angle_degrees": angle})
+    return traps
+
+
+def _read_space(raw_space: Any) -> list[dict[str, Any]]:
+    """What the rays found around the companion, one entry per direction, clockwise from straight ahead.
+    An empty list if the game sent nothing that can be read"""
+    values = _numbers(raw_space)
+    if values is None or len(values) == 0 or len(values) % SPACE_VALUES_PER_DIRECTION != 0:
+        return []
+    direction_count = len(values) // SPACE_VALUES_PER_DIRECTION
+    space: list[dict[str, Any]] = []
+    for place in range(direction_count):
+        obstacle, meters, drop_meters = values[place * SPACE_VALUES_PER_DIRECTION:(place + 1) * SPACE_VALUES_PER_DIRECTION]
+        direction: dict[str, Any] = {"angle_degrees": _signed_angle(place * FULL_CIRCLE_DEGREES / direction_count),
+                                     "obstacle": SPACE_OBSTACLES.get(obstacle, "")}
+        if direction["obstacle"] != "":
+            direction["obstacle_meters"] = meters
+        if drop_meters != SPACE_NO_DROP:
+            direction["drop_meters"] = drop_meters
+        space.append(direction)
+    return space
+
+
 def _marker_type_name(marker_type: int) -> str:
     """What kind of place a map marker stands for, or an empty text if that says nothing"""
     if FIRST_CAPITAL_MARKER_TYPE <= marker_type <= LAST_CAPITAL_MARKER_TYPE:
@@ -650,7 +714,7 @@ def _add_view_of_companion(state: dict[str, Any]) -> None:
         return
     # A target with a distance is in the area of the player, or it is behind a door that is
     targets = [target for quest in state.get("quests", []) for target in quest.get("targets", []) if "distance_meters" in target]
-    for character in state["nearby"] + state.get("things", []) + targets:
+    for character in state["nearby"] + state.get("things", []) + state.get("traps", []) + targets:
         east, north = _map_offset(character["distance_meters"], player_facing + character["angle_degrees"])
         east -= companion_east
         north -= companion_north

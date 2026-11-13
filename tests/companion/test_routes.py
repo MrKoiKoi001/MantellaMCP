@@ -1123,7 +1123,8 @@ def test_say_makes_the_sound_and_tells_the_game_which_line_to_speak(tmp_path):
         time.sleep(0.3)
         assert command(client, {"action": "say", "detail": "Watch out!"}) == {"status": consts.STATUS_DONE, "message": "You say it aloud."}
         sent = received_commands[0]
-        assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL]) == ("say", "")
+        # The text goes along for the subtitle of the line
+        assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL]) == ("say", "Watch out!")
         assert sent[consts.KEY_COMMAND_COUNT] in (1, 2)
 
     assert run_command(consts.ACTION_SAY, "", "") == (True, "You say it aloud.", "")
@@ -1471,3 +1472,127 @@ def test_lips_get_a_file_next_to_the_sound_when_switched_on(tmp_path):
     assert off.prepare_lip_files().startswith("4 lip files of the lines taken away")
     assert off.speak("Hello again.", "FemaleEvenToned")[0] is True
     assert not lip_files[0].exists() and not lip_files[1].exists() and (voice_folder / LINE_FILES[0]).is_file()
+
+
+def test_face_move_and_pick_up_carry_what_the_game_needs():
+    from src.companion.fake_game import (ITEM_REF_ID, CHEST_REF_ID, is_sitting_after, is_waiting_after, leader_after, run_command,
+                                         walk_target_after)
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "point of the compass" in command({"action": "face"})["message"]
+        assert "point of the compass" in command({"action": "face", "detail": "left"})["message"]
+        assert "needs a direction" in command({"action": "move"})["message"]
+        assert "needs a direction" in command({"action": "move", "detail": "up 3"})["message"]
+        assert "how far in meters" in command({"action": "move", "detail": "north 500"})["message"]
+        assert "needs a target" in command({"action": "pick_up"})["message"]
+        # What is fine is refused only because no game is there
+        for arguments in ({"action": "face", "detail": "NW"}, {"action": "face", "target": "000C0001"}, {"action": "move", "detail": "ahead"},
+                          {"action": "move", "detail": "South West 12 m"}, {"action": "pick_up", "target": ITEM_REF_ID}):
+            assert command(arguments)["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {"face", "move", "pick_up"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
+        assert "space" in tools[1]["inputSchema"]["properties"]
+
+    def sent_for(arguments: dict) -> dict:
+        with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+            received_commands: list[dict] = []
+
+            def game():
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}]
+                client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results})
+
+            threading.Thread(target=game, daemon=True).start()
+            time.sleep(0.3)
+            answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+            assert answer == {"status": consts.STATUS_DONE, "message": "Done."}
+            return received_commands[0]
+
+    # face: the point of the compass in degrees, or the target and no direction
+    sent = sent_for({"action": "face", "detail": "South-East"})
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TARGET]) == (135, "south-east", "")
+    sent = sent_for({"action": "face", "detail": "no"})
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_DETAIL]) == (45, "north-east")
+    sent = sent_for({"action": "face", "target": "000C0001", "detail": "north"})
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TARGET]) == (consts.FACE_NO_DIRECTION, "", "000C0001")
+    # move: the direction in degrees, 1 in the upper half of the item ID if it counts from where the companion faces, the meters in the lower
+    sent = sent_for({"action": "move", "detail": "north 10", "target": "000F6845"})
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == (0, 0, 10)
+    assert (sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TARGET]) == ("to the north", "")
+    sent = sent_for({"action": "move", "detail": "ahead left 6m"})
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == (315, 1, 6)
+    assert sent[consts.KEY_COMMAND_DETAIL] == "ahead to the left"
+    sent = sent_for({"action": "move", "detail": "back"})
+    assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == (180, 1, consts.MOVE_DEFAULT_METERS)
+    sent = sent_for({"action": "pick_up", "target": ITEM_REF_ID})
+    assert (sent[consts.KEY_COMMAND_TARGET], sent[consts.KEY_COMMAND_TARGET_HIGH], sent[consts.KEY_COMMAND_TARGET_LOW]) == (ITEM_REF_ID, 0x0005, 0xA410)
+
+    # The fake game answers like the game mod
+    assert run_command(consts.ACTION_FACE, "", "", "", "south-east")[1] == "You turn to face south-east."
+    assert run_command(consts.ACTION_FACE, "000C0001", "")[1] == "You turn to face Pelagia Farm."
+    assert run_command(consts.ACTION_MOVE, "", "", "0001000A", "to your left")[1].startswith("You walk about 10 meters to your left and wait there.")
+    assert run_command(consts.ACTION_PICK_UP, ITEM_REF_ID, "")[1].startswith("You walk to Iron Dagger to pick it up.")
+    assert "Use 'loot'" in run_command(consts.ACTION_PICK_UP, CHEST_REF_ID, "")[1]
+    assert "not a thing to pick up" in run_command(consts.ACTION_PICK_UP, "000F6845", "")[1]
+    # Turning changes nothing else. Walking somewhere makes the companion wait there, picking something up is a walk like loot
+    assert is_sitting_after(consts.ACTION_FACE, True) is True and leader_after(consts.ACTION_FACE, "", "000F6845") == "000F6845"
+    assert is_waiting_after(consts.ACTION_MOVE, False) is True and walk_target_after(consts.ACTION_MOVE, "", "000F6845") == ""
+    assert walk_target_after(consts.ACTION_PICK_UP, ITEM_REF_ID) == ITEM_REF_ID and is_waiting_after(consts.ACTION_PICK_UP, False) is False
+
+
+def test_traps_come_with_every_state_and_the_space_only_when_asked_for():
+    from src.companion.fake_game import build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **result: object) -> list[str]:
+        return describe_state({"connected": True, "fresh": True, "state": read_game_state(raw), **result}).split("\n")
+
+    lines = text_for(build_state(has_traps=True))
+    start = lines.index("Traps:")
+    # Each trap with its ref_id, what it is, and where it is from the player and from the companion. They stand in front of the characters
+    assert lines[start + 1].startswith("0006B001 tripwire, trap, 5 m ahead, from you ")
+    # A kind of trap the server has no word for goes out as the game files it
+    assert lines[start + 2].startswith("0006B002 swingingblade, trap, 12 m left")
+    assert start < lines.index("Nearby:")
+    assert not any(line.startswith("Space around you") for line in lines)
+    # Without traps nothing is said about them
+    assert "Traps:" not in text_for(build_state())
+    # 'visible' leaves out the trap behind the viewer
+    seen = text_for(build_state(is_visible_only=True, has_traps=True), visible_wanted=True)
+    assert any(line.startswith("0006B001 tripwire") for line in seen) and not any(line.startswith("0006B002") for line in seen)
+    # Seen from the companion there is only that view
+    around = text_for(build_state(is_around_companion=True, has_traps=True))
+    assert "0006B001 tripwire, trap, from you 5 m ahead" in around
+
+    # The space around the companion: walls, rising ground, drops and what is open, in one line
+    space_line = [line for line in text_for(build_state(has_space=True), space_wanted=True) if line.startswith("Space around you")]
+    assert space_line == ["Space around you (rays at chest height, about 15 m far): wall ahead 3 m, left 5 m, ahead-left 2 m; "
+                          "ground rises behind-right 8 m; DROP right 4 m; open ahead-right, behind, behind-left"]
+    assert read_game_state(build_state(has_space=True))["space"][2] == {"angle_degrees": 90, "obstacle": "", "drop_meters": 4}
+    # Asked for, but the game sent nothing (an older plugin, or the companion is somewhere else)
+    assert "could not measure" in [line for line in text_for(build_state(), space_wanted=True) if line.startswith("Space")][0]
+    assert "did not send the space" in "\n".join(text_for(build_state(), space_missed=True))
+    # Numbers that do not come in threes are not read
+    broken = build_state()
+    broken["space"] = [1, 3]
+    assert "space" not in read_game_state(broken)
+
+    # The server asks the game for the space only when the AI wants it
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state(has_traps=True, has_space=True)})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        answer = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"space": True}}))
+        assert received_commands[0][consts.KEY_COMMAND_SPACE] == 1
+        assert "Space around you (rays at chest height, about 15 m far): wall ahead 3 m" in answer and "Traps:" in answer

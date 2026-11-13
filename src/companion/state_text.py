@@ -9,7 +9,8 @@ from typing import Any
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.game_state import (GAME_PROTOCOL, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
-                                      TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM)
+                                      TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM,
+                                      SPACE_SLOPE, SPACE_WALL)
 
 DEGREES_PER_DIRECTION: float = 45.0
 # Clockwise, starting straight ahead of whoever looks
@@ -120,6 +121,19 @@ def describe_state(state_result: dict[str, Any]) -> str:
     elif state_result.get("visible_wanted"):
         lines.append("The game could not check what can be seen (inside a place it has not loaded, or an older game mod). "
                      "The lists below hold everything around.")
+    # Traps come before everything else around, so that a warning does not get lost in a long list
+    traps = state.get("traps")
+    if isinstance(traps, list):
+        if is_visible_only:
+            traps = [trap for trap in traps if abs(trap.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
+        if len(traps) > 0:
+            lines.append("Traps:")
+            for trap in traps:
+                lines.append(f"{trap.get('ref_id')} {trap.get('name')}, trap, {_describe_position(trap, is_from_companion)}")
+    if state_result.get("space_wanted"):
+        lines.append(_describe_space(state.get("space")))
+    elif state_result.get("space_missed"):
+        lines.append("The game did not send the space around you in time. Ask again.")
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:
@@ -417,6 +431,39 @@ def _describe_stats(player_stats: Any, companion_stats: Any) -> list[str]:
                      f"magicka {companion_stats.get('magicka')} ({companion_stats.get('magicka_percent')}%), "
                      f"stamina {companion_stats.get('stamina')} ({companion_stats.get('stamina_percent')}%)")
     return lines
+
+
+def _describe_space(space: Any) -> str:
+    """What rays found around the companion, as one line: walls, rising ground and drops with their direction and
+    distance, and the directions that are open"""
+    if not isinstance(space, list) or len(space) == 0:
+        return ("Space around you: the game could not measure it (your character is not in the loaded area, "
+                "or the plugin of the game mod is older than interface version 9).")
+    walls: list[str] = []
+    slopes: list[str] = []
+    drops: list[str] = []
+    open_directions: list[str] = []
+    for direction in space:
+        name = relative_direction(direction.get("angle_degrees", 0))
+        obstacle = direction.get("obstacle")
+        if obstacle == SPACE_WALL:
+            walls.append(f"{name} {direction.get('obstacle_meters')} m")
+        elif obstacle == SPACE_SLOPE:
+            slopes.append(f"{name} {direction.get('obstacle_meters')} m")
+        if "drop_meters" in direction:
+            drops.append(f"{name} {direction['drop_meters']} m")
+        elif obstacle not in (SPACE_WALL, SPACE_SLOPE):
+            open_directions.append(name)
+    parts: list[str] = []
+    if len(walls) > 0:
+        parts.append("wall " + ", ".join(walls))
+    if len(slopes) > 0:
+        parts.append("ground rises " + ", ".join(slopes))
+    if len(drops) > 0:
+        parts.append("DROP " + ", ".join(drops))
+    if len(open_directions) > 0:
+        parts.append("open " + ", ".join(open_directions))
+    return "Space around you (rays at chest height, about 15 m far): " + "; ".join(parts)
 
 
 def _describe_nearby_character(character: dict[str, Any], is_from_companion: bool = False) -> str:

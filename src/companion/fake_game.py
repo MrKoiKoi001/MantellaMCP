@@ -60,6 +60,16 @@ THINGS: list[list[str]] = [
     ["2", "0005A410", "2", "60", "0", "Iron Dagger"],
 ]
 SEAT_REF_ID: str = "0005A3F1"
+ITEM_REF_ID: str = "0005A410"
+# The traps close to the player as the plugin writes them: kind (always 3), ref ID, distance and angle from the player,
+# 0, and the folder the game keeps the model of the trap in
+TRAPS: list[list[str]] = [
+    ["3", "0006B001", "5", "10", "0", "tripwire"],
+    ["3", "0006B002", "12", "-100", "0", "SwingingBlade"],
+]
+# What the rays of the plugin find around the companion, three numbers per direction, clockwise from straight ahead:
+# what (0 = nothing, 1 = a wall, 2 = rising ground), how far in meters, after how many meters the ground drops (-1 = not)
+SPACE: list[int] = [1, 3, -1,  0, 0, -1,  0, 0, 4,  2, 8, -1,  0, 0, -1,  0, 0, -1,  1, 5, -1,  1, 2, -1]
 CHEST_REF_ID: str = "0005A400"
 LOCKED_CHEST_REF_ID: str = "0005A401"
 # What the chest among the THINGS holds
@@ -127,7 +137,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
                 is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
-                has_stats: bool = False, is_visible_only: bool = False) -> dict:
+                has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -206,6 +216,11 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         state[game_state.KEY_STATS_COMPANION] = COMPANION_STATS
     if has_things:
         state[game_state.KEY_THINGS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in THINGS]
+    # The game mod sends the traps with every state, the space around the companion only when the server asked for it
+    if has_traps:
+        state[game_state.KEY_TRAPS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in TRAPS]
+    if has_space:
+        state[game_state.KEY_SPACE] = SPACE
     if report != "":
         state[game_state.KEY_REPORT] = report
     if has_heard_lines:
@@ -214,7 +229,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
 
 
 # What the companion does without changing where it walks, whom it follows or whether it sits
-QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY]
+QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE]
 
 
 def name_of(ref_id: str) -> str:
@@ -265,6 +280,29 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if name_of(target) != "":
             return False, f"{name_of(target)} is not a door. Take the ref_id from 'Doors' in STATE.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_FACE:
+        if target == "":
+            return True, f"You turn to face {detail}.", target_ref_id
+        if name_of(target) != "":
+            return True, f"You turn to face {name_of(target)}.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from STATE.", target_ref_id
+    if action == consts.ACTION_MOVE:
+        # The lower half of what the server sends where loot has the item ID is how far
+        meters = int(item_id, 16) & 0xFFFF if item_id != "" else consts.MOVE_DEFAULT_METERS
+        return True, (f"You walk about {meters} meters {detail} and wait there. Your next STATE tells you if you did not get that far. "
+                      "'follow' brings you back to the player."), target_ref_id
+    if action == consts.ACTION_PICK_UP:
+        for kind, ref_id, distance, angle, flag, name in THINGS:
+            if ref_id == target:
+                if kind == "1":
+                    return False, f"{name} is a container. Use 'loot' to take what is in it.", target_ref_id
+                if kind != "2":
+                    return False, f"{name} is nothing you can pick up.", target_ref_id
+                return True, f"You walk to {name} to pick it up. Your next STATE tells you whether you got it.", target_ref_id
+        for character in NEARBY:
+            if character["ref_id"] == target:
+                return False, f"{character['name']} is a character, not a thing to pick up.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id of an item from 'Things' in STATE (argument 'things').", target_ref_id
     if action == consts.ACTION_MAKE_ROOM:
         # The server sends how far where loot has the item ID, as eight hex digits
         meters = int(item_id, 16) if item_id != "" else consts.ROOM_DEFAULT_METERS
@@ -341,7 +379,7 @@ def is_waiting_after(action: str, is_waiting: bool) -> bool:
     """Like the game: 'wait', 'move_to' and 'enter' make the companion stay, 'follow' makes it come along again, everything else
     changes nothing. That goes for 'sit' as well: the companion sits because of a package of the game mod, and once it
     gets up it follows or waits as before"""
-    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO, consts.ACTION_ENTER):
+    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO, consts.ACTION_MOVE, consts.ACTION_ENTER):
         return True
     if action == consts.ACTION_FOLLOW:
         return False
@@ -358,7 +396,7 @@ def walk_target_after(action: str, target: str, walk_target_ref_id: str = "") ->
     with its things. The simulator's companion never arrives, so it keeps walking until then"""
     if action in QUIET_ACTIONS or action in consts.ITEM_ACTIONS:
         return walk_target_ref_id
-    return target if action in (consts.ACTION_MOVE_TO, consts.ACTION_LOOT, consts.ACTION_ENTER) else ""
+    return target if action in (consts.ACTION_MOVE_TO, consts.ACTION_LOOT, consts.ACTION_PICK_UP, consts.ACTION_ENTER) else ""
 
 
 def leader_after(action: str, target: str, leader_ref_id: str) -> str:
@@ -401,6 +439,7 @@ def main():
     is_around_companion = False
     are_stats_wanted = False
     is_visible_wanted = False
+    is_space_wanted = False
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
@@ -415,8 +454,10 @@ def main():
             # Only the first state has something that was said
             request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
                                                          is_around_companion, target_ref_id != "", look_target_ref_id,
-                                                         leader_ref_id, expression, are_stats_wanted, is_visible_wanted)
+                                                         leader_ref_id, expression, are_stats_wanted, is_visible_wanted,
+                                                         has_traps=True, has_space=is_space_wanted)
             are_things_wanted = False
+            is_space_wanted = False
             is_around_companion = False
             are_stats_wanted = False
             is_visible_wanted = False
@@ -450,6 +491,7 @@ def main():
                 is_around_companion = bool(command.get(consts.KEY_COMMAND_AROUND))
                 are_stats_wanted = bool(command.get(consts.KEY_COMMAND_STATS))
                 is_visible_wanted = bool(command.get(consts.KEY_COMMAND_VISIBLE))
+                is_space_wanted = bool(command.get(consts.KEY_COMMAND_SPACE))
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it

@@ -43,6 +43,8 @@ class companion_constants:
     KEY_COMMAND_STATS: str = PREFIX + "stats"
     # For report_state: 1 if the list of characters should only hold those the viewer can see
     KEY_COMMAND_VISIBLE: str = PREFIX + "visible"
+    # For report_state: 1 if the state should carry what is around the companion as rays find it (walls, drops)
+    KEY_COMMAND_SPACE: str = PREFIX + "space"
     # What the AI can name as the centre of those lists
     AROUND_PLAYER: str = "player"
     AROUND_COMPANION: str = "you"
@@ -82,6 +84,38 @@ class companion_constants:
     ROOM_DIRECTIONS: dict[str, int] = {ROOM_DIRECTION_BACK: 0, "left": 1, "right": 2}
     ROOM_DEFAULT_METERS: int = 3
     ROOM_HIGHEST_METERS: int = 10
+    # The companion turns to the target, or to the point of the compass in 'detail'. For the game: 'count' is that
+    # point in degrees (FACE_NO_DIRECTION = turn to the target)
+    ACTION_FACE: str = "face"
+    FACE_NO_DIRECTION: int = -1
+    # The companion walks a number of meters in a direction and waits there. For the game: 'count' is the direction in
+    # degrees, the upper half of the item ID is 1 if it counts from where the companion faces (0 = from north),
+    # and the lower half is how far in meters
+    ACTION_MOVE: str = "move"
+    MOVE_DEFAULT_METERS: int = 5
+    MOVE_HIGHEST_METERS: int = 30
+    DEGREES_PER_DIRECTION: int = 45
+    # The points of the compass clockwise from north, and the directions seen from the companion clockwise from
+    # straight ahead. The same words STATE uses. Their place in the list times DEGREES_PER_DIRECTION is the angle
+    COMPASS_NAMES: list[str] = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"]
+    RELATIVE_NAMES: list[str] = ["ahead", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
+    # What the AI may write as well, with the word above it stands for
+    COMPASS_OTHER_WORDS: dict[str, str] = {
+        "n": "north", "ne": "north-east", "e": "east", "se": "south-east", "s": "south", "sw": "south-west", "w": "west", "nw": "north-west",
+        "northeast": "north-east", "southeast": "south-east", "southwest": "south-west", "northwest": "north-west",
+        "nord": "north", "nordost": "north-east", "no": "north-east", "ost": "east", "o": "east", "südost": "south-east",
+        "suedost": "south-east", "so": "south-east", "süd": "south", "sued": "south", "südwest": "south-west",
+        "suedwest": "south-west", "nordwest": "north-west",
+    }
+    RELATIVE_OTHER_WORDS: dict[str, str] = {
+        "forward": "ahead", "forwards": "ahead", "back": "behind", "backward": "behind", "backwards": "behind",
+        "right-ahead": "ahead-right", "left-ahead": "ahead-left", "right-behind": "behind-right", "left-behind": "behind-left",
+    }
+    # How the answer of the game puts the directions seen from the companion ("You walk about 5 meters ...")
+    RELATIVE_PHRASES: list[str] = ["straight ahead", "ahead to the right", "to your right", "back to the right", "back",
+                                   "back to the left", "to your left", "ahead to the left"]
+    # The companion walks to a thing that lies around and picks it up
+    ACTION_PICK_UP: str = "pick_up"
     ACTION_LOOT: str = "loot"
     ACTION_SIT: str = "sit"
     ACTION_LOOK_AT: str = "look_at"
@@ -116,9 +150,12 @@ class companion_constants:
         ACTION_STAND_DOWN,
         ACTION_FLEE,
         ACTION_MOVE_TO,
+        ACTION_MOVE,
         ACTION_ENTER,
         ACTION_MAKE_ROOM,
+        ACTION_FACE,
         ACTION_LOOT,
+        ACTION_PICK_UP,
         ACTION_SIT,
         ACTION_LOOK_AT,
         ACTION_GESTURE,
@@ -134,7 +171,7 @@ class companion_constants:
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
     # 'detail' says how many
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
-    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT] + ITEM_ACTIONS
+    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"
