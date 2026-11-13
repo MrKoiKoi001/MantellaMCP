@@ -13,7 +13,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, CompanionVoice, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.12"
+SERVER_VERSION: str = "0.13"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
@@ -25,6 +25,8 @@ ARGUMENT_CORPSE: str = "corpse"
 ARGUMENT_THINGS: str = "things"
 ARGUMENT_MAX: str = "max"
 ARGUMENT_AROUND: str = "around"
+ARGUMENT_STATS: str = "stats"
+EXPRESSION_NAMES: str = ", ".join(consts.EXPRESSIONS)
 # What the AI may also write for 'around' if it means its own character
 AROUND_COMPANION_WORDS: list[str] = [consts.AROUND_COMPANION, "me", "companion", "self"]
 GESTURE_NAMES: str = ", ".join(sorted(GESTURES))
@@ -49,13 +51,19 @@ TOOLS: list[dict[str, Any]] = [
         "name": TOOL_COMMAND,
         "description": (
             "Make your companion character do something in the game. "
-            "follow = follow the player, wait = stay here, "
+            "follow = follow the player. With a target (the ref_id of a character) you follow that character instead, "
+            "wherever it goes, until 'follow' without a target or another command that sends you somewhere. "
+            "wait = stay here, "
             "attack = attack the target (works on peaceful characters too, so only when the player wants it), "
             "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
             "flee = retreat: you do not fight and run from enemies until your next command, "
             "move_to = walk to the target and wait there until 'follow'. The target is anything with a ref_id in STATE: "
             "a character, a thing, a door from 'Doors', a place from 'Places' (only if it is close enough to be loaded) "
             "or the target of a quest. You stop at a door, you do not go through it. "
+            "enter = walk to the target, a door from 'Doors', and go through it on your own. You wait on the other side "
+            "until 'follow', which brings you back out. The player stays outside, so the game does not load the place you are in: "
+            "STATE with around 'you' then only shows what the game keeps of it in memory (the characters who live there, the doors), "
+            "not everything that is really there. Say so when you report what is inside. "
             "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
             "everything, or only the kind of item whose ID is in 'detail' (see what is in it with STATE and 'corpse' first). "
             "The walk takes a while, your next STATE tells you what you got. Afterwards you follow or wait as before. "
@@ -67,6 +75,8 @@ TOOLS: list[dict[str, Any]] = [
             "It holds until look_at without a target, which lets you look around freely again. "
             "gesture = play the gesture named in 'detail': " + GESTURE_NAMES + ". "
             "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
+            "expression = put a look on your face, named in 'detail': " + EXPRESSION_NAMES + ". A number behind it "
+            "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
             "you there. Write it in English: the voice cannot pronounce other languages. One or two sentences at a time. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
@@ -81,8 +91,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, loot, look_at), a container (loot, move_to), a seat (sit, move_to), a door, a place or a quest target (move_to, look_at). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the text to speak for say, the spell name for cast_spell."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at), a container (loot, move_to), a seat (sit, move_to), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the text to speak for say, the spell name for cast_spell."},
             },
             "required": ["action"],
         },
@@ -96,8 +106,9 @@ TOOLS: list[dict[str, Any]] = [
             "'Player': health, fighting or not, 'weapon drawn' if so, the compass direction the player faces, and the position x,y,z "
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
-            "seen from you, waiting, following, sitting or walking to someone, retreating, whom it fights, "
-            "'weapon drawn' if so, and what it looks at because of look_at. "
+            "seen from you, waiting, following (the player, or the character named behind it), sitting or walking to someone, "
+            "retreating, whom it fights, 'weapon drawn' if so, the look on its face and what it looks at because of look_at. "
+            "If you are not where the player is, the line names the place you are in instead. "
             "Without a follower of the player you have no body. "
             "'Nearby': up to 10 lines (more with 'max'), one per character within about 50 meters of the player: first the living, hostile "
             "ones before the others, then the dead (marked 'dead'), each nearest first. "
@@ -129,12 +140,16 @@ TOOLS: list[dict[str, Any]] = [
             "'not in this area' that the target is somewhere else, with the name of that place if the game has one. "
             "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
             "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
+            "That covers dialogues and what characters say in passing, but only while both kinds of subtitles are switched on "
+            "in the settings of the game. "
             "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "
             "'Gear': what you hold in your hands, your gold and the player's gold. "
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
-            "'Since your last STATE': what became of a loot, move_to or sit you started (what you took, or that you did not get there)."
+            "'Since your last STATE': what became of a loot, move_to, enter or sit you started (what you took, or that you did not get there). "
+            "With 'stats' you get the level of the player, whether a level-up is waiting, perk points to spend, health, magicka, "
+            "stamina, the weight carried and all skills (highest first), and your own level, health, magicka and stamina."
         ),
         "inputSchema": {
             "type": "object",
@@ -143,6 +158,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_CORPSE: {"type": "string", "description": "ref_id of a dead character or of a container from 'Nearby': also list what is in it. Replaces 'inventory' for this call."},
                 ARGUMENT_THINGS: {"type": "boolean", "description": "true = also list the furniture, containers and loose items within about 10 meters of the player. Only when you need them."},
                 ARGUMENT_AROUND: {"type": "string", "enum": consts.AROUND_CHOICES, "description": "Whose surroundings the lists show: player (the default) or you = your own character."},
+                ARGUMENT_STATS: {"type": "boolean", "description": "true = also give the level, the skills and so on of the player, and your own level. Only when the talk is about that."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
@@ -245,7 +261,8 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
         max_lines = min(max(max_lines, 1), CompanionCommandQueue.HIGHEST_MAX_LINES)
         around = str(arguments.get(ARGUMENT_AROUND, "") or "").strip().lower()
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
-                                             max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS)
+                                             max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS,
+                                             stats=arguments.get(ARGUMENT_STATS) is True)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)
@@ -288,6 +305,25 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
             # The game only gets the number of the line to speak. The sound is in its folder already
             result = await queue.send_command(action, count=line)
             return _tool_json(result, result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED))
+        if action == consts.ACTION_EXPRESSION:
+            # The game gets the number of the look and how strong it is, the name only goes along for its answer
+            target = ""
+            words = detail.lower().split()
+            if len(words) == 0:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"expression needs the look in 'detail' ('{consts.EXPRESSION_NONE_TEXTS[0]}' gives you your own face back). The looks: {EXPRESSION_NAMES}"}, True)
+            detail = words[0]
+            if detail in consts.EXPRESSION_NONE_TEXTS:
+                count = consts.EXPRESSION_NONE
+            elif detail in consts.EXPRESSIONS:
+                count = consts.EXPRESSIONS[detail]
+                strength = consts.EXPRESSION_FULL_STRENGTH
+                if len(words) > 1:
+                    if not words[1].isdecimal() or not 1 <= int(words[1]) <= consts.EXPRESSION_FULL_STRENGTH:
+                        return _tool_json({"status": consts.STATUS_FAILED, "message": "What stands behind the look is how strong it is: a number from 1 to 100."}, True)
+                    strength = int(words[1])
+                item = format_ref_id(strength)
+            else:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no look '{detail}'. The looks: {EXPRESSION_NAMES}"}, True)
         if action == consts.ACTION_GESTURE:
             # The game gets the ID of the animation, the name only goes along for its answer
             target = ""

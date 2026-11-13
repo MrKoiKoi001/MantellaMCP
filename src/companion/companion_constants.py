@@ -39,6 +39,8 @@ class companion_constants:
     # For report_state: 1 if the lists of the state (characters, things, places, quest targets) should be seen from
     # the companion instead of from the player
     KEY_COMMAND_AROUND: str = PREFIX + "around"
+    # For report_state: 1 if the state should carry the level, the skills and so on of the player
+    KEY_COMMAND_STATS: str = PREFIX + "stats"
     # What the AI can name as the centre of those lists
     AROUND_PLAYER: str = "player"
     AROUND_COMPANION: str = "you"
@@ -67,12 +69,25 @@ class companion_constants:
     ACTION_STAND_DOWN: str = "stand_down"
     ACTION_FLEE: str = "flee"
     ACTION_MOVE_TO: str = "move_to"
+    # The companion walks to a door that leads into another area and goes through it on its own
+    ACTION_ENTER: str = "enter"
     ACTION_LOOT: str = "loot"
     ACTION_SIT: str = "sit"
     ACTION_LOOK_AT: str = "look_at"
     ACTION_GESTURE: str = "gesture"
     # For gesture: what 'detail' says to end a gesture that goes on and on
     GESTURE_STOP_TEXT: str = "stop"
+    # The companion's face takes on a look. For the game: 'count' is the number of the look (EXPRESSION_NONE = its own
+    # face again), and how strong in percent is where loot has the lower half of an item ID
+    ACTION_EXPRESSION: str = "expression"
+    # The looks by the numbers the game gives them (Actor.SetExpressionOverride, the "mood" and "combat" ones)
+    EXPRESSIONS: dict[str, int] = {
+        "neutral": 7, "angry": 8, "afraid": 9, "happy": 10, "sad": 11, "surprised": 12, "puzzled": 13, "disgusted": 14,
+        "furious": 15, "shouting": 16,
+    }
+    EXPRESSION_NONE_TEXTS: list[str] = ["none", "off", "clear", "stop", "normal"]
+    EXPRESSION_NONE: int = -1
+    EXPRESSION_FULL_STRENGTH: int = 100
     # The companion speaks the text in 'detail' aloud. For the game: 'count' is the number of the line to speak (see voice.py)
     ACTION_SAY: str = "say"
     ACTION_EQUIP: str = "equip"
@@ -90,10 +105,12 @@ class companion_constants:
         ACTION_STAND_DOWN,
         ACTION_FLEE,
         ACTION_MOVE_TO,
+        ACTION_ENTER,
         ACTION_LOOT,
         ACTION_SIT,
         ACTION_LOOK_AT,
         ACTION_GESTURE,
+        ACTION_EXPRESSION,
         ACTION_SAY,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
@@ -105,7 +122,7 @@ class companion_constants:
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
     # 'detail' says how many
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
-    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_LOOT] + ITEM_ACTIONS
+    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"

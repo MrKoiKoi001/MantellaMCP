@@ -79,6 +79,13 @@ HEARD: list[list[str]] = [
 
 
 GOLD: list[int] = [250, 30]
+# What the game mod sends about the player on request: level, health, magicka, stamina, magicka and stamina in percent,
+# weight carried, most that can be carried, perk points to spend, experience in this level, experience for the next one,
+# then the eighteen skills. Here a level-up is waiting (the experience is above what it takes)
+PLAYER_STATS: list[int] = [5, 150, 80, 120, 80, 100, 182, 300, 2, 410, 400,
+                           32, 15, 27, 20, 18, 24, 21, 15, 22, 26, 17, 19, 15, 16, 25, 15, 23, 15]
+# And about the companion: level, health, magicka, stamina, magicka and stamina in percent
+COMPANION_STATS: list[int] = [6, 250, 50, 180, 100, 100]
 HANDS: list[str] = ["R:Steel Sword", "L:Iron Shield"]
 # Inventories as the game mod sends them: ID, how many, form type of the game, worn or held, name
 OWN_ITEMS: list[tuple[str, int, int, int, str]] = [
@@ -119,7 +126,8 @@ def to_papyrus_number(ref_id: str) -> int:
 def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: bool = False, walk_target_ref_id: str = "",
                 has_heard_lines: bool = False, inventory: str = "", corpse_ref_id: str = "", report: str = "",
                 is_sitting: bool = False, has_things: bool = True, is_around_companion: bool = False,
-                are_weapons_drawn: bool = False, look_target_ref_id: str = "") -> dict:
+                are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
+                has_stats: bool = False) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -133,6 +141,9 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             then sends the same numbers and only says that they are measured from the companion
         are_weapons_drawn: Whether the player and the companion have their weapons out
         look_target_ref_id: What the companion looks at because of the command look_at, or empty
+        leader_ref_id: Whom the companion follows because of the command follow with a target, or empty
+        expression: The look on the companion's face because of the command expression, or empty
+        has_stats: Whether the server asked for the level, the skills and so on of the player
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -158,7 +169,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             to_papyrus_number("000A2C94"), 100, 0, int(is_fighting), int(is_waiting), 1, 3, -150,
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
             SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
-            int(are_weapons_drawn), to_papyrus_number(look_target_ref_id),
+            int(are_weapons_drawn), to_papyrus_number(look_target_ref_id), to_papyrus_number(leader_ref_id),
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -186,6 +197,11 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     if inventory == consts.INVENTORY_CORPSE and corpse_ref_id == LOCKED_CHEST_REF_ID:
         state[game_state.KEY_CORPSE] = [to_papyrus_number(LOCKED_CHEST_REF_ID), 1, 1]
         state[game_state.KEY_CORPSE_NAME] = "Strongbox"
+    if expression != "":
+        state[game_state.KEY_COMPANION_EXPRESSION] = expression
+    if has_stats:
+        state[game_state.KEY_STATS_PLAYER] = PLAYER_STATS
+        state[game_state.KEY_STATS_COMPANION] = COMPANION_STATS
     if has_things:
         state[game_state.KEY_THINGS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in THINGS]
     if report != "":
@@ -193,6 +209,10 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     if has_heard_lines:
         state[game_state.KEY_HEARD] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in HEARD]
     return state
+
+
+# What the companion does without changing where it walks, whom it follows or whether it sits
+QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY]
 
 
 def name_of(ref_id: str) -> str:
@@ -223,6 +243,30 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
             if character["ref_id"] == target:
                 return True, f"You attack {character['name']} now.", target
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_FOLLOW and target not in ("", PLAYER_REF_ID):
+        for character in NEARBY:
+            if character["ref_id"] == target:
+                if character.get("dead", False):
+                    return False, f"{character['name']} is dead.", target_ref_id
+                return True, (f"You follow {character['name']} now, wherever that character goes. "
+                              "'follow' without a target brings you back to the player."), target_ref_id
+        if name_of(target) != "":
+            return False, f"{name_of(target)} is not a character. You can only follow characters.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_ENTER:
+        for kind, ref_id, distance, angle, marker_type, known, name in PLACES:
+            if ref_id == target:
+                if kind != "1":
+                    return False, f"{name} is not a door. Take the ref_id from 'Doors' in STATE.", target_ref_id
+                return True, ("You walk to the door and go through it. Your next STATE tells you where you are then. "
+                              "You wait there until 'follow'."), target_ref_id
+        if name_of(target) != "":
+            return False, f"{name_of(target)} is not a door. Take the ref_id from 'Doors' in STATE.", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+    if action == consts.ACTION_EXPRESSION:
+        if detail in consts.EXPRESSION_NONE_TEXTS:
+            return True, "Your face is your own again.", target_ref_id
+        return True, f"You look {detail} now. Your face stays like this until 'expression' with 'none'.", target_ref_id
     if action == consts.ACTION_MOVE_TO:
         # A walk can lead to a character, a thing, a door or a place
         if name_of(target) != "" and target != PLAYER_REF_ID:
@@ -280,16 +324,16 @@ def is_sitting_after(action: str, is_sitting: bool) -> bool:
     'look_at', 'gesture' and what it does with its things leave it seated, every other command makes it get up"""
     if action == consts.ACTION_SIT:
         return True
-    if action in (consts.ACTION_WAIT, consts.ACTION_STAND_DOWN, consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_SAY) or action in consts.ITEM_ACTIONS:
+    if action in QUIET_ACTIONS + [consts.ACTION_WAIT, consts.ACTION_STAND_DOWN] or action in consts.ITEM_ACTIONS:
         return is_sitting
     return False
 
 
 def is_waiting_after(action: str, is_waiting: bool) -> bool:
-    """Like the game: 'wait' and 'move_to' make the companion stay, 'follow' makes it come along again, everything else
+    """Like the game: 'wait', 'move_to' and 'enter' make the companion stay, 'follow' makes it come along again, everything else
     changes nothing. That goes for 'sit' as well: the companion sits because of a package of the game mod, and once it
     gets up it follows or waits as before"""
-    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO):
+    if action in (consts.ACTION_WAIT, consts.ACTION_MOVE_TO, consts.ACTION_ENTER):
         return True
     if action == consts.ACTION_FOLLOW:
         return False
@@ -304,9 +348,26 @@ def is_fleeing_after(action: str) -> bool:
 def walk_target_after(action: str, target: str, walk_target_ref_id: str = "") -> str:
     """Like the game: every new command ends the walk, except for 'look_at', 'gesture' and what the companion does
     with its things. The simulator's companion never arrives, so it keeps walking until then"""
-    if action in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_SAY) or action in consts.ITEM_ACTIONS:
+    if action in QUIET_ACTIONS or action in consts.ITEM_ACTIONS:
         return walk_target_ref_id
-    return target if action in (consts.ACTION_MOVE_TO, consts.ACTION_LOOT) else ""
+    return target if action in (consts.ACTION_MOVE_TO, consts.ACTION_LOOT, consts.ACTION_ENTER) else ""
+
+
+def leader_after(action: str, target: str, leader_ref_id: str) -> str:
+    """Like the game: 'follow' with a target makes the companion follow that character. A fight, and what the companion
+    does without moving from the spot, leaves that as it is. Every other command ends it"""
+    if action == consts.ACTION_FOLLOW:
+        return target if target != PLAYER_REF_ID else ""
+    if action in QUIET_ACTIONS + [consts.ACTION_ATTACK, consts.ACTION_STAND_DOWN] or action in consts.ITEM_ACTIONS:
+        return leader_ref_id
+    return ""
+
+
+def expression_after(action: str, detail: str, expression: str) -> str:
+    """Like the game: the look stays on the companion's face until 'expression' takes it off again"""
+    if action != consts.ACTION_EXPRESSION:
+        return expression
+    return "" if detail in consts.EXPRESSION_NONE_TEXTS else detail
 
 
 def look_target_after(action: str, target: str, look_target_ref_id: str) -> str:
@@ -327,7 +388,10 @@ def main():
     is_sitting = False
     walk_target_ref_id = ""
     look_target_ref_id = ""
+    leader_ref_id = ""
+    expression = ""
     is_around_companion = False
+    are_stats_wanted = False
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
     is_state_wanted = True
@@ -341,9 +405,11 @@ def main():
         if is_state_wanted:
             # Only the first state has something that was said
             request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
-                                                         is_around_companion, target_ref_id != "", look_target_ref_id)
+                                                         is_around_companion, target_ref_id != "", look_target_ref_id,
+                                                         leader_ref_id, expression, are_stats_wanted)
             are_things_wanted = False
             is_around_companion = False
+            are_stats_wanted = False
             wanted_inventory = ""
             wanted_corpse = ""
         body = json.dumps(request_body).encode("utf-8")
@@ -372,6 +438,7 @@ def main():
                 wanted_corpse = str(target or "")
                 are_things_wanted = bool(command.get(consts.KEY_COMMAND_THINGS))
                 is_around_companion = bool(command.get(consts.KEY_COMMAND_AROUND))
+                are_stats_wanted = bool(command.get(consts.KEY_COMMAND_STATS))
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it
@@ -381,11 +448,13 @@ def main():
             if is_ok:
                 is_waiting = is_waiting_after(str(action), is_waiting)
                 # Looking somewhere and a gesture do not end a retreat
-                if action not in (consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_SAY):
+                if action not in QUIET_ACTIONS:
                     is_fleeing = is_fleeing_after(str(action))
                 is_sitting = is_sitting_after(str(action), is_sitting)
                 walk_target_ref_id = walk_target_after(str(action), str(target or ""), walk_target_ref_id)
                 look_target_ref_id = look_target_after(str(action), str(target or ""), look_target_ref_id)
+                leader_ref_id = leader_after(str(action), str(target or ""), leader_ref_id)
+                expression = expression_after(str(action), str(detail or ""), expression)
             results.append({
                 consts.KEY_COMMAND_ID: command.get(consts.KEY_COMMAND_ID),
                 consts.KEY_RESULT_OK: is_ok,

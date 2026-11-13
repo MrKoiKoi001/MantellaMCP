@@ -27,8 +27,19 @@ KEY_COMPANION_VOICE: str = "companion_voice"
 # ref ID of the character or thing it is walking to because of the commands move_to, loot or sit (0 = none),
 # sitting as the game tells it (see SIT_STATES_SEATED; older game mods leave this number out),
 # weapon drawn (0 or 1), ref ID of what it looks at because of the command look_at (0 = nothing in particular;
-# older game mods leave both numbers out)
+# older game mods leave both numbers out), ref ID of the character it follows because of the command follow
+# with a target (0 = the player or nobody; older game mods leave this number out)
 KEY_COMPANION_VALUES: str = "companion"
+# Only if the companion is not in the loaded area: the name of the building (cave ...) it is in, if the game has one
+KEY_COMPANION_PLACE: str = "companion_place"
+# Only if the companion's face has a look because of the command expression: that look as the AI named it
+KEY_COMPANION_EXPRESSION: str = "companion_expression"
+# Only when the server asked for it. 29 numbers about the player: level, health, magicka and stamina as they are now,
+# magicka and stamina in percent, weight carried, the most that can be carried, perk points not spent yet,
+# experience gathered in this level, experience it takes to reach the next one, then the skills (see PLAYER_SKILLS)
+KEY_STATS_PLAYER: str = "stats_player"
+# With it, 6 numbers about the companion: level, health, magicka, stamina, magicka and stamina in percent
+KEY_STATS_COMPANION: str = "stats_companion"
 # weather outside (see WEATHER_NAMES, -1 = unknown), time of day in minutes since midnight,
 # interface version of the SKSE plugin of the game mod (0 = not loaded, so the game cannot tell the quests),
 # whether that plugin listens to what characters say (0 or 1),
@@ -69,6 +80,12 @@ KEY_HEARD: str = "heard"
 # Five numbers per character, living or dead: ref ID, distance to the viewer in meters,
 # angle from where the viewer faces to the character in degrees (negative = left), hostile to the player (0 or 1), dead (0 or 1)
 KEY_NEARBY_VALUES: str = "nearby"
+# Instead of the two lists of characters if the companion looks around inside a building the player is not in
+# (the game has not loaded it, so only its SKSE plugin can tell who is there, and only who the game keeps in memory).
+# One text per character, nearest first. Its parts are separated by tabs: ref ID as eight hex digits, distance to the
+# companion in meters, angle from where it faces in degrees, dead (1 or 0), name.
+# The SKSE plugin of the game mod writes these lines (GetCharactersInCell in plugin.cpp of the plugin repository)
+KEY_NEARBY_LINES: str = "nearby_lines"
 # One text per character: its place in the list above, a colon and its name, eg "0:Bandit".
 # The HTTP plugin of the game drops names it cannot send without a word, so the place cannot be counted
 KEY_NEARBY_NAMES: str = "nearby_names"
@@ -98,13 +115,25 @@ KEY_TIMES: str = "times_ms"
 PLAYER_VALUE_COUNT: int = 8
 # Older game mods say nothing about the weapon
 PLAYER_VALUE_COUNT_WITHOUT_WEAPON: int = 7
-COMPANION_VALUE_COUNT: int = 15
-# Older game mods say nothing about the weapon and the look, and still older ones nothing about sitting either
+COMPANION_VALUE_COUNT: int = 16
+# Older game mods say nothing about whom the companion follows, still older ones nothing about the weapon and the look,
+# and the oldest nothing about sitting either
+COMPANION_VALUE_COUNT_WITHOUT_LEADER: int = 15
 COMPANION_VALUE_COUNT_WITHOUT_WEAPON: int = 13
 COMPANION_VALUE_COUNT_WITHOUT_SITTING: int = 12
 COMPANION_PLACE_OF_SITTING: int = 12
 COMPANION_PLACE_OF_WEAPON: int = 13
 COMPANION_PLACE_OF_LOOK_TARGET: int = 14
+COMPANION_PLACE_OF_LEADER: int = 15
+PLAYER_STATS_BEFORE_SKILLS: int = 11
+# The skills of the player in the order the game mod sends them (GetSkillNames in KI_MCP_Gefaehrte_Loop.psc),
+# by the names the game shows for them in English
+PLAYER_SKILLS: list[str] = [
+    "One-Handed", "Two-Handed", "Archery", "Block", "Smithing", "Heavy Armor", "Light Armor", "Pickpocket", "Lockpicking",
+    "Sneak", "Alchemy", "Speech", "Alteration", "Conjuration", "Destruction", "Illusion", "Restoration", "Enchanting",
+]
+COMPANION_STATS_COUNT: int = 6
+NEARBY_LINE_PART_COUNT: int = 5
 # What the game calls sitting (Actor.GetSitState): 3 = seated, 4 = seated and about to get up
 SIT_STATES_SEATED: tuple[int, ...] = (3, 4)
 WORLD_VALUE_COUNT: int = 6
@@ -112,7 +141,7 @@ WORLD_PLACE_OF_PROTOCOL: int = 4
 WORLD_PLACE_OF_AROUND: int = 5
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 3
+GAME_PROTOCOL: int = 4
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -273,8 +302,12 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     report = raw.get(KEY_REPORT)
     if isinstance(report, str) and report.strip() != "":
         state["report"] = report.strip()
+    _add_stats(state, raw)
 
-    state["nearby"] = _read_nearby(raw)
+    if isinstance(raw.get(KEY_NEARBY_LINES), list):
+        state["nearby"] = _read_nearby_lines(raw.get(KEY_NEARBY_LINES))
+    else:
+        state["nearby"] = _read_nearby(raw)
     # Only a game mod whose plugin knows about places sends this list. Without it nothing is said about places
     if isinstance(raw.get(KEY_PLACES), list):
         state["places"] = _read_places(raw.get(KEY_PLACES))
@@ -292,7 +325,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     """No companion in the result means: the player has no follower at the moment"""
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
-    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
+    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
+                                             COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
         return None
     (form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id, facing, retreating,
      walk_target_form_id) = values[:COMPANION_VALUE_COUNT_WITHOUT_SITTING]
@@ -325,7 +359,55 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
         companion["weapon_drawn"] = values[COMPANION_PLACE_OF_WEAPON] != 0
         if values[COMPANION_PLACE_OF_LOOK_TARGET] != 0:
             companion["look_target_ref_id"] = _ref_id(values[COMPANION_PLACE_OF_LOOK_TARGET])
+    if len(values) > COMPANION_PLACE_OF_LEADER and values[COMPANION_PLACE_OF_LEADER] != 0:
+        companion["leader_ref_id"] = _ref_id(values[COMPANION_PLACE_OF_LEADER])
+    for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
+        text = raw.get(key)
+        if isinstance(text, str) and text.strip() != "":
+            companion[name] = text.strip()
     return companion
+
+
+def _add_stats(state: dict[str, Any], raw: dict[str, Any]) -> None:
+    """Adds 'player_stats' and 'companion_stats' if the game sent them (it only does when the server asked for them)"""
+    values = _numbers(raw.get(KEY_STATS_PLAYER))
+    if values is not None and len(values) == PLAYER_STATS_BEFORE_SKILLS + len(PLAYER_SKILLS):
+        (level, health, magicka, stamina, magicka_percent, stamina_percent, carried, carry_capacity, perk_points, experience,
+         experience_needed) = values[:PLAYER_STATS_BEFORE_SKILLS]
+        state["player_stats"] = {
+            "level": level, "health": health, "magicka": magicka, "stamina": stamina, "magicka_percent": magicka_percent,
+            "stamina_percent": stamina_percent, "carried": carried, "carry_capacity": carry_capacity, "perk_points": perk_points,
+            # The game raises the level when the player opens the skills menu. Until then the experience stays above what it takes
+            "level_up_waiting": 0 < experience_needed <= experience,
+            "skills": [{"name": name, "level": level_of_skill}
+                       for name, level_of_skill in zip(PLAYER_SKILLS, values[PLAYER_STATS_BEFORE_SKILLS:])],
+        }
+    values = _numbers(raw.get(KEY_STATS_COMPANION))
+    if values is not None and len(values) == COMPANION_STATS_COUNT:
+        level, health, magicka, stamina, magicka_percent, stamina_percent = values
+        state["companion_stats"] = {"level": level, "health": health, "magicka": magicka, "stamina": stamina,
+                                    "magicka_percent": magicka_percent, "stamina_percent": stamina_percent}
+
+
+def _read_nearby_lines(raw_lines: list) -> list[dict[str, Any]]:
+    """The characters in a building the game has not loaded, as its SKSE plugin lists them (see KEY_NEARBY_LINES).
+    Whether one of them is hostile cannot be told there"""
+    nearby: list[dict[str, Any]] = []
+    for entry in raw_lines:
+        if not isinstance(entry, str):
+            continue
+        # The name comes last and is not split any further
+        parts = entry.split(QUEST_PART_SEPARATOR, NEARBY_LINE_PART_COUNT - 1)
+        if len(parts) != NEARBY_LINE_PART_COUNT:
+            continue
+        form_id = parse_ref_id(parts[0])
+        distance, angle, dead = (_whole_number(text) for text in parts[1:4])
+        if None in (form_id, distance, angle, dead) or parts[4].strip() == "":
+            continue
+        nearby.append({"name": _tidy_name(parts[4]), "ref_id": format_ref_id(form_id), "distance_meters": distance,
+                       "angle_degrees": angle, "hostile": False, "dead": dead != 0})
+    nearby.sort(key=lambda character: (character["dead"], character["distance_meters"]))
+    return nearby
 
 
 def _read_quests(raw_quests: Any, raw_targets: Any = None) -> list[dict[str, Any]]:

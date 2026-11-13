@@ -1128,3 +1128,150 @@ def test_say_makes_the_sound_and_tells_the_game_which_line_to_speak(tmp_path):
 
     assert run_command(consts.ACTION_SAY, "", "") == (True, "You say it aloud.", "")
     assert is_sitting_after(consts.ACTION_SAY, True) is True
+
+
+def test_following_someone_going_through_a_door_and_a_look_on_the_face():
+    from src.companion import game_state
+    from src.companion.fake_game import (DOOR_REF_ID, build_state, expression_after, is_sitting_after, is_waiting_after,
+                                         leader_after, run_command, walk_target_after)
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **result: object) -> list[str]:
+        state = game_state.read_game_state(raw)
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, **result}).splitlines()
+
+    # Whom the companion follows instead of the player, and the look on its face
+    assert text_for(build_state(leader_ref_id="000F6845"))[2].endswith("player left of you, following Whiterun Guard 000F6845")
+    assert text_for(build_state(expression="happy"))[2].endswith("player left of you, following, face happy")
+    # A game mod from before this sends fifteen numbers about the companion and says nothing about a leader
+    older = build_state(leader_ref_id="000F6845")
+    older[game_state.KEY_COMPANION_VALUES] = older[game_state.KEY_COMPANION_VALUES][:15]
+    assert "leader_ref_id" not in game_state.read_game_state(older)["companion"]
+
+    # The companion went through a door on its own: it is somewhere the game has not loaded
+    away = build_state(True)
+    away[game_state.KEY_COMPANION_VALUES][5] = 0
+    assert text_for(away)[2] == "You, Lydia: health 100%, far away from the player, waiting"
+    away[game_state.KEY_COMPANION_PLACE] = "The Bannered Mare"
+    assert text_for(away)[2] == "You, Lydia: health 100%, in The Bannered Mare, not where the player is, waiting"
+    # Looking around there, it gets the characters from the plugin of the game mod: only those the game keeps in memory
+    away[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_AROUND] = 1
+    away[game_state.KEY_NEARBY_LINES] = ["000A0002\t9\t30\t1\tsaadia", "000A0001\t4\t-90\t0\tHulda", "broken line", "000A0003\tnear\t0\t0\tMikael"]
+    del away[game_state.KEY_THINGS]
+    assert game_state.read_game_state(away)["nearby"] == [
+        {"name": "Hulda", "ref_id": "000A0001", "distance_meters": 4, "angle_degrees": -90, "hostile": False, "dead": False},
+        {"name": "Saadia", "ref_id": "000A0002", "distance_meters": 9, "angle_degrees": 30, "hostile": False, "dead": True},
+    ]
+    inside = text_for(away, around_wanted=True)
+    start = next(index for index, line in enumerate(inside) if line.startswith("The lists below show the place you are in."))
+    assert "Do not take an empty list for an empty place." in inside[start]
+    assert inside[start + 1:start + 4] == ["Nearby:", "000A0001 Hulda, from you 4 m left", "000A0002 Saadia, dead, from you 9 m ahead-right"]
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "needs a target" in command({"action": "enter"})["message"]
+        assert "needs the look" in command({"action": "expression"})["message"]
+        unknown = command({"action": "expression", "detail": "smug"})
+        assert unknown["status"] == consts.STATUS_FAILED and "happy" in unknown["message"]
+        assert "how strong" in command({"action": "expression", "detail": "happy 500"})["message"]
+        # What is fine is refused only because no game is there
+        for arguments in ({"action": "expression", "detail": "happy 50"}, {"action": "expression", "detail": "none"},
+                          {"action": "enter", "target": DOOR_REF_ID}, {"action": "follow", "target": "000F6845"}, {"action": "follow"}):
+            assert command(arguments)["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {"enter", "expression"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
+
+    # The game gets the number of the look, and how strong it is where loot has the lower half of an item ID
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You look happy now."}]
+            client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "expression", "detail": "Happy 60", "target": "000F6845"}}))
+        assert answer == {"status": consts.STATUS_DONE, "message": "You look happy now."}
+        sent = received_commands[0]
+        assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TARGET]) == ("expression", "happy", "")
+        assert (sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == (10, 0, 60)
+
+    # The fake game answers like the game mod
+    assert "You follow Whiterun Guard now" in run_command(consts.ACTION_FOLLOW, "000F6845", "")[1]
+    assert run_command(consts.ACTION_FOLLOW, "FF000A03", "")[1] == "Bandit Outlaw is dead."
+    assert "not a character" in run_command(consts.ACTION_FOLLOW, DOOR_REF_ID, "")[1]
+    assert run_command(consts.ACTION_FOLLOW, "", "")[0] is True
+    assert run_command(consts.ACTION_ENTER, DOOR_REF_ID, "")[1].startswith("You walk to the door and go through it.")
+    assert "not a door" in run_command(consts.ACTION_ENTER, "000F6845", "")[1]
+    assert "not a door" in run_command(consts.ACTION_ENTER, "000C0001", "")[1]
+    assert run_command(consts.ACTION_EXPRESSION, "", "", "", "none")[1] == "Your face is your own again."
+    # Following someone holds through a fight and through what the companion does on the spot. Being sent somewhere ends it
+    assert leader_after(consts.ACTION_FOLLOW, "000F6845", "") == "000F6845"
+    assert leader_after(consts.ACTION_ATTACK, "FF000A01", "000F6845") == "000F6845"
+    assert leader_after(consts.ACTION_SAY, "", "000F6845") == "000F6845"
+    assert leader_after(consts.ACTION_WAIT, "", "000F6845") == "" and leader_after(consts.ACTION_FOLLOW, "", "000F6845") == ""
+    assert expression_after(consts.ACTION_EXPRESSION, "happy", "") == "happy" and expression_after(consts.ACTION_FOLLOW, "", "happy") == "happy"
+    assert expression_after(consts.ACTION_EXPRESSION, "none", "happy") == ""
+    assert walk_target_after(consts.ACTION_ENTER, DOOR_REF_ID) == DOOR_REF_ID and is_waiting_after(consts.ACTION_ENTER, False) is True
+    assert is_sitting_after(consts.ACTION_EXPRESSION, True) is True and is_sitting_after(consts.ACTION_ENTER, True) is False
+
+
+def test_stats_of_the_player_only_come_when_asked_for():
+    import asyncio
+
+    from src.companion import game_state
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **result: object) -> list[str]:
+        state = game_state.read_game_state(raw)
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, **result}).splitlines()
+
+    stats = game_state.read_game_state(build_state(has_stats=True))["player_stats"]
+    assert (stats["level"], stats["level_up_waiting"], stats["perk_points"]) == (5, True, 2)
+    assert stats["skills"][0] == {"name": "One-Handed", "level": 32} and len(stats["skills"]) == 18
+    assert "player_stats" not in game_state.read_game_state(build_state())
+
+    shown = text_for(build_state(has_stats=True), stats_wanted=True)
+    start = next(index for index, line in enumerate(shown) if line.startswith("Player stats"))
+    assert shown[start] == ("Player stats: level 5, a level-up is waiting in the skills menu, 2 perk points to spend, health 150, "
+                            "magicka 80 (80%), stamina 120 (100%), carries 182 of 300")
+    # The skills the player is best at come first
+    assert shown[start + 1].startswith("Player skills: One-Handed 32, Archery 27, Sneak 26, Destruction 25, Heavy Armor 24, ")
+    assert shown[start + 1].endswith("Illusion 15, Enchanting 15")
+    assert shown[start + 2] == "Your stats: level 6, health 250, magicka 50 (100%), stamina 180 (100%)"
+    # Stats the AI did not ask for are not shown, even if the kept state carries some
+    assert not any(line.startswith("Player stats") for line in text_for(build_state(has_stats=True)))
+    assert "The game did not send the stats in time. Ask again." in text_for(build_state(), stats_missed=True)
+    # No level-up waits below the experience it takes, and one perk point is one point
+    calm = build_state(has_stats=True)
+    calm[game_state.KEY_STATS_PLAYER] = list(calm[game_state.KEY_STATS_PLAYER])
+    calm[game_state.KEY_STATS_PLAYER][8:11] = [1, 120, 400]
+    assert "Player stats: level 5, 1 perk point to spend, health 150" in "\n".join(text_for(calm, stats_wanted=True))
+    # A list of another length (another game mod) is left out
+    calm[game_state.KEY_STATS_PLAYER] = calm[game_state.KEY_STATS_PLAYER][:20]
+    assert "The game did not send the stats. That needs a newer game mod." in text_for(calm, stats_wanted=True)
+
+    # The game learns with the request for the state that the stats are wanted
+    async def request(**wanted: bool) -> dict:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, **wanted))
+        return (await game)[0]
+
+    assert asyncio.run(request(stats=True))[consts.KEY_COMMAND_STATS] == 1
+    assert asyncio.run(request())[consts.KEY_COMMAND_STATS] == 0
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state()})
+        answer = tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"debug": True, "stats": True}}))
+        assert answer["stats_wanted"] is False and answer["stats_missed"] is True
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[1]["inputSchema"]["properties"]["stats"]["type"] == "boolean"

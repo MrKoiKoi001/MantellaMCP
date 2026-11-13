@@ -97,7 +97,16 @@ def describe_state(state_result: dict[str, Any]) -> str:
     max_lines = state_result.get("max_lines")
     if not isinstance(max_lines, int) or isinstance(max_lines, bool) or max_lines < 1:
         max_lines = DEFAULT_MAX_LINES
-    if is_from_companion:
+    if state_result.get("stats_wanted"):
+        lines.extend(_describe_stats(state.get("player_stats"), state.get("companion_stats")))
+    elif state_result.get("stats_missed"):
+        lines.append("The game did not send the stats in time. Ask again.")
+    companion = state.get("companion")
+    if is_from_companion and isinstance(companion, dict) and not companion.get("nearby"):
+        lines.append("The lists below show the place you are in. The player is not there, so the game has not loaded it: "
+                     "you only get what it keeps of the place in memory. That is the characters who live there and the doors, "
+                     "hardly any furniture or loose things, and no bandits or animals. Do not take an empty list for an empty place.")
+    elif is_from_companion:
         lines.append("The lists below show what is around you, not around the player.")
     elif state_result.get("around_wanted"):
         lines.append("The game listed what is around the player: your character is not close enough to look around on its own.")
@@ -338,7 +347,8 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
 
     parts: list[str] = [f"health {companion.get('health_percent')}%"]
     if not companion.get("nearby"):
-        parts.append("far away from the player")
+        place = str(companion.get("place", "")).strip()
+        parts.append("far away from the player" if place == "" else f"in {place}, not where the player is")
     elif "distance_meters" in companion:
         parts.append(_describe_where(companion))
         if "facing_degrees" in companion:
@@ -350,6 +360,9 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append(" ".join(text for text in ["walking to", _name_of(walk_target_ref_id, nearby), walk_target_ref_id] if text != ""))
     elif companion.get("sitting"):
         parts.append("sitting")
+    elif companion.get("leader_ref_id") is not None:
+        leader_ref_id = companion["leader_ref_id"]
+        parts.append(" ".join(text for text in ["following", _name_of(leader_ref_id, nearby), leader_ref_id] if text != ""))
     else:
         parts.append("waiting" if companion.get("waiting") else "following")
     if companion.get("retreating"):
@@ -362,12 +375,38 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append("fighting")
     if companion.get("weapon_drawn"):
         parts.append("weapon drawn")
+    if "expression" in companion:
+        parts.append(f"face {companion['expression']}")
     look_target_ref_id = companion.get("look_target_ref_id")
     if look_target_ref_id == PLAYER_REF_ID:
         parts.append("looking at the player")
     elif look_target_ref_id is not None:
         parts.append(" ".join(text for text in ["looking at", _name_of(look_target_ref_id, nearby), look_target_ref_id] if text != ""))
     return f"You, {name}: {', '.join(parts)}"
+
+
+def _describe_stats(player_stats: Any, companion_stats: Any) -> list[str]:
+    """Level, skills and so on of the player and the level of the companion, as far as the game sent them"""
+    if not isinstance(player_stats, dict):
+        return ["The game did not send the stats. That needs a newer game mod."]
+    parts: list[str] = [f"level {player_stats.get('level')}"]
+    if player_stats.get("level_up_waiting"):
+        parts.append("a level-up is waiting in the skills menu")
+    perk_points = player_stats.get("perk_points", 0)
+    if perk_points > 0:
+        parts.append(f"{perk_points} perk point{'s' if perk_points != 1 else ''} to spend")
+    parts.append(f"health {player_stats.get('health')}")
+    parts.append(f"magicka {player_stats.get('magicka')} ({player_stats.get('magicka_percent')}%)")
+    parts.append(f"stamina {player_stats.get('stamina')} ({player_stats.get('stamina_percent')}%)")
+    parts.append(f"carries {player_stats.get('carried')} of {player_stats.get('carry_capacity')}")
+    lines: list[str] = ["Player stats: " + ", ".join(parts)]
+    skills = sorted(player_stats.get("skills", []), key=lambda skill: -skill.get("level", 0))
+    lines.append("Player skills: " + ", ".join(f"{skill.get('name')} {skill.get('level')}" for skill in skills))
+    if isinstance(companion_stats, dict):
+        lines.append(f"Your stats: level {companion_stats.get('level')}, health {companion_stats.get('health')}, "
+                     f"magicka {companion_stats.get('magicka')} ({companion_stats.get('magicka_percent')}%), "
+                     f"stamina {companion_stats.get('stamina')} ({companion_stats.get('stamina_percent')}%)")
+    return lines
 
 
 def _describe_nearby_character(character: dict[str, Any], is_from_companion: bool = False) -> str:
