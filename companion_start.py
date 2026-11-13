@@ -23,7 +23,8 @@ import time
 
 TOKEN_FILE: str = "companion_token.txt"
 DEFAULT_PORT: int = 4998
-SERVER_START_TIMEOUT_SECONDS: float = 20.0
+# With voice = xtts and xtts_start in companion.ini, the server first starts the XTTS server and waits for it (see src/companion/xtts.py)
+SERVER_START_TIMEOUT_SECONDS: float = 240.0
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 MCP_ROUTE_PREFIX: str = "/mcp/"
 

@@ -1665,3 +1665,158 @@ def test_find_by_name_and_move_to_keeps_a_distance():
     assert run_command(consts.ACTION_MOVE_TO, CHEST_REF_ID, "")[1] == "You walk to Chest and wait there. 'follow' brings you back to the player."
     assert run_command(consts.ACTION_MOVE_TO, CHEST_REF_ID, "", "", "4")[1].startswith("You walk to Chest, stop about 4 meters in front")
     assert run_command(consts.ACTION_MOVE_TO, "000F6845", "", "", "0")[1] == "You walk to Whiterun Guard and wait there. 'follow' brings you back to the player."
+
+
+def test_xtts_speaks_instead_of_piper_and_piper_steps_in(tmp_path):
+    import io
+    import sys
+    import wave
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from src.companion.settings import VOICE_PIPER, VOICE_XTTS, load_settings
+    from src.companion.voice import LINE_FILES, CompanionVoice
+    from src.companion.xtts import DEFAULT_XTTS_LANGUAGE, DEFAULT_XTTS_URL, DEFAULT_XTTS_VOICE, XttsVoice
+
+    xtts_rate = 24000
+    piper_rate = 22050
+    asked: list[dict] = []
+
+    # A stand-in for the XTTS server: it answers the two routes the way the player's xtts_server.py does
+    class StandInXtts(BaseHTTPRequestHandler):
+        def answer(self, body: bytes, kind: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            self.answer(b'{"status": "ok"}', "application/json")
+
+        def do_POST(self) -> None:
+            wanted = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            asked.append(wanted)
+            if wanted["input"] == "Kaputt.":
+                self.answer(b"no sound at all", "audio/wav")
+                return
+            sound = io.BytesIO()
+            with wave.open(sound, "wb") as opened:
+                opened.setnchannels(1)
+                opened.setsampwidth(2)
+                opened.setframerate(xtts_rate)
+                opened.writeframes(b"\x00\x00" * 100)
+            self.answer(sound.getvalue(), "audio/wav")
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), StandInXtts)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+
+    piper = tmp_path / "stand_in_piper.py"
+    piper.write_text(
+        "import sys, wave\n"
+        "for line in sys.stdin:\n"
+        "    if line.startswith('load_model'):\n"
+        "        print('Model loaded', flush=True)\n"
+        "    elif line.startswith('synthesize '):\n"
+        "        with wave.open('out.wav', 'wb') as sound:\n"
+        f"            sound.setnchannels(1); sound.setsampwidth(2); sound.setframerate({piper_rate})\n"
+        "            sound.writeframes(b'\\x00\\x00' * len(line))\n", encoding="utf-8")
+    game_folder = tmp_path / "game"
+    voice_folder = game_folder / "Data" / "Sound" / "Voice" / "KI_MCP_Gefaehrte.esp" / "FemaleEvenToned"
+    voice_folder.mkdir(parents=True)
+
+    def rate_of(line: int) -> int:
+        with wave.open(str(voice_folder / LINE_FILES[line - 1]), "rb") as sound:
+            return sound.getframerate()
+
+    try:
+        voice = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(piper)],
+                               xtts=XttsVoice(url + "/", "Uta Obando", "DE"))
+        assert voice.spoken_language == "German"
+        assert voice.describe_setup().startswith("on: XTTS at " + url + ", voice 'Uta Obando', language German")
+        # The sound comes from the XTTS server, which is asked the way OpenAI's speech route is
+        assert voice.speak("Hallo, mein *Thane*.", "FemaleEvenToned") == (True, "", 1)
+        assert rate_of(1) == xtts_rate
+        assert asked == [{"input": "Hallo, mein Thane.", "voice": "Uta Obando", "language": "de"}]
+        # What the XTTS server sends is no sound: Piper makes the sentence, so that the companion does not fall silent
+        assert voice.speak("Kaputt.", "FemaleEvenToned") == (True, "", 2)
+        assert rate_of(2) == piper_rate
+        assert voice.speak("Wieder da.", "FemaleEvenToned") == (True, "", 1)
+        assert rate_of(1) == xtts_rate
+
+        # The AI is told to write in the language of the voice, and in English when Piper speaks
+        with TestClient(create_app(TOKEN, hold_seconds=0.1, voice=voice)) as client:
+            description = rpc(client, "tools/list").json()["result"]["tools"][0]["description"]
+            assert "Write it in German" in description and "Write it in English" not in description
+        with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+            assert "Write it in English" in rpc(client, "tools/list").json()["result"]["tools"][0]["description"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # The XTTS server is not running: the start of the server says so, and Piper speaks
+    assert "does not answer" in voice.describe_setup() and "Piper speaks" in voice.describe_setup()
+    assert voice.speak("Niemand da.", "FemaleEvenToned") == (True, "", 2)
+    assert rate_of(2) == piper_rate
+    # Without Piper to step in, the AI is told about both
+    alone = CompanionVoice(str(game_folder), str(tmp_path / "no_piper"), xtts=XttsVoice(url))
+    is_ok, problem, line = alone.speak("Niemand da.", "FemaleEvenToned")
+    assert is_ok is False and problem.startswith("XTTS could not speak") and "Piper is not installed" in problem
+    plain = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(piper)])
+    assert plain.spoken_language == "English" and plain.describe_setup().startswith("on: Piper")
+
+    # The settings: Piper unless xtts is asked for, and what is left empty is what the notes say
+    file = tmp_path / "companion.ini"
+    settings, _ = load_settings(str(file))
+    assert (settings.voice, settings.xtts_url, settings.xtts_voice, settings.xtts_language) == (
+        VOICE_PIPER, DEFAULT_XTTS_URL, DEFAULT_XTTS_VOICE, DEFAULT_XTTS_LANGUAGE)
+    assert "voice =\n" in file.read_text(encoding="utf-8") and load_settings(str(file))[0] == settings
+    file.write_text("[companion]\nvoice = XTTS\nxtts_voice = lydia\nxtts_language = en\n", encoding="utf-8")
+    settings, _ = load_settings(str(file))
+    assert (settings.voice, settings.xtts_url, settings.xtts_voice, settings.xtts_language) == (VOICE_XTTS, DEFAULT_XTTS_URL, "lydia", "en")
+    file.write_text("[companion]\nvoice = xtss\n", encoding="utf-8")
+    assert load_settings(str(file))[0].voice == VOICE_PIPER
+
+
+def test_the_xtts_server_is_started_when_asked_for(tmp_path):
+    import socket
+    import sys
+
+    from src.companion.settings import load_settings
+    from src.companion.xtts import XttsVoice
+
+    with socket.socket() as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    xtts = XttsVoice(f"http://127.0.0.1:{port}")
+    # The file that is named is not there
+    assert "not found" in xtts.start_server(str(tmp_path / "start-xtts-server.bat"))
+    # What is started stops again at once
+    start_file = str(tmp_path / "start.py")
+    assert "stopped again" in xtts.start_server(start_file, [sys.executable, "-c", "pass"], timeout_seconds=20)
+    # A stand-in that answers the health route after a moment, like the real one after loading its model
+    stand_in = tmp_path / "stand_in_xtts.py"
+    stand_in.write_text(
+        "import sys, time\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.send_header('Content-Length', '2'); self.end_headers(); self.wfile.write(b'ok')\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "time.sleep(1.5)\n"
+        "server = HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler)\n"
+        "server.timeout = 0.5\n"
+        "end = time.time() + 20\n"
+        "while time.time() < end:\n"
+        "    server.handle_request()\n", encoding="utf-8")
+    assert "ready after" in xtts.start_server(start_file, [sys.executable, str(stand_in), str(port)], timeout_seconds=20)
+    assert xtts.start_server(start_file, [sys.executable, "-c", "pass"]) == "is running already"
+
+    file = tmp_path / "companion.ini"
+    assert load_settings(str(file))[0].xtts_start == "" and "xtts_start =\n" in file.read_text(encoding="utf-8")
+    file.write_text("[companion]\nvoice = xtts\nxtts_start = \"D:\\xtts\\start-xtts-server.bat\"\n", encoding="utf-8")
+    assert load_settings(str(file))[0].xtts_start == "D:\\xtts\\start-xtts-server.bat"

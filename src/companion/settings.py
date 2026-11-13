@@ -9,11 +9,19 @@ import os
 from dataclasses import dataclass
 
 from src.companion.voice import DEFAULT_GAME_FOLDER, DEFAULT_PIPER_FOLDER
+from src.companion.xtts import DEFAULT_XTTS_LANGUAGE, DEFAULT_XTTS_URL, DEFAULT_XTTS_VOICE
 
 SETTINGS_FILE: str = "companion.ini"
 SECTION: str = "companion"
 KEY_GAME_FOLDER: str = "game_folder"
 KEY_PIPER_FOLDER: str = "piper_folder"
+KEY_VOICE: str = "voice"
+KEY_XTTS_URL: str = "xtts_url"
+KEY_XTTS_VOICE: str = "xtts_voice"
+KEY_XTTS_LANGUAGE: str = "xtts_language"
+KEY_XTTS_START: str = "xtts_start"
+VOICE_PIPER: str = "piper"
+VOICE_XTTS: str = "xtts"
 KEY_LIPS: str = "lips"
 KEY_LIPGEN_FOLDER: str = "lipgen_folder"
 KEY_FACEFX_FOLDER: str = "facefx_folder"
@@ -32,6 +40,32 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 ; The folder with piper.exe from the Mantella download, which makes the voice.
 ; Empty: the folder "piper" next to the server
 {KEY_PIPER_FOLDER} =
+
+; What makes the voice of the companion:
+; {VOICE_PIPER} = Piper, with the voice the character has in the game. Quick, but it only pronounces English.
+; {VOICE_XTTS} = an XTTS server that runs next to this one (start it first). It speaks other languages too, German among them,
+;        and takes a few seconds for every sentence. If it does not answer, Piper speaks instead.
+; After changing this, start the server anew and connect the AI anew: it is told which language to write in.
+; Empty: {VOICE_PIPER}
+{KEY_VOICE} =
+
+; Only for {KEY_VOICE} = {VOICE_XTTS}: where the XTTS server listens.
+; Empty: {DEFAULT_XTTS_URL}
+{KEY_XTTS_URL} =
+
+; Only for {KEY_VOICE} = {VOICE_XTTS}: the voice, one the XTTS server knows (one of those built in, or the name of a recording
+; in its folder of voices).
+; Empty: {DEFAULT_XTTS_VOICE}
+{KEY_XTTS_VOICE} =
+
+; Only for {KEY_VOICE} = {VOICE_XTTS}: the language the companion speaks, as XTTS names it (de, en, fr ...).
+; Empty: {DEFAULT_XTTS_LANGUAGE}
+{KEY_XTTS_LANGUAGE} =
+
+; Only for {KEY_VOICE} = {VOICE_XTTS}: the file that starts the XTTS server (eg D:\\xtts\\start-xtts-server.bat). If the XTTS server
+; is not running when this server starts, this server starts it in a window of its own and waits until it is ready.
+; Empty: the XTTS server is not started, start it yourself
+{KEY_XTTS_START} =
 
 ; on = the lips of the companion move while it speaks. That takes a moment longer for every sentence.
 ; off = the mouth stays shut.
@@ -58,6 +92,11 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 class CompanionSettings:
     game_folder: str = DEFAULT_GAME_FOLDER
     piper_folder: str = DEFAULT_PIPER_FOLDER
+    voice: str = VOICE_PIPER
+    xtts_url: str = DEFAULT_XTTS_URL
+    xtts_voice: str = DEFAULT_XTTS_VOICE
+    xtts_language: str = DEFAULT_XTTS_LANGUAGE
+    xtts_start: str = ""
     lips: bool = False
     lipgen_folder: str = ""
     facefx_folder: str = ""
@@ -95,6 +134,12 @@ def load_settings(file: str = SETTINGS_FILE) -> tuple[CompanionSettings, str]:
 
     settings.game_folder = read(KEY_GAME_FOLDER) or DEFAULT_GAME_FOLDER
     settings.piper_folder = read(KEY_PIPER_FOLDER) or DEFAULT_PIPER_FOLDER
+    # Anything but xtts leaves Piper to speak, a typing mistake too
+    settings.voice = VOICE_XTTS if read(KEY_VOICE).lower() == VOICE_XTTS else VOICE_PIPER
+    settings.xtts_url = read(KEY_XTTS_URL) or DEFAULT_XTTS_URL
+    settings.xtts_voice = read(KEY_XTTS_VOICE) or DEFAULT_XTTS_VOICE
+    settings.xtts_language = read(KEY_XTTS_LANGUAGE) or DEFAULT_XTTS_LANGUAGE
+    settings.xtts_start = read(KEY_XTTS_START)
     settings.lips = read(KEY_LIPS).lower() in ON_WORDS
     settings.lipgen_folder = read(KEY_LIPGEN_FOLDER)
     settings.facefx_folder = read(KEY_FACEFX_FOLDER)

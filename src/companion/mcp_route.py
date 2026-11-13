@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 from typing import Any
 
@@ -10,14 +11,17 @@ from src.companion.companion_constants import companion_constants as consts
 from src.companion.gestures import GESTURES, pick_animation
 from src.companion.ref_ids import format_ref_id, parse_ref_id
 from src.companion.state_text import describe_state
-from src.companion.voice import MAX_TEXT_LENGTH, CompanionVoice, clean_text, find_voice_folder
+from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.17"
+SERVER_VERSION: str = "0.18"
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 FALLBACK_PROTOCOL_VERSION: str = "2025-06-18"
 
 TOOL_COMMAND: str = "COMMAND"
+# What the AI is told about the language of say. Piper only pronounces English. With another voice (XTTS) the note
+# is swapped for the language that voice speaks, see _tools_for
+SAY_LANGUAGE_NOTE: str = "Write it in English: the voice cannot pronounce other languages. "
 TOOL_STATE: str = "STATE"
 ARGUMENT_DEBUG: str = "debug"
 ARGUMENT_INVENTORY: str = "inventory"
@@ -103,7 +107,7 @@ TOOLS: list[dict[str, Any]] = [
             "expression = put a look on your face, named in 'detail': " + EXPRESSION_NAMES + ". A number behind it "
             "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
-            "you there. Write it in English: the voice cannot pronounce other languages. One or two sentences at a time. "
+            "you there. " + SAY_LANGUAGE_NOTE + "One or two sentences at a time. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
             "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
             "unequip = put the item away, "
@@ -280,10 +284,23 @@ async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: Com
     if method == "ping":
         return _result(message_id, {})
     if method == "tools/list":
-        return _result(message_id, {"tools": TOOLS})
+        return _result(message_id, {"tools": _tools_for(voice)})
     if method == "tools/call":
         return _result(message_id, await _call_tool(params.get("name"), params.get("arguments"), queue, voice))
     return _error(message_id, -32601, f"Method not found: {method}")
+
+
+def _tools_for(voice: CompanionVoice | None) -> list[dict[str, Any]]:
+    """The tools as the AI gets them: with the language the voice of the companion speaks in the note about say"""
+    language = voice.spoken_language if voice is not None else PIPER_LANGUAGE_NAME
+    if language == PIPER_LANGUAGE_NAME:
+        return TOOLS
+    note = (f"Write it in {language}: that is the language your voice speaks. "
+            "Keep it short, the voice needs a few seconds for every sentence. ")
+    tools = copy.deepcopy(TOOLS)
+    for tool in tools:
+        tool["description"] = str(tool.get("description", "")).replace(SAY_LANGUAGE_NOTE, note)
+    return tools
 
 
 async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
@@ -482,7 +499,7 @@ async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: Compan
     if voice_folder == "":
         return (f"The game did not tell which voice {companion.get('name')} has. That needs the newest plugin of the game mod "
                 "(KI_MCP_Gefaehrte.dll, interface version 6)."), 0
-    # Piper takes a moment, and the server has to keep answering the game meanwhile
+    # Making the sound takes a moment (seconds with XTTS), and the server has to keep answering the game meanwhile
     is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder)
     return ("" if is_ok else problem), line
 

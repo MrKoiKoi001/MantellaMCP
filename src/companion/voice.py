@@ -10,6 +10,9 @@ Piper is talked to the same way src/tts/piper.py of Mantella does it: the progra
 "load_model <file>" and "synthesize <text>" as lines, answers "Model loaded" and writes out.wav into its working folder.
 Mantella's own class is not used, because it needs all of Mantella's settings to start.
 
+Instead of Piper, an XTTS server can make the sound (see xtts.py, voice = xtts in companion.ini). It speaks other
+languages too. If it does not answer, Piper makes the sentence, so that the companion never falls silent.
+
 If the lip movement is switched on, a lip file made from the sound goes next to the sound file (see lips.py).
 """
 import csv
@@ -24,6 +27,7 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from src.companion.lips import LIP_ENDING, PLACEHOLDER_FILE, SOUND_ENDING, LipSync
+from src.companion.xtts import XttsVoice
 
 GAME_PLUGIN_NAME: str = "KI_MCP_Gefaehrte.esp"
 # The names the game gives the sound files of the two lines (see VOICE_LINE_FILES in build.py of the game mod).
@@ -34,6 +38,9 @@ PIPER_PROGRAM: str = "piper.exe"
 MODELS_SUBFOLDER: tuple[str, ...] = ("models", "skyrim", "low")
 MODEL_ENDING: str = ".onnx"
 OUTPUT_FILE: str = "out.wav"
+XTTS_OUTPUT_FILE: str = "out_xtts.wav"
+# The language Piper's voices of the game pronounce
+PIPER_LANGUAGE_NAME: str = "English"
 MODEL_LOADED_TEXT: str = "Model loaded"
 LOAD_TIMEOUT_SECONDS: float = 20.0
 SYNTHESIZE_TIMEOUT_SECONDS: float = 15.0
@@ -84,12 +91,16 @@ class CompanionVoice:
     """Makes the sound of what the companion says and puts it into the game folder"""
 
     def __init__(self, game_folder: str = DEFAULT_GAME_FOLDER, piper_folder: str = DEFAULT_PIPER_FOLDER,
-                 piper_command: list[str] | None = None, lips: LipSync | None = None) -> None:
+                 piper_command: list[str] | None = None, lips: LipSync | None = None, xtts: XttsVoice | None = None) -> None:
         """
         Args:
             piper_command: The command that starts Piper. Only tests set it, to put a stand-in in Piper's place
             lips: Makes the lip movement for what is said. Without it the mouth of the companion stays shut
+            xtts: Makes the sound instead of Piper, as long as its server answers. Without it Piper always speaks
         """
+        self.__xtts: XttsVoice | None = xtts
+        # Whether the last sentence had to be made by Piper although XTTS is wanted. Only for the lines the server prints
+        self.__is_xtts_down: bool = False
         self.__lips: LipSync | None = lips
         # Lips that are wanted but cannot be made count as switched off. describe_lips says why
         self.__are_lips_on: bool = lips is not None and lips.find_problem() == ""
@@ -110,11 +121,22 @@ class CompanionVoice:
 
     def describe_setup(self) -> str:
         """One line for the start of the server: whether speaking can work"""
-        if not self.__is_stand_in and not os.path.isfile(self.__piper_command[0]):
+        if self.__xtts is None and not self.__is_stand_in and not os.path.isfile(self.__piper_command[0]):
             return f"off: {self.__piper_command[0]} not found (see piper_folder in companion.ini)"
         if not os.path.isdir(self.voice_root):
             return f"off: {self.voice_root} not found (run build.py --install of the game mod, or see game_folder in companion.ini)"
+        if self.__xtts is not None:
+            problem = self.__xtts.find_problem()
+            if problem != "":
+                return (f"on, but {problem}. Until it does, Piper speaks ({PIPER_LANGUAGE_NAME} pronunciation). "
+                        f"Wanted: {self.__xtts.describe_setup()}, sound goes to {self.voice_root}")
+            return f"on: {self.__xtts.describe_setup()} (Piper steps in if it stops answering), sound goes to {self.voice_root}"
         return f"on: Piper in {self.__piper_folder}, sound goes to {self.voice_root}"
+
+    @property
+    def spoken_language(self) -> str:
+        """The language the AI has to write in for say, as a word (eg English)"""
+        return self.__xtts.language_name if self.__xtts is not None else PIPER_LANGUAGE_NAME
 
     def describe_lips(self) -> str:
         """One line for the start of the server: whether the lips of the companion move"""
@@ -182,18 +204,22 @@ class CompanionVoice:
             if not os.path.isdir(target_folder):
                 return False, (f"The game has no folder for your voice '{voice_folder}' ({target_folder}). The player has to add the voice "
                                "to voice_folders.txt of the game mod if it is missing there, run build.py --install and restart the game."), 0
-            model = self.__piper_folder.joinpath(*MODELS_SUBFOLDER) / (voice_folder.lower().replace(" ", "") + MODEL_ENDING)
-            if not self.__is_stand_in:
-                if not os.path.isfile(self.__piper_command[0]):
-                    return False, (f"Piper is not installed where the server looks for it ({self.__piper_command[0]}). The player has to copy "
-                                   "the folder 'piper' of the Mantella download there, or name its folder as piper_folder in companion.ini."), 0
-                if not model.is_file():
-                    return False, f"Piper has no voice model for your voice '{voice_folder}' ({model}).", 0
-            try:
-                sound_file = self.__synthesize(cleaned, str(model))
-            except (OSError, RuntimeError) as error:
-                self.__stop_piper()
-                return False, f"Piper could not make the sound: {error}", 0
+            sound_file, xtts_problem = self.__make_with_xtts(cleaned)
+            if sound_file == "":
+                # Piper speaks: always without XTTS, and in its place when XTTS does not answer
+                before = "" if xtts_problem == "" else f"XTTS could not speak ({xtts_problem}), and Piper could not step in. "
+                model = self.__piper_folder.joinpath(*MODELS_SUBFOLDER) / (voice_folder.lower().replace(" ", "") + MODEL_ENDING)
+                if not self.__is_stand_in:
+                    if not os.path.isfile(self.__piper_command[0]):
+                        return False, (f"{before}Piper is not installed where the server looks for it ({self.__piper_command[0]}). The player has to copy "
+                                       "the folder 'piper' of the Mantella download there, or name its folder as piper_folder in companion.ini."), 0
+                    if not model.is_file():
+                        return False, f"{before}Piper has no voice model for your voice '{voice_folder}' ({model}).", 0
+                try:
+                    sound_file = self.__synthesize(cleaned, str(model))
+                except (OSError, RuntimeError) as error:
+                    self.__stop_piper()
+                    return False, f"{before}Piper could not make the sound: {error}", 0
             # Without a lip file of its own, the sentence gets the placeholder: the lips of the sentence before would not fit
             lip_file = ""
             if self.__lips is not None and self.__are_lips_on:
@@ -217,6 +243,27 @@ class CompanionVoice:
                 return True, "", line
             return False, (f"The server could not write the sound into {target_folder}: {last_error}. If that is a missing permission, "
                            "the player has to run build.py --install of the game mod again (as administrator)."), 0
+
+    def __make_with_xtts(self, text: str) -> tuple[str, str]:
+        """Lets the XTTS server speak, if one is wanted
+
+        Returns:
+            The sound file and an empty text, or an empty text and why XTTS could not speak (both empty without XTTS)
+        """
+        if self.__xtts is None:
+            return "", ""
+        sound_file = os.path.join(self.__work_folder, XTTS_OUTPUT_FILE)
+        try:
+            self.__xtts.make(text, sound_file)
+        except (OSError, RuntimeError) as error:
+            if not self.__is_xtts_down:
+                print(f"Voice: {error}. Piper speaks until the XTTS server answers again.", flush=True)
+            self.__is_xtts_down = True
+            return "", str(error)
+        if self.__is_xtts_down:
+            print("Voice: the XTTS server answers again.", flush=True)
+        self.__is_xtts_down = False
+        return sound_file, ""
 
     def __synthesize(self, text: str, model: str) -> str:
         self.__start_piper()
