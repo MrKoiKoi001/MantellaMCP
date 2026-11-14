@@ -2054,3 +2054,31 @@ def test_run_goes_to_the_game_and_the_state_tells_who_runs():
         assert tools[0]["inputSchema"]["properties"]["run"]["type"] == "boolean"
         assert "run instead of walk" in tools[0]["description"] and "only your lips, head and face move" in tools[0]["description"]
         assert "none" in tools[0]["inputSchema"]["properties"]["manner"]["enum"]
+
+
+def test_the_settings_say_which_game_is_played(tmp_path):
+    from src.companion.settings import DEFAULT_GAME_FOLDER_SE, load_settings
+    from src.companion.voice import DEFAULT_GAME_FOLDER
+
+    # A new file, and one from before this setting: the game is Skyrim VR
+    file = tmp_path / "companion.ini"
+    settings, _ = load_settings(str(file))
+    assert (settings.vr, settings.game_folder) == (True, DEFAULT_GAME_FOLDER) and load_settings(str(file))[0] == settings
+    file.write_text("[companion]\ngame_folder = X:\\VR\n", encoding="utf-8")
+    assert load_settings(str(file))[0].game_folder == "X:\\VR"
+    # vr = off: the folder of Skyrim Special Edition counts, the one named or the usual one
+    file.write_text("[companion]\nvr = off\ngame_folder = X:\\VR\ngame_folder_se = Y:\\SE\n", encoding="utf-8")
+    settings, _ = load_settings(str(file))
+    assert (settings.vr, settings.game_folder) == (False, "Y:\\SE")
+    file.write_text("[companion]\nvr = off\ngame_folder = X:\\VR\n", encoding="utf-8")
+    assert load_settings(str(file))[0].game_folder == DEFAULT_GAME_FOLDER_SE
+
+
+def test_say_tells_the_game_how_long_the_sentence_is():
+    # The game mod needs the length when the companion first walks over or turns to another character
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "walk over first" in tools[0]["description"]
+    from src.companion.command_queue import CompanionCommandQueue
+    import inspect
+    assert "say_ms" in inspect.signature(CompanionCommandQueue.send_command).parameters

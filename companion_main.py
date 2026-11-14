@@ -87,6 +87,7 @@ def main():
     if xtts_start != "":
         print(f"  XTTS server: {xtts_start}")
     print(f"  Voice of the companion (command say): {voice.describe_setup()}")
+    print(f"  Game: {'Skyrim VR' if settings.vr else 'Skyrim Special Edition'} in {game_folder}")
     print(f"  Volume of the voice: {settings.voice_volume} %, hands move while talking: {'on' if settings.talk_gestures else 'off'}")
     print(f"  The game's own sentences of the companion: {'cut off' if settings.mute_game_lines else 'left as they are'}")
     print(f"  Lips of the companion: {voice.describe_lips()}")

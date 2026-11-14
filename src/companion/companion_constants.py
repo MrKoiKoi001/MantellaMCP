@@ -185,6 +185,9 @@ class companion_constants:
     KEY_COMMAND_SAY_NUMBER: str = "companion_say_number"
     # say: the number of the look the face takes on while the companion speaks (FACE_NONE = none)
     KEY_COMMAND_FACE: str = "companion_face"
+    # say: how long the sound of the sentence is in milliseconds. The game mod needs it when the sentence starts later,
+    # because the companion first turns to or walks over to another character
+    KEY_COMMAND_SAY_MS: str = "companion_say_ms"
     # move_to, move, enter and follow: 1 = the companion runs instead of walking (the argument 'run' of COMMAND)
     KEY_COMMAND_RUN: str = "companion_run"
     FACE_NONE: int = -1

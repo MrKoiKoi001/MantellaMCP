@@ -14,6 +14,10 @@ from src.companion.xtts import DEFAULT_XTTS_LANGUAGE, DEFAULT_XTTS_URL, DEFAULT_
 SETTINGS_FILE: str = "companion.ini"
 SECTION: str = "companion"
 KEY_GAME_FOLDER: str = "game_folder"
+KEY_VR: str = "vr"
+KEY_GAME_FOLDER_SE: str = "game_folder_se"
+DEFAULT_GAME_FOLDER_SE: str = r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition"
+OFF_WORDS: list[str] = ["off", "no", "false", "0"]
 KEY_PIPER_FOLDER: str = "piper_folder"
 KEY_VOICE: str = "voice"
 KEY_XTTS_URL: str = "xtts_url"
@@ -39,9 +43,19 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 
 [{SECTION}]
 
-; The folder of the game, for the voice of the companion (command say).
+; Which game the companion plays in. The server and build.py of the game mod both go by this.
+; on = Skyrim VR, in the folder {KEY_GAME_FOLDER}
+; off = Skyrim Special Edition (without VR), in the folder {KEY_GAME_FOLDER_SE}
+; After changing this: run build.py --install of the game mod and start the server anew.
+{KEY_VR} = on
+
+; The folder of Skyrim VR.
 ; Empty: {DEFAULT_GAME_FOLDER}
 {KEY_GAME_FOLDER} =
+
+; The folder of Skyrim Special Edition.
+; Empty: {DEFAULT_GAME_FOLDER_SE}
+{KEY_GAME_FOLDER_SE} =
 
 ; The folder with piper.exe from the Mantella download, which makes the voice.
 ; Empty: the folder "piper" next to the server
@@ -112,7 +126,9 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 
 @dataclass
 class CompanionSettings:
+    # The folder of the game that is played: the one of Skyrim VR or the one of Skyrim Special Edition, as 'vr' says
     game_folder: str = DEFAULT_GAME_FOLDER
+    vr: bool = True
     piper_folder: str = DEFAULT_PIPER_FOLDER
     voice: str = VOICE_PIPER
     xtts_url: str = DEFAULT_XTTS_URL
@@ -157,7 +173,12 @@ def load_settings(file: str = SETTINGS_FILE) -> tuple[CompanionSettings, str]:
         # Someone who copies a folder out of the Explorer gets it with quotation marks around it
         return parser.get(SECTION, key, fallback="").strip().strip('"').strip()
 
-    settings.game_folder = read(KEY_GAME_FOLDER) or DEFAULT_GAME_FOLDER
+    # A file from before this setting says nothing about it, and then the game is Skyrim VR
+    settings.vr = read(KEY_VR).lower() not in OFF_WORDS
+    if settings.vr:
+        settings.game_folder = read(KEY_GAME_FOLDER) or DEFAULT_GAME_FOLDER
+    else:
+        settings.game_folder = read(KEY_GAME_FOLDER_SE) or DEFAULT_GAME_FOLDER_SE
     settings.piper_folder = read(KEY_PIPER_FOLDER) or DEFAULT_PIPER_FOLDER
     # Anything but xtts leaves Piper to speak, a typing mistake too
     settings.voice = VOICE_XTTS if read(KEY_VOICE).lower() == VOICE_XTTS else VOICE_PIPER

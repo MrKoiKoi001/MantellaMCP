@@ -107,7 +107,7 @@ class CompanionCommandQueue:
                            count: int = 1, item: str = "", things: bool = False, around_companion: bool = False,
                            stats: bool = False, visible: bool = False, space: bool = False, find: str = "",
                            talk: str = "", say_number: int = 0, face: int = consts.FACE_NONE,
-                           run: bool = False) -> dict[str, Any]:
+                           run: bool = False, say_ms: int = 0) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -126,6 +126,7 @@ class CompanionCommandQueue:
             say_number: For say, say_talk and say_end: the number of the sentence
             face: For say: the number of the look on the companion's face while it speaks, FACE_NONE = none
             run: For move_to, move, enter and follow: whether the companion runs instead of walking
+            say_ms: For say: how long the sound of the sentence is in milliseconds
             things: For report_state: whether the state should carry the things close to the player.
                 'count' is then how many characters (and things of each kind) the state should list at most
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
@@ -161,6 +162,7 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_SAY_NUMBER: say_number,
                 consts.KEY_COMMAND_FACE: face,
                 consts.KEY_COMMAND_RUN: int(run),
+                consts.KEY_COMMAND_SAY_MS: say_ms,
                 consts.KEY_COMMAND_MUTE: int(self.mutes_game_lines),
             }
             self.__pending_commands.append(command)

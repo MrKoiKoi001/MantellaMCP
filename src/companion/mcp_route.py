@@ -16,7 +16,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.21"
+SERVER_VERSION: str = "0.22"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -124,6 +124,8 @@ TOOLS: list[dict[str, Any]] = [
             "target = whom you speak to; nothing = the player. You turn to them and look at them while you speak, and "
             "afterwards your eyes are free again (or back on what look_at holds; while look_at holds and you name no "
             "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
+            "To another character you stop, walk over first if they are more than about 5 meters away, turn to them and "
+            "then speak; afterwards you follow the player again if you did before. No wait or face is needed for that. "
             "manner = how you speak, it moves your hands and face to match for this sentence: " + MANNER_NAMES + ". "
             "Nothing = neutral, with hands that vary on their own. A look you set with expression stays on your face. "
             "While you walk or fight you keep moving and only your lips, head and face move. "
@@ -429,7 +431,8 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                 _speech_task.cancel()
                 _speech_task = None
             result = await queue.send_command(action, target=target, detail=clean_text(detail), count=line, talk=talk, item=idle,
-                                              say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE))
+                                              say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE),
+                                              say_ms=int(seconds * 1000))
             is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
             state = await queue.peek_state()
             protocol = state.get("protocol") if isinstance(state, dict) else 0
