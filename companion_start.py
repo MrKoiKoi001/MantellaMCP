@@ -101,10 +101,13 @@ def print_box(lines: list[str]):
 def is_program_running(program_name: str) -> bool:
     """Whether Windows lists a running program with this file name (eg ModOrganizer.exe)"""
     try:
-        listing = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {program_name}", "/NH"], capture_output=True, text=True, timeout=15)
+        # The answer is read as bytes: tasklist writes in the code page of the console, not in the one Python expects.
+        # On a German Windows its message that no such program runs has an umlaut that broke the reading as text
+        listing = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {program_name}", "/NH"], capture_output=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return False
-    return program_name.lower() in listing.stdout.lower()
+    listed = (listing.stdout or b"").decode("ascii", errors="replace")
+    return program_name.lower() in listed.lower()
 
 
 def start_mod_organizer(settings_file: str) -> None:
