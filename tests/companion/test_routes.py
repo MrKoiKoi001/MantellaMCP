@@ -497,6 +497,7 @@ def test_inventory_only_comes_when_asked_for():
         "- Ammunition: Iron Arrow 0001397D x24",
         "- Armor and clothing: Iron Shield 00012EB6 (equipped)",
         "- Potions and food: Potion of Minor Healing 0003EADD x2",
+        "Spells you know (cast_spell): Healing Hands 0004D3F2",
         "The player's inventory:",
         "- Weapons: Iron Sword 00012E49 (equipped)",
         "- Potions and food: Potion of Minor Healing 0003EADD x5",
@@ -504,7 +505,7 @@ def test_inventory_only_comes_when_asked_for():
     ]
     assert not any("inventory" in line for line in text_for(both))
     both["inventory_own"]["total"] = 143
-    assert text_for(both, consts.INVENTORY_OWN)[-1] == "- The list is cut off: only the first 120 of 143 kinds of items were checked."
+    assert text_for(both, consts.INVENTORY_OWN)[-2] == "- The list is cut off: only the first 120 of 143 kinds of items were checked."
     assert "The player's inventory:" not in text_for(both, consts.INVENTORY_OWN)
     assert text_for(read_game_state(build_state()), "", True)[-1] == "The game did not send the inventory in time. Ask again."
     assert "inventory_own" not in read_game_state(build_state(inventory=consts.INVENTORY_PLAYER))
@@ -2173,3 +2174,47 @@ def test_space_looks_into_one_direction_as_far_and_as_wide_as_asked():
         tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"space": True}}))
         command = received_commands[2]
         assert (command[consts.KEY_COMMAND_SPACE], command[consts.KEY_COMMAND_SPACE_DEGREES], command[consts.KEY_COMMAND_SPACE_ANGLE]) == (1, -1, 360)
+
+
+def test_spells_are_listed_with_the_own_inventory_and_cast_by_id_or_name():
+    from src.companion.fake_game import SPELL_REF_ID, build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.ref_ids import split_form_id, parse_ref_id
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, wanted: str) -> str:
+        return describe_state({"connected": True, "fresh": True, "state": read_game_state(raw), "inventory_wanted": wanted})
+
+    # The spells come with the own inventory, each with its ID
+    assert f"Spells you know (cast_spell): Healing Hands {SPELL_REF_ID}" in text_for(build_state(inventory="own"), "own")
+    assert "Spells you know" not in text_for(build_state(inventory="player"), "player")
+    # A companion that knows none is told how to learn one. A game mod that does not know spells says nothing
+    none = build_state(inventory="own")
+    none["spells"] = [0]
+    del none["spells_names"]
+    assert "Spells you know: none. Read a spell tome" in text_for(none, "own")
+    del none["spells"]
+    assert "Spells you know" not in text_for(none, "own")
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            results: list[dict] = []
+            for _ in range(3):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state(), consts.KEY_RESULTS: results}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                results = [{consts.KEY_COMMAND_ID: command[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You cast it."}
+                           for command in reply[consts.KEY_COMMANDS]]
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # By its ID: the game gets the ID in two halves, like the item of loot. On the player
+        rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cast_spell", "detail": SPELL_REF_ID.lower(), "target": "00000014"}})
+        command = received_commands[0]
+        assert (command[consts.KEY_COMMAND_ITEM_HIGH], command[consts.KEY_COMMAND_ITEM_LOW]) == split_form_id(parse_ref_id(SPELL_REF_ID))
+        assert command[consts.KEY_COMMAND_TARGET] == "00000014"
+        # By its name: no ID goes along, the game looks the name up. A short name that could be hex digits stays a name
+        rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cast_spell", "detail": "Fade"}})
+        command = received_commands[1]
+        assert (command[consts.KEY_COMMAND_ITEM_HIGH], command[consts.KEY_COMMAND_ITEM_LOW], command[consts.KEY_COMMAND_DETAIL]) == (0, 0, "Fade")

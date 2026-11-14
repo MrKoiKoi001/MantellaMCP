@@ -128,6 +128,11 @@ KEY_INVENTORY_PLAYER: str = "inventory_player"
 # and its name under KEY_CORPSE_NAME. A locked container comes without an inventory.
 # All of it is missing if the game found no such body or container
 KEY_INVENTORY_CORPSE: str = "inventory_corpse"
+# Comes with the own inventory, from a game mod that knows spells: how many spells the companion knows, then
+# VALUES_PER_SPELL numbers per spell: its form ID and what it costs in magicka. The names are under the same key
+# with NAMES_SUFFIX, built like KEY_NEARBY_NAMES
+KEY_SPELLS: str = "spells"
+VALUES_PER_SPELL: int = 2
 KEY_CORPSE: str = "corpse"
 KEY_CORPSE_NAME: str = "corpse_name"
 # What became of the commands loot, move_to and sit since the last state, as text for the AI. Missing if that is nothing
@@ -340,6 +345,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         inventory = _read_inventory(raw, key)
         if inventory is not None:
             state[key] = inventory
+    spells = _read_spells(raw)
+    if spells is not None:
+        state["spells"] = spells
     corpse_values = _numbers(raw.get(KEY_CORPSE))
     # On a body and in a chest the gold is something to take, so it stays in the list
     corpse_inventory = _read_inventory(raw, KEY_INVENTORY_CORPSE, is_gold_listed=True)
@@ -657,6 +665,21 @@ def _read_found(raw_found: Any) -> list[dict[str, Any]]:
             match["dead"] = flag != 0
         found.append(match)
     return found
+
+
+def _read_spells(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The spells the companion knows, or None if the game mod sent none (it only does with the own inventory)"""
+    values = _numbers(raw.get(KEY_SPELLS))
+    if values is None or len(values) == 0 or len(values) != 1 + values[0] * VALUES_PER_SPELL:
+        return None
+    names = _names_by_place(raw.get(KEY_SPELLS + NAMES_SUFFIX))
+    spells: list[dict[str, Any]] = []
+    for place in range(values[0]):
+        form_id, magicka = values[1 + place * VALUES_PER_SPELL:1 + (place + 1) * VALUES_PER_SPELL]
+        name = names.get(place, "")
+        if name != "":
+            spells.append({"id": format_ref_id(form_id & 0xFFFFFFFF), "name": _tidy_name(name), "magicka": magicka})
+    return spells
 
 
 def _read_space_look(raw_info: Any) -> dict[str, int] | None:

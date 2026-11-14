@@ -165,6 +165,7 @@ def describe_state(state_result: dict[str, Any]) -> str:
     wanted = state_result.get("inventory_wanted")
     if wanted in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
         lines.extend(_describe_inventory("Your inventory", state.get(KEY_INVENTORY_OWN)))
+        lines.extend(_describe_spells(state.get("spells")))
     if wanted in (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH):
         lines.extend(_describe_inventory("The player's inventory", state.get(KEY_INVENTORY_PLAYER)))
     corpse_wanted = state_result.get("corpse_wanted")
@@ -274,6 +275,16 @@ def _describe_gear(player: Any, companion: Any) -> str:
     if len(parts) == 0:
         return ""
     return "Gear: " + ", ".join(parts)
+
+
+def _describe_spells(spells: Any) -> list[str]:
+    """One line with the spells the companion knows, each with its ID for the command cast_spell.
+    Nothing from a game mod that does not know spells yet"""
+    if not isinstance(spells, list):
+        return []
+    if len(spells) == 0:
+        return ["Spells you know: none. Read a spell tome to learn one (equip on the tome)."]
+    return ["Spells you know (cast_spell): " + ", ".join(f"{spell.get('name')} {spell.get('id')}" for spell in spells)]
 
 
 def _describe_inventory(title: str, inventory: Any) -> list[str]:

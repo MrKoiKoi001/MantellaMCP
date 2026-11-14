@@ -82,6 +82,7 @@ SPACE: list[int] = [1, 3, -1,  0, 0, -1,  0, 0, 4,  2, 8, -1,  0, 0, -1,  0, 0, 
 # A look into one direction: three rays, from the left edge of the angle to the right one. And where the companion faces
 SPACE_LOOK: list[int] = [0, 0, -1,  1, 40, -1,  0, 0, 12]
 SPACE_FACING_DEGREES: int = 90
+SPELL_REF_ID: str = "0004D3F2"
 CHEST_REF_ID: str = "0005A400"
 LOCKED_CHEST_REF_ID: str = "0005A401"
 # What the chest among the THINGS holds
@@ -215,6 +216,10 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
     for key, items, choices in wanted_inventories:
         if inventory in choices:
             state[key], state[key + game_state.NAMES_SUFFIX] = build_inventory(items)
+    # The spells the companion knows go along with its own inventory: how many, then form ID and magicka cost of each
+    if inventory in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
+        state[game_state.KEY_SPELLS] = [1, to_papyrus_number(SPELL_REF_ID), 25]
+        state[game_state.KEY_SPELLS + game_state.NAMES_SUFFIX] = ["0:Healing Hands"]
     # Three numbers for what the server asked about: ref ID, container or body, locked. A locked container has no inventory
     names_key = game_state.KEY_INVENTORY_CORPSE + game_state.NAMES_SUFFIX
     if inventory == consts.INVENTORY_CORPSE and corpse_ref_id == CORPSE_REF_ID:

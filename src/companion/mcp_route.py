@@ -16,7 +16,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.24"
+SERVER_VERSION: str = "0.25"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -41,6 +41,8 @@ ARGUMENT_AROUND: str = "around"
 ARGUMENT_STATS: str = "stats"
 ARGUMENT_VISIBLE: str = "visible"
 ARGUMENT_SPACE: str = "space"
+# A spell is named by its ID (this many hex digits, as STATE lists it) or by its name
+SPELL_ID_LENGTH: int = 8
 ARGUMENT_SPACE_DIRECTION: str = "space_direction"
 ARGUMENT_SPACE_METERS: str = "space_meters"
 ARGUMENT_SPACE_ANGLE: str = "space_angle"
@@ -143,12 +145,15 @@ TOOLS: list[dict[str, Any]] = [
             "ref_id, without a target it is the door nearest to you. You have to stand within about 5 meters of it; if not, "
             "the answer names its ref_id for move_to. The doors from 'Doors' lead into another place, those are for 'enter'. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
-            "equip = hold or wear the item, or drink or eat it if it is a potion or food, "
+            "equip = hold or wear the item, or drink or eat it if it is a potion or food. equip on a spell tome reads it: "
+            "you know its spell from then on and the tome is used up, "
             "unequip = put the item away, "
             "give = hand the item to the player, take = take the item out of the player's inventory "
             "(only when the player wants it). For give and take 'detail' says how many: a number or 'all', nothing = 1. "
-            "Not built into the game mod yet: "
-            "cast_spell = cast the spell named in 'detail' on the target (no target = on yourself)."
+            "cast_spell = cast a spell you know: its ID or its exact name in 'detail', and whom you cast it on as the target "
+            "(the player's ref_id to heal the player; no target for a spell on yourself). STATE with inventory 'own' lists "
+            "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
+            "for a tome if you know none. The spell works at once and costs you no magicka."
         ),
         "inputSchema": {
             "type": "object",
@@ -566,8 +571,13 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                 item = pick_animation(detail)
                 if item == "":
                     return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}"}, True)
-        if action == consts.ACTION_CAST_SPELL and detail == "":
-            return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the spell name in 'detail'."}, True)
+        if action == consts.ACTION_CAST_SPELL:
+            if detail == "":
+                return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the ID or the name of the spell in 'detail'. STATE with inventory 'own' lists the spells you know."}, True)
+            # Eight hex digits are the ID of the spell from STATE, anything else is its name
+            spell_form_id = parse_ref_id(detail) if len(detail) == SPELL_ID_LENGTH else None
+            if spell_form_id is not None and spell_form_id != 0:
+                item = format_ref_id(spell_form_id)
         is_run = arguments.get("run") is True and action in consts.ACTIONS_WITH_RUN
         result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run)
         is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
