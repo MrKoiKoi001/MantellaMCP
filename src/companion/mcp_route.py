@@ -16,7 +16,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.23"
+SERVER_VERSION: str = "0.24"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -66,7 +66,11 @@ SERVER_INSTRUCTIONS: str = (
     "STATE takes the game about a second, and its answer stays in the conversation. So call it only when you need "
     "something you do not know yet: before you pick a target, or when the player asks about the surroundings. "
     "Do not call it again and again during a fight just to keep watching. "
-    "The game's built-in follower AI handles moment-to-moment fighting and walking; you only set the direction."
+    "The game's built-in follower AI handles moment-to-moment fighting and walking; you only set the direction. "
+    "With say you speak as the character in the game. Say there only what the character itself can see or know: "
+    "nothing behind its back, behind walls or too far away to see. What you know from STATE but the character cannot, "
+    "tell the player outside the game instead: in the chat, as a narrator in the third person "
+    "(eg 'to the left of our hero a wolf lies in wait')."
 )
 
 TOOLS: list[dict[str, Any]] = [
