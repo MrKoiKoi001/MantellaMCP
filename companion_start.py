@@ -95,6 +95,36 @@ def print_box(lines: list[str]):
     print("", flush=True)
 
 
+def is_program_running(program_name: str) -> bool:
+    """Whether Windows lists a running program with this file name (eg ModOrganizer.exe)"""
+    try:
+        listing = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {program_name}", "/NH"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return program_name.lower() in listing.stdout.lower()
+
+
+def start_mod_organizer(settings_file: str) -> None:
+    """Starts the Mod Organizer the settings name for the game that is played, unless one is running already.
+    It runs on its own: it stays open when this script ends"""
+    from src.companion.settings import SETTINGS_FILE, load_settings
+    settings, _ = load_settings(settings_file or SETTINGS_FILE)
+    program = settings.mod_organizer
+    if program == "":
+        return
+    if not os.path.isfile(program):
+        print(f"Mod Organizer was not found at {program} (see mod_organizer in companion.ini).", flush=True)
+        return
+    if is_program_running(os.path.basename(program)):
+        print("Mod Organizer is running already.", flush=True)
+        return
+    try:
+        subprocess.Popen([program], cwd=os.path.dirname(program), creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        print(f"Mod Organizer started: {program}", flush=True)
+    except OSError as error:
+        print(f"Mod Organizer could not be started ({error}).", flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Starts the companion server, the tunnel and optionally the fake game")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -107,6 +137,7 @@ def main() -> int:
     args = parser.parse_args()
 
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    start_mod_organizer(args.settings)
 
     cloudflared_path = None
     if not args.no_tunnel:
