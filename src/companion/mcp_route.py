@@ -16,7 +16,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.22"
+SERVER_VERSION: str = "0.23"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -41,6 +41,9 @@ ARGUMENT_AROUND: str = "around"
 ARGUMENT_STATS: str = "stats"
 ARGUMENT_VISIBLE: str = "visible"
 ARGUMENT_SPACE: str = "space"
+ARGUMENT_SPACE_DIRECTION: str = "space_direction"
+ARGUMENT_SPACE_METERS: str = "space_meters"
+ARGUMENT_SPACE_ANGLE: str = "space_angle"
 ARGUMENT_FIND: str = "find"
 MAX_FIND_LENGTH: int = 60
 COMPASS_NAMES: str = ", ".join(consts.COMPASS_NAMES)
@@ -187,6 +190,10 @@ TOOLS: list[dict[str, Any]] = [
             "ground that rises, a DROP (the ground falls away after that many meters) and the directions that are open. "
             "The rays go at chest height, so low things like a table or a fence do not show. Ask for it before you walk "
             "somewhere with the command move, or when the player asks what the place is like. "
+            f"You can also look into one direction and further: 'space_direction' (a point of the compass or seen from where you face, "
+            f"like for move), 'space_meters' (up to {consts.SPACE_HIGHEST_METERS}) and 'space_angle' (how wide the rays fan out, "
+            f"{consts.SPACE_DEFAULT_LOOK_DEGREES} degrees if you say nothing, a small angle for a narrow look). Each of them asks for the space by itself. "
+            "Outdoors the game only knows about 120 meters around the player, further out a ray finds nothing. "
             "'Things' only comes when you ask for it with 'things': what stands and lies within about 10 meters of the player, "
             "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; tables are just called 'Table'), containers such as "
             "chests and barrels (see the command loot; 'locked' if you cannot open it) and items that lie around "
@@ -238,6 +245,9 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_STATS: {"type": "boolean", "description": "true = also give the level, the skills and so on of the player, and your own level. Only when the talk is about that."},
                 ARGUMENT_FIND: {"type": "string", "description": "A name or a part of one: also list everything in the loaded area with that name (characters, doors, places, things), eg 'Warmaiden' or 'Balgruuf'."},
                 ARGUMENT_SPACE: {"type": "boolean", "description": "true = also say where walls, rising ground and drops are around your own character (rays in eight directions). Only when you need it."},
+                ARGUMENT_SPACE_DIRECTION: {"type": "string", "description": f"Look into one direction instead of all around: a point of the compass ({COMPASS_NAMES}) or seen from where you face ({RELATIVE_NAMES}). Asks for the space by itself."},
+                ARGUMENT_SPACE_METERS: {"type": "integer", "description": f"How far the rays of 'space' reach in meters. Nothing = {consts.SPACE_DEFAULT_METERS}, at most {consts.SPACE_HIGHEST_METERS}."},
+                ARGUMENT_SPACE_ANGLE: {"type": "integer", "description": f"With a direction: over how many degrees the rays fan out around it (0 = one ray, nothing = {consts.SPACE_DEFAULT_LOOK_DEGREES}, 360 = all around). Without a direction it looks straight ahead."},
                 ARGUMENT_VISIBLE: {"type": "boolean", "description": "true = only what can be seen: in front of the viewer and not behind a wall. The viewer is the one 'around' names."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
@@ -355,11 +365,44 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
         around = str(arguments.get(ARGUMENT_AROUND, "") or "").strip().lower()
         # The text goes into a line for the game mod, so it stays one short line
         find = " ".join(str(arguments.get(ARGUMENT_FIND, "") or "").split())[:MAX_FIND_LENGTH]
+        # space: all around as always, or into one direction, further and as wide as the AI says
+        space_meters = arguments.get(ARGUMENT_SPACE_METERS)
+        if not isinstance(space_meters, int) or isinstance(space_meters, bool) or space_meters < 1:
+            space_meters = 0
+        space_meters = min(space_meters, consts.SPACE_HIGHEST_METERS)
+        space_angle = arguments.get(ARGUMENT_SPACE_ANGLE)
+        has_space_angle = isinstance(space_angle, int) and not isinstance(space_angle, bool)
+        space_angle = min(max(space_angle, 0), consts.SPACE_FULL_CIRCLE_DEGREES) if has_space_angle else consts.SPACE_FULL_CIRCLE_DEGREES
+        space_degrees = consts.SPACE_NO_DIRECTION
+        is_space_from_facing = False
+        space_direction = "-".join(str(arguments.get(ARGUMENT_SPACE_DIRECTION, "") or "").lower().replace("_", " ").split())
+        if space_direction != "":
+            compass_word = consts.COMPASS_OTHER_WORDS.get(space_direction, space_direction)
+            relative_word = consts.RELATIVE_OTHER_WORDS.get(space_direction, space_direction)
+            if compass_word in consts.COMPASS_NAMES:
+                space_direction = compass_word
+                space_degrees = consts.COMPASS_NAMES.index(compass_word) * consts.DEGREES_PER_DIRECTION
+            elif relative_word in consts.RELATIVE_NAMES:
+                space_direction = relative_word
+                space_degrees = consts.RELATIVE_NAMES.index(relative_word) * consts.DEGREES_PER_DIRECTION
+                is_space_from_facing = True
+            else:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no direction '{space_direction}' to look into. 'space_direction' takes a point of the compass ({COMPASS_NAMES}) or a direction seen from where you face ({RELATIVE_NAMES})."}, True)
+            if not has_space_angle:
+                space_angle = consts.SPACE_DEFAULT_LOOK_DEGREES
+        elif has_space_angle and space_angle < consts.SPACE_FULL_CIRCLE_DEGREES:
+            # An angle without a direction: the look goes straight ahead
+            space_direction = consts.RELATIVE_NAMES[0]
+            space_degrees = 0
+            is_space_from_facing = True
+        is_space_wanted = arguments.get(ARGUMENT_SPACE) is True or space_direction != "" or space_meters > 0 or has_space_angle
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
                                              max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS,
                                              stats=arguments.get(ARGUMENT_STATS) is True,
                                              visible=arguments.get(ARGUMENT_VISIBLE) is True,
-                                             space=arguments.get(ARGUMENT_SPACE) is True, find=find)
+                                             space=is_space_wanted, find=find, space_meters=space_meters,
+                                             space_degrees=space_degrees, space_from_facing=is_space_from_facing,
+                                             space_angle=space_angle, space_direction=space_direction)
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)

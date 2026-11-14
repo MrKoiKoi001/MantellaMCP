@@ -82,6 +82,14 @@ KEY_TRAPS: str = "traps"
 # what the ray met (see SPACE_OBSTACLES), how far away in meters, after how many meters the ground drops away (SPACE_NO_DROP = it does not).
 # The SKSE plugin of the game mod measures this (GetSurroundings in plugin.cpp of the plugin repository)
 KEY_SPACE: str = "space"
+# Comes with KEY_SPACE from a game mod whose plugin can look into one direction (interface version 13). How the rays
+# looked, SPACE_INFO_COUNT numbers: the middle of the look as a point of the compass in degrees (0 = north, 90 = east),
+# the angle the rays fan out over (SPACE_FULL_CIRCLE = all around: the first ray goes into the direction, the others
+# clockwise from there; less: the rays go from the left edge of the angle to the right one), how far they reach in
+# meters, and where the companion faces in degrees
+KEY_SPACE_INFO: str = "space_info"
+SPACE_INFO_COUNT: int = 4
+SPACE_FULL_CIRCLE: int = 360
 # Only when the server asked for a search by name: the text that was looked for, and one text per match, nearest first,
 # built like the lines of the things: kind (see FOUND_KINDS), ref ID, distance, angle, for a character 1 if it is dead, name
 # (for a door: of the place it leads to). No list means nothing was found.
@@ -371,9 +379,12 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     if isinstance(found_for, str) and found_for.strip() != "":
         state["found_for"] = found_for.strip()
         state["found"] = _read_found(raw.get(KEY_FOUND))
-    space = _read_space(raw.get(KEY_SPACE))
+    space_look = _read_space_look(raw.get(KEY_SPACE_INFO))
+    space = _read_space(raw.get(KEY_SPACE), space_look)
     if len(space) > 0:
         state["space"] = space
+        if space_look is not None:
+            state["space_look"] = space_look
     _add_view_of_companion(state)
 
     times = _numbers(raw.get(KEY_TIMES))
@@ -648,8 +659,20 @@ def _read_found(raw_found: Any) -> list[dict[str, Any]]:
     return found
 
 
-def _read_space(raw_space: Any) -> list[dict[str, Any]]:
-    """What the rays found around the companion, one entry per direction, clockwise from straight ahead.
+def _read_space_look(raw_info: Any) -> dict[str, int] | None:
+    """How the rays looked, or None if the game mod did not say (its plugin is older than interface version 13)"""
+    values = _numbers(raw_info)
+    if values is None or len(values) != SPACE_INFO_COUNT:
+        return None
+    heading, angle, meters, facing = values
+    return {"heading_degrees": heading % FULL_CIRCLE_DEGREES, "angle_degrees": min(max(angle, 0), SPACE_FULL_CIRCLE),
+            "meters": meters, "facing_degrees": facing % FULL_CIRCLE_DEGREES}
+
+
+def _read_space(raw_space: Any, look: dict[str, int] | None = None) -> list[dict[str, Any]]:
+    """What the rays found around the companion, one entry per ray. Without 'look' the rays go all around, clockwise from
+    straight ahead. With it they went as it says, and every entry also carries its point of the compass ('compass_degrees')
+    and how far it is turned away from the middle of the look ('offset_degrees', negative = left).
     An empty list if the game sent nothing that can be read"""
     values = _numbers(raw_space)
     if values is None or len(values) == 0 or len(values) % SPACE_VALUES_PER_DIRECTION != 0:
@@ -660,6 +683,17 @@ def _read_space(raw_space: Any) -> list[dict[str, Any]]:
         obstacle, meters, drop_meters = values[place * SPACE_VALUES_PER_DIRECTION:(place + 1) * SPACE_VALUES_PER_DIRECTION]
         direction: dict[str, Any] = {"angle_degrees": _signed_angle(place * FULL_CIRCLE_DEGREES / direction_count),
                                      "obstacle": SPACE_OBSTACLES.get(obstacle, "")}
+        if look is not None:
+            if look["angle_degrees"] >= SPACE_FULL_CIRCLE:
+                offset = place * FULL_CIRCLE_DEGREES / direction_count
+            elif direction_count == 1:
+                offset = 0.0
+            else:
+                offset = place * look["angle_degrees"] / (direction_count - 1) - look["angle_degrees"] / 2
+            direction["offset_degrees"] = _signed_angle(offset)
+            direction["compass_degrees"] = round(look["heading_degrees"] + offset) % FULL_CIRCLE_DEGREES
+            # Seen from where the companion faces, like every other direction 'from you'
+            direction["angle_degrees"] = _signed_angle(look["heading_degrees"] + offset - look["facing_degrees"])
         if direction["obstacle"] != "":
             direction["obstacle_meters"] = meters
         if drop_meters != SPACE_NO_DROP:

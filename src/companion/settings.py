@@ -22,6 +22,7 @@ DEFAULT_GAME_FOLDER_SE: str = r"E:\SteamLibrary\steamapps\common\Skyrim Special 
 OFF_WORDS: list[str] = ["off", "no", "false", "0"]
 KEY_PIPER_FOLDER: str = "piper_folder"
 KEY_VOICE: str = "voice"
+KEY_PIPER_VOICE: str = "piper_voice"
 KEY_XTTS_URL: str = "xtts_url"
 KEY_XTTS_VOICE: str = "xtts_voice"
 KEY_XTTS_SPEED: str = "xtts_speed"
@@ -77,6 +78,13 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 ; After changing this, start the server anew and connect the AI anew: it is told which language to write in.
 ; Empty: {VOICE_PIPER}
 {KEY_VOICE} =
+
+; Only when Piper speaks: a voice model of your own instead of the voice the character has in the game, eg a German one.
+; Its name (the files <name>.onnx and <name>.onnx.json in the folder "models" of the Piper folder), or the .onnx file
+; with its folder. The AI is told to write in the language the model names in its .onnx.json.
+; Voices: https://huggingface.co/rhasspy/piper-voices (eg de/de_DE/eva_k/x_low)
+; Empty: the voice of the character (English)
+{KEY_PIPER_VOICE} =
 
 ; Only for {KEY_VOICE} = {VOICE_XTTS}: where the XTTS server listens.
 ; Empty: {DEFAULT_XTTS_URL}
@@ -147,6 +155,7 @@ class CompanionSettings:
     mod_organizer: str = ""
     piper_folder: str = DEFAULT_PIPER_FOLDER
     voice: str = VOICE_PIPER
+    piper_voice: str = ""
     xtts_url: str = DEFAULT_XTTS_URL
     xtts_voice: str = DEFAULT_XTTS_VOICE
     xtts_speed: float = DEFAULT_XTTS_SPEED
@@ -200,6 +209,7 @@ def load_settings(file: str = SETTINGS_FILE) -> tuple[CompanionSettings, str]:
     settings.piper_folder = read(KEY_PIPER_FOLDER) or DEFAULT_PIPER_FOLDER
     # Anything but xtts leaves Piper to speak, a typing mistake too
     settings.voice = VOICE_XTTS if read(KEY_VOICE).lower() == VOICE_XTTS else VOICE_PIPER
+    settings.piper_voice = read(KEY_PIPER_VOICE)
     settings.xtts_url = read(KEY_XTTS_URL) or DEFAULT_XTTS_URL
     settings.xtts_voice = read(KEY_XTTS_VOICE) or DEFAULT_XTTS_VOICE
     try:

@@ -107,7 +107,9 @@ class CompanionCommandQueue:
                            count: int = 1, item: str = "", things: bool = False, around_companion: bool = False,
                            stats: bool = False, visible: bool = False, space: bool = False, find: str = "",
                            talk: str = "", say_number: int = 0, face: int = consts.FACE_NONE,
-                           run: bool = False, say_ms: int = 0) -> dict[str, Any]:
+                           run: bool = False, say_ms: int = 0, space_meters: int = 0,
+                           space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
+                           space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -120,6 +122,11 @@ class CompanionCommandQueue:
             stats: For report_state: whether the state should carry the level, the skills and so on of the player
             visible: For report_state: whether the list of characters should only hold those the viewer can see
             space: For report_state: whether the state should carry what is around the companion as rays find it
+            space_meters: For report_state with space: how far the rays reach, 0 = the usual range
+            space_degrees: For report_state with space: the direction the rays look into in degrees,
+                SPACE_NO_DIRECTION = all around
+            space_from_facing: Whether space_degrees counts from where the companion faces (otherwise from north)
+            space_angle: For report_state with space and a direction: over how many degrees the rays fan out
             find: For report_state: a name, or a part of one, to look for in the whole loaded area
             talk: For say: the animation event that moves the hands of the companion while it talks, or empty
                 (an animation that goes by an ID instead goes into 'item')
@@ -157,6 +164,10 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_STATS: int(stats),
                 consts.KEY_COMMAND_VISIBLE: int(visible),
                 consts.KEY_COMMAND_SPACE: int(space),
+                consts.KEY_COMMAND_SPACE_METERS: space_meters,
+                consts.KEY_COMMAND_SPACE_DEGREES: space_degrees,
+                consts.KEY_COMMAND_SPACE_FACING: int(space_from_facing),
+                consts.KEY_COMMAND_SPACE_ANGLE: space_angle,
                 consts.KEY_COMMAND_FIND: find,
                 consts.KEY_COMMAND_TALK: talk,
                 consts.KEY_COMMAND_SAY_NUMBER: say_number,
@@ -190,7 +201,9 @@ class CompanionCommandQueue:
     async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "",
                         is_for_the_ai: bool = True, things: bool = False, max_lines: int = DEFAULT_MAX_LINES,
                         around_companion: bool = False, stats: bool = False, visible: bool = False,
-                        space: bool = False, find: str = "") -> dict[str, Any]:
+                        space: bool = False, find: str = "", space_meters: int = 0,
+                        space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
+                        space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "") -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
@@ -203,6 +216,8 @@ class CompanionCommandQueue:
             stats: Whether the fresh state should carry the level, the skills and so on of the player
             visible: Whether the fresh state should only list what the viewer can see
             space: Whether the fresh state should carry what is around the companion as rays find it (walls, drops)
+            space_meters, space_degrees, space_from_facing, space_angle: How the rays should look (see send_command)
+            space_direction: The word of the AI for the direction the rays look into, for the text of the answer (empty = none)
             find: A name, or a part of one, the game should look for in the whole loaded area (empty = no search)
             is_for_the_ai: False if the server itself needs the state (eg to pick a seat). Then what was heard and
                 what became of earlier commands stays kept for the next time the AI asks
@@ -225,7 +240,8 @@ class CompanionCommandQueue:
         if is_connected:
             request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory, count=max_lines, things=things,
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
-                                              find=find)
+                                              find=find, space_meters=space_meters, space_degrees=space_degrees,
+                                              space_from_facing=space_from_facing, space_angle=space_angle)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -258,6 +274,9 @@ class CompanionCommandQueue:
                 # The kept state may still carry the surroundings from an earlier question, and the companion has moved since
                 "space_wanted": space and is_fresh,
                 "space_missed": space and not is_fresh,
+                # How the AI wanted the rays to look. How they did look is in the state itself ('space_look')
+                "space_direction_wanted": space_direction,
+                "space_meters_wanted": space_meters,
                 # What the search was for. Whether the game did it is in the state itself ('found_for')
                 "find_wanted": find if is_fresh else "",
                 "find_missed": find != "" and not is_fresh,

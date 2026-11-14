@@ -45,6 +45,19 @@ class companion_constants:
     KEY_COMMAND_VISIBLE: str = PREFIX + "visible"
     # For report_state: 1 if the state should carry what is around the companion as rays find it (walls, drops)
     KEY_COMMAND_SPACE: str = PREFIX + "space"
+    # For report_state with 'space': how far the rays reach in meters (0 = SPACE_DEFAULT_METERS), the direction they look
+    # into in degrees (SPACE_NO_DIRECTION = all around, beginning straight ahead of the companion), 1 if those degrees
+    # count from where the companion faces (otherwise from north), and over how many degrees the rays fan out
+    KEY_COMMAND_SPACE_METERS: str = PREFIX + "space_meters"
+    KEY_COMMAND_SPACE_DEGREES: str = PREFIX + "space_degrees"
+    KEY_COMMAND_SPACE_FACING: str = PREFIX + "space_facing"
+    KEY_COMMAND_SPACE_ANGLE: str = PREFIX + "space_angle"
+    SPACE_NO_DIRECTION: int = -1
+    SPACE_DEFAULT_METERS: int = 15
+    SPACE_HIGHEST_METERS: int = 200
+    SPACE_FULL_CIRCLE_DEGREES: int = 360
+    # How wide the rays fan out if the AI names a direction but no angle
+    SPACE_DEFAULT_LOOK_DEGREES: int = 60
     # For report_state: a name, or a part of one, to look for in the whole loaded area (empty = no search)
     KEY_COMMAND_FIND: str = PREFIX + "find"
     # What the AI can name as the centre of those lists

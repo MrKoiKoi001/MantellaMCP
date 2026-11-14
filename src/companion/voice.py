@@ -19,6 +19,7 @@ called out (say with 'loud', see loudness.py).
 If the lip movement is switched on, a lip file made from the sound goes next to the sound file (see lips.py).
 """
 import csv
+import json
 import os
 import shutil
 import subprocess
@@ -45,6 +46,17 @@ OUTPUT_FILE: str = "out.wav"
 XTTS_OUTPUT_FILE: str = "out_xtts.wav"
 # The language Piper's voices of the game pronounce
 PIPER_LANGUAGE_NAME: str = "English"
+# Where a voice model of one's own is below the Piper folder (piper_voice in companion.ini), and the file next to it
+# that says which language it speaks
+OWN_MODELS_SUBFOLDER: str = "models"
+MODEL_NOTES_ENDING: str = ".onnx.json"
+# The languages a voice model names in its notes (the first two letters of eg de_DE), as words for the AI
+PIPER_LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English", "de": "German", "fr": "French", "es": "Spanish", "it": "Italian", "pt": "Portuguese", "pl": "Polish",
+    "tr": "Turkish", "ru": "Russian", "nl": "Dutch", "cs": "Czech", "hu": "Hungarian", "sv": "Swedish", "da": "Danish",
+    "fi": "Finnish", "uk": "Ukrainian",
+}
+LANGUAGE_CODE_LENGTH: int = 2
 FULL_VOLUME_PERCENT: int = 100
 # What ends a sentence. A sentence that is called out gets an exclamation mark, which XTTS speaks with more force
 SENTENCE_ENDINGS: str = ".!?"
@@ -109,7 +121,7 @@ class CompanionVoice:
 
     def __init__(self, game_folder: str = DEFAULT_GAME_FOLDER, piper_folder: str = DEFAULT_PIPER_FOLDER,
                  piper_command: list[str] | None = None, lips: LipSync | None = None, xtts: XttsVoice | None = None,
-                 volume_percent: int = FULL_VOLUME_PERCENT, talk_gestures: bool = False) -> None:
+                 volume_percent: int = FULL_VOLUME_PERCENT, talk_gestures: bool = False, piper_voice: str = "") -> None:
         """
         Args:
             piper_command: The command that starts Piper. Only tests set it, to put a stand-in in Piper's place
@@ -117,6 +129,8 @@ class CompanionVoice:
             xtts: Makes the sound instead of Piper, as long as its server answers. Without it Piper always speaks
             volume_percent: How loud the sound is put into the game: 100 = as the voice makes it, 200 = twice as loud
             talk_gestures: Whether the companion should move its hands while it talks (the game mod plays an animation then)
+            piper_voice: A voice model of one's own that Piper speaks with instead of the voice of the character: its name
+                (the file <piper folder>/models/<name>.onnx) or the file with its folder. Empty = the voice of the character
         """
         self.__volume: float = max(volume_percent, 1) / FULL_VOLUME_PERCENT
         self.__has_talk_gestures: bool = talk_gestures
@@ -130,6 +144,7 @@ class CompanionVoice:
         self.__are_lips_on: bool = lips is not None and lips.find_problem() == ""
         self.__game_folder: str = game_folder
         self.__piper_folder: Path = Path(piper_folder)
+        self.__own_model: Path | None = self.__find_own_model(piper_voice.strip())
         self.__piper_command: list[str] = piper_command if piper_command is not None else [str(self.__piper_folder / PIPER_PROGRAM)]
         self.__is_stand_in: bool = piper_command is not None
         self.__work_folder: str = tempfile.mkdtemp(prefix="companion_voice_")
@@ -155,6 +170,11 @@ class CompanionVoice:
                 return (f"on, but {problem}. Until it does, Piper speaks ({PIPER_LANGUAGE_NAME} pronunciation). "
                         f"Wanted: {self.__xtts.describe_setup()}, sound goes to {self.voice_root}")
             return f"on: {self.__xtts.describe_setup()} (Piper steps in if it stops answering), sound goes to {self.voice_root}"
+        if self.__own_model is not None:
+            if not self.__is_stand_in and not self.__own_model.is_file():
+                return f"off: the voice model {self.__own_model} is not there (see piper_voice in companion.ini)"
+            return (f"on: Piper in {self.__piper_folder} with the voice '{self.__own_model.name}' ({self.__piper_language()}), "
+                    f"sound goes to {self.voice_root}")
         return f"on: Piper in {self.__piper_folder}, sound goes to {self.voice_root}"
 
     @property
@@ -165,7 +185,27 @@ class CompanionVoice:
     @property
     def spoken_language(self) -> str:
         """The language the AI has to write in for say, as a word (eg English)"""
-        return self.__xtts.language_name if self.__xtts is not None else PIPER_LANGUAGE_NAME
+        return self.__xtts.language_name if self.__xtts is not None else self.__piper_language()
+
+    def __find_own_model(self, piper_voice: str) -> Path | None:
+        """The file of the voice model piper_voice names, or None if the voice of the character speaks"""
+        if piper_voice == "":
+            return None
+        name = piper_voice if piper_voice.lower().endswith(MODEL_ENDING) else piper_voice + MODEL_ENDING
+        # A name alone is looked for in the Piper folder, a file with its folder is taken as it is
+        return Path(name) if os.path.dirname(name) != "" else self.__piper_folder / OWN_MODELS_SUBFOLDER / name
+
+    def __piper_language(self) -> str:
+        """The language Piper pronounces, as a word: the one of the voice model of one's own, or that of the voices of the game"""
+        if self.__own_model is None:
+            return PIPER_LANGUAGE_NAME
+        try:
+            with open(str(self.__own_model)[:-len(MODEL_ENDING)] + MODEL_NOTES_ENDING, "r", encoding="utf-8") as opened:
+                notes = json.load(opened)
+            code = str(notes["language"]["code"]).lower()[:LANGUAGE_CODE_LENGTH]
+        except (OSError, ValueError, KeyError, TypeError):
+            return PIPER_LANGUAGE_NAME
+        return PIPER_LANGUAGE_NAMES.get(code, code)
 
     def describe_lips(self) -> str:
         """One line for the start of the server: whether the lips of the companion move"""
@@ -241,11 +281,15 @@ class CompanionVoice:
                 # Piper speaks: always without XTTS, and in its place when XTTS does not answer
                 before = "" if xtts_problem == "" else f"XTTS could not speak ({xtts_problem}), and Piper could not step in. "
                 model = self.__piper_folder.joinpath(*MODELS_SUBFOLDER) / (voice_folder.lower().replace(" ", "") + MODEL_ENDING)
+                if self.__own_model is not None:
+                    model = self.__own_model
                 if not self.__is_stand_in:
                     if not os.path.isfile(self.__piper_command[0]):
                         return False, (f"{before}Piper is not installed where the server looks for it ({self.__piper_command[0]}). The player has to copy "
                                        "the folder 'piper' of the Mantella download there, or name its folder as piper_folder in companion.ini."), 0
                     if not model.is_file():
+                        if self.__own_model is not None:
+                            return False, f"{before}The voice model {model} is not there. The player has to put it there, or change piper_voice in companion.ini.", 0
                         return False, f"{before}Piper has no voice model for your voice '{voice_folder}' ({model}).", 0
                 try:
                     sound_file = self.__synthesize(spoken, str(model))

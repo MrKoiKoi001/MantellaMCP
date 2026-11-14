@@ -79,6 +79,9 @@ FINDABLE: list[list[str]] = [
     ["0", "FF000A03", "9", "140", "1", "Bandit Outlaw"],
 ]
 SPACE: list[int] = [1, 3, -1,  0, 0, -1,  0, 0, 4,  2, 8, -1,  0, 0, -1,  0, 0, -1,  1, 5, -1,  1, 2, -1]
+# A look into one direction: three rays, from the left edge of the angle to the right one. And where the companion faces
+SPACE_LOOK: list[int] = [0, 0, -1,  1, 40, -1,  0, 0, 12]
+SPACE_FACING_DEGREES: int = 90
 CHEST_REF_ID: str = "0005A400"
 LOCKED_CHEST_REF_ID: str = "0005A401"
 # What the chest among the THINGS holds
@@ -148,7 +151,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
                 has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False, find: str = "",
                 is_player_sitting: bool = False, is_weapon_kept_away: bool = False,
-                is_running: bool = False) -> dict:
+                is_running: bool = False, space_info: list[int] | None = None) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -237,6 +240,12 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         state[game_state.KEY_TRAPS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in TRAPS]
     if has_space:
         state[game_state.KEY_SPACE] = SPACE
+        # A game mod whose plugin can look into one direction says how the rays looked. A look that is not
+        # all around has the rays of SPACE_LOOK
+        if space_info is not None:
+            state[game_state.KEY_SPACE_INFO] = space_info
+            if space_info[1] < game_state.SPACE_FULL_CIRCLE:
+                state[game_state.KEY_SPACE] = SPACE_LOOK
     if find != "":
         # Like the plugin: every word has to be in the name, capitals do not matter, nearest first
         words = find.lower().split()
@@ -485,6 +494,7 @@ def main():
     are_stats_wanted = False
     is_visible_wanted = False
     is_space_wanted = False
+    space_info: list[int] | None = None
     wanted_find = ""
     poll_id = 0
     # Like the game mod: the state goes along with the first request, and after that only when the server asked for it
@@ -501,7 +511,8 @@ def main():
             request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
                                                          is_around_companion, target_ref_id != "", look_target_ref_id,
                                                          leader_ref_id, expression, are_stats_wanted, is_visible_wanted,
-                                                         has_traps=True, has_space=is_space_wanted, find=wanted_find)
+                                                         has_traps=True, has_space=is_space_wanted, find=wanted_find,
+                                                         space_info=space_info)
             wanted_find = ""
             are_things_wanted = False
             is_space_wanted = False
@@ -539,6 +550,15 @@ def main():
                 are_stats_wanted = bool(command.get(consts.KEY_COMMAND_STATS))
                 is_visible_wanted = bool(command.get(consts.KEY_COMMAND_VISIBLE))
                 is_space_wanted = bool(command.get(consts.KEY_COMMAND_SPACE))
+                # Like the game mod: without a direction all around from where the companion faces
+                space_degrees = int(command.get(consts.KEY_COMMAND_SPACE_DEGREES, consts.SPACE_NO_DIRECTION))
+                space_heading = SPACE_FACING_DEGREES
+                space_angle = game_state.SPACE_FULL_CIRCLE
+                if space_degrees >= 0:
+                    space_heading = (space_degrees + (SPACE_FACING_DEGREES if command.get(consts.KEY_COMMAND_SPACE_FACING) else 0)) % 360
+                    space_angle = int(command.get(consts.KEY_COMMAND_SPACE_ANGLE, game_state.SPACE_FULL_CIRCLE))
+                space_info = [space_heading, space_angle, int(command.get(consts.KEY_COMMAND_SPACE_METERS, 0)) or consts.SPACE_DEFAULT_METERS,
+                              SPACE_FACING_DEGREES]
                 wanted_find = str(command.get(consts.KEY_COMMAND_FIND) or "")
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")

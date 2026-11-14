@@ -13,6 +13,8 @@ from src.companion.game_state import (GAME_PROTOCOL, VISIBLE_HALF_ANGLE_DEGREES,
                                       SPACE_SLOPE, SPACE_WALL)
 
 DEGREES_PER_DIRECTION: float = 45.0
+# About how far around the player the game has loaded the ground and the walls outdoors. Rays find nothing beyond that
+SPACE_LOADED_METERS: int = 120
 # Clockwise, starting straight ahead of whoever looks
 RELATIVE_DIRECTIONS: list[str] = ["ahead", "ahead-right", "right", "behind-right", "behind", "behind-left", "left", "ahead-left"]
 # Clockwise, starting in the north
@@ -136,7 +138,8 @@ def describe_state(state_result: dict[str, Any]) -> str:
     elif state_result.get("find_missed"):
         lines.append("The game did not send what it found in time. Ask again.")
     if state_result.get("space_wanted"):
-        lines.append(_describe_space(state.get("space")))
+        lines.append(_describe_space(state.get("space"), state.get("space_look"), str(state_result.get("space_direction_wanted") or ""),
+                                     state_result.get("space_meters_wanted") or 0))
     elif state_result.get("space_missed"):
         lines.append("The game did not send the space around you in time. Ask again.")
     if len(nearby) == 0:
@@ -462,18 +465,56 @@ def _describe_found(wanted: str, found_for: Any, found: Any, is_from_companion: 
     return lines
 
 
-def _describe_space(space: Any) -> str:
+def _describe_space(space: Any, look: Any = None, wanted_direction: str = "", wanted_meters: int = 0) -> str:
     """What rays found around the companion, as one line: walls, rising ground and drops with their direction and
-    distance, and the directions that are open"""
+    distance, and the directions that are open.
+
+    Args:
+        look: How the rays looked, as the game mod says it ('space_look' of the state). None from a game mod whose
+            plugin can only look all around
+        wanted_direction: The word of the AI for the direction it wanted to look into, or empty
+        wanted_meters: How far the AI wanted to look, 0 = it did not say
+    """
     if not isinstance(space, list) or len(space) == 0:
         return ("Space around you: the game could not measure it (your character is not in the loaded area, "
                 "or the plugin of the game mod is older than interface version 9).")
+    after = ""
+    if not isinstance(look, dict):
+        start = "Space around you (rays at chest height, about 15 m far): "
+        names = [relative_direction(direction.get("angle_degrees", 0)) for direction in space]
+        if wanted_direction != "" or wanted_meters > 0:
+            after = (" (The plugin of the game mod is older than interface version 13: it cannot look into one direction "
+                     "or further than this, so this is the usual look all around.)")
+    else:
+        meters = look.get("meters", 0)
+        facing = compass_direction(look.get("facing_degrees", 0))
+        if meters > SPACE_LOADED_METERS:
+            after = (f" Outdoors the game only knows the ground and the walls of about {SPACE_LOADED_METERS} m around the player: "
+                     "further out 'open' just means that nothing was found.")
+        if look.get("angle_degrees", 0) >= 360 and wanted_direction == "":
+            start = f"Space around you (rays at chest height, about {meters} m far, you face {facing}): "
+            names = [relative_direction(direction.get("angle_degrees", 0)) for direction in space]
+        elif look.get("angle_degrees", 0) >= 360:
+            start = f"Space around you (rays at chest height, about {meters} m far, by the compass, you face {facing}): "
+            names = [compass_direction(direction.get("compass_degrees", 0)) for direction in space]
+        else:
+            middle = wanted_direction if wanted_direction != "" else compass_direction(look.get("heading_degrees", 0))
+            # 'ahead' and the like say nothing about the map, so the point of the compass goes along
+            compass = "" if middle in COMPASS_DIRECTIONS else f", that is {compass_direction(look.get('heading_degrees', 0))}"
+            start = (f"Space towards {middle}{compass} (rays at chest height, about {meters} m far, "
+                     f"fanned out over {look.get('angle_degrees', 0)} degrees): ")
+            names = []
+            for direction in space:
+                offset = direction.get("offset_degrees", 0)
+                if offset == 0:
+                    names.append(middle)
+                else:
+                    names.append(f"{abs(offset)} degrees {'left' if offset < 0 else 'right'} of {middle}")
     walls: list[str] = []
     slopes: list[str] = []
     drops: list[str] = []
     open_directions: list[str] = []
-    for direction in space:
-        name = relative_direction(direction.get("angle_degrees", 0))
+    for name, direction in zip(names, space):
         obstacle = direction.get("obstacle")
         if obstacle == SPACE_WALL:
             walls.append(f"{name} {direction.get('obstacle_meters')} m")
@@ -492,7 +533,7 @@ def _describe_space(space: Any) -> str:
         parts.append("DROP " + ", ".join(drops))
     if len(open_directions) > 0:
         parts.append("open " + ", ".join(open_directions))
-    return "Space around you (rays at chest height, about 15 m far): " + "; ".join(parts)
+    return start + "; ".join(parts) + after
 
 
 def _describe_nearby_character(character: dict[str, Any], is_from_companion: bool = False) -> str:

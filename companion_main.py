@@ -74,7 +74,7 @@ def main():
     xtts = XttsVoice(settings.xtts_url, settings.xtts_voice, settings.xtts_language, settings.xtts_speed) if settings.voice == VOICE_XTTS else None
     xtts_start = xtts.start_server(settings.xtts_start) if xtts is not None and settings.xtts_start != "" else ""
     voice = CompanionVoice(game_folder, args.piper_folder or settings.piper_folder, lips=lips, xtts=xtts,
-                           volume_percent=settings.voice_volume, talk_gestures=settings.talk_gestures)
+                           volume_percent=settings.voice_volume, talk_gestures=settings.talk_gestures, piper_voice=settings.piper_voice)
     lip_files_change = voice.prepare_lip_files()
     app = create_app(token, args.hold_seconds, voice, settings.mute_game_lines)
 

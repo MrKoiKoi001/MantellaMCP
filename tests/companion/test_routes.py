@@ -1741,7 +1741,7 @@ def test_xtts_speaks_instead_of_piper_and_piper_steps_in(tmp_path):
         # The sound comes from the XTTS server, which is asked the way OpenAI's speech route is
         assert voice.speak("Hallo, mein *Thane*.", "FemaleEvenToned") == (True, "", 1)
         assert rate_of(1) == xtts_rate
-        assert asked == [{"input": "Hallo, mein Thane.", "voice": "Uta Obando", "language": "de"}]
+        assert asked == [{"input": "Hallo, mein Thane.", "voice": "Uta Obando", "language": "de", "speed": 1.0}]
         # What the XTTS server sends is no sound: Piper makes the sentence, so that the companion does not fall silent
         assert voice.speak("Kaputt.", "FemaleEvenToned") == (True, "", 2)
         assert rate_of(2) == piper_rate
@@ -2082,3 +2082,94 @@ def test_say_tells_the_game_how_long_the_sentence_is():
     from src.companion.command_queue import CompanionCommandQueue
     import inspect
     assert "say_ms" in inspect.signature(CompanionCommandQueue.send_command).parameters
+
+
+def test_piper_speaks_with_a_voice_model_of_ones_own(tmp_path):
+    from src.companion.settings import load_settings
+    from src.companion.voice import CompanionVoice
+
+    piper_folder = tmp_path / "piper"
+    (piper_folder / "models").mkdir(parents=True)
+    (piper_folder / "models" / "de_DE-eva_k-x_low.onnx").write_bytes(b"model")
+    (piper_folder / "models" / "de_DE-eva_k-x_low.onnx.json").write_text('{"language": {"code": "de_DE"}}', encoding="utf-8")
+    game_folder = tmp_path / "game"
+    (game_folder / "Data" / "Sound" / "Voice" / "KI_MCP_Gefaehrte.esp").mkdir(parents=True)
+
+    # The model named in the settings tells the AI which language to write in
+    own = CompanionVoice(str(game_folder), str(piper_folder), piper_command=["piper"], piper_voice="de_DE-eva_k-x_low")
+    assert own.spoken_language == "German"
+    assert "de_DE-eva_k-x_low.onnx" in own.describe_setup() and "German" in own.describe_setup()
+    # The file with its folder counts too, and without the setting the voice of the character speaks English
+    whole = CompanionVoice(str(game_folder), str(tmp_path), piper_command=["piper"],
+                           piper_voice=str(piper_folder / "models" / "de_DE-eva_k-x_low.onnx"))
+    assert whole.spoken_language == "German"
+    assert CompanionVoice(str(game_folder), str(piper_folder), piper_command=["piper"]).spoken_language == "English"
+    # A model that is not there switches the voice off at the start, with the reason
+    missing = CompanionVoice(str(game_folder), str(piper_folder), piper_voice="nobody")
+    (piper_folder / "piper.exe").write_bytes(b"")
+    assert missing.describe_setup().startswith("off: the voice model") and missing.spoken_language == "English"
+
+    file = tmp_path / "companion.ini"
+    file.write_text("[companion]\npiper_voice = de_DE-eva_k-x_low\n", encoding="utf-8")
+    settings, _ = load_settings(str(file))
+    assert settings.piper_voice == "de_DE-eva_k-x_low"
+
+
+def test_space_looks_into_one_direction_as_far_and_as_wide_as_asked():
+    from src.companion.fake_game import SPACE_FACING_DEGREES, build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def space_line(raw: dict, **result: object) -> str:
+        text = describe_state({"connected": True, "fresh": True, "state": read_game_state(raw), "space_wanted": True, **result})
+        return [line for line in text.split("\n") if line.startswith("Space")][0]
+
+    # A look to the west, 150 m far and 30 degrees wide: three rays, named by how far they are turned away from west
+    west = build_state(has_space=True, space_info=[270, 30, 150, SPACE_FACING_DEGREES])
+    assert space_line(west, space_direction_wanted="west", space_meters_wanted=150) == (
+        "Space towards west (rays at chest height, about 150 m far, fanned out over 30 degrees): wall west 40 m; "
+        "DROP 15 degrees right of west 12 m; open 15 degrees left of west "
+        "Outdoors the game only knows the ground and the walls of about 120 m around the player: "
+        "further out 'open' just means that nothing was found.")
+    rays = read_game_state(west)["space"]
+    assert [ray["compass_degrees"] for ray in rays] == [255, 270, 285] and [ray["offset_degrees"] for ray in rays] == [-15, 0, 15]
+    # Seen from the companion, which faces east, west is behind
+    assert rays[1]["angle_degrees"] == -180
+    # A direction seen from the companion also tells the point of the compass
+    ahead = build_state(has_space=True, space_info=[90, 30, 15, SPACE_FACING_DEGREES])
+    assert space_line(ahead, space_direction_wanted="ahead").startswith(
+        "Space towards ahead, that is east (rays at chest height, about 15 m far, fanned out over 30 degrees): wall ahead 40 m")
+    # All around with a plugin that can look: as before, and which way the companion faces
+    around = build_state(has_space=True, space_info=[90, 360, 15, SPACE_FACING_DEGREES])
+    assert space_line(around).startswith("Space around you (rays at chest height, about 15 m far, you face east): wall ahead 3 m, left 5 m")
+    # A plugin that cannot look into a direction gives the usual look, and the AI is told
+    assert "older than interface version 13" in space_line(build_state(has_space=True), space_direction_wanted="west")
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            for _ in range(3):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: west}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        answer = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"space_direction": "West", "space_meters": 150, "space_angle": 30}}))
+        command = received_commands[0]
+        # The direction alone asks for the space. West is 270 degrees from north
+        assert (command[consts.KEY_COMMAND_SPACE], command[consts.KEY_COMMAND_SPACE_DEGREES], command[consts.KEY_COMMAND_SPACE_FACING],
+                command[consts.KEY_COMMAND_SPACE_METERS], command[consts.KEY_COMMAND_SPACE_ANGLE]) == (1, 270, 0, 150, 30)
+        assert "Space towards west (rays at chest height, about 150 m far" in answer
+        # A direction seen from the companion without an angle: 60 degrees wide. More than 200 m is not asked for
+        tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"space_direction": "left", "space_meters": 900}}))
+        command = received_commands[1]
+        assert (command[consts.KEY_COMMAND_SPACE_DEGREES], command[consts.KEY_COMMAND_SPACE_FACING],
+                command[consts.KEY_COMMAND_SPACE_METERS], command[consts.KEY_COMMAND_SPACE_ANGLE]) == (270, 1, 200, 60)
+        # A word that is no direction is turned down before the game is asked
+        refused = rpc(client, "tools/call", {"name": "STATE", "arguments": {"space_direction": "up"}}).json()["result"]
+        assert refused["isError"] is True and "no direction 'up'" in refused["content"][0]["text"]
+        # Plain space stays a look all around
+        tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"space": True}}))
+        command = received_commands[2]
+        assert (command[consts.KEY_COMMAND_SPACE], command[consts.KEY_COMMAND_SPACE_DEGREES], command[consts.KEY_COMMAND_SPACE_ANGLE]) == (1, -1, 360)
