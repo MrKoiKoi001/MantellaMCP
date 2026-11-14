@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 
 from src.companion.voice import DEFAULT_GAME_FOLDER, DEFAULT_PIPER_FOLDER
-from src.companion.xtts import DEFAULT_XTTS_LANGUAGE, DEFAULT_XTTS_URL, DEFAULT_XTTS_VOICE
+from src.companion.xtts import DEFAULT_XTTS_LANGUAGE, DEFAULT_XTTS_SPEED, DEFAULT_XTTS_URL, DEFAULT_XTTS_VOICE, HIGHEST_XTTS_SPEED, LOWEST_XTTS_SPEED
 
 SETTINGS_FILE: str = "companion.ini"
 SECTION: str = "companion"
@@ -24,6 +24,7 @@ KEY_PIPER_FOLDER: str = "piper_folder"
 KEY_VOICE: str = "voice"
 KEY_XTTS_URL: str = "xtts_url"
 KEY_XTTS_VOICE: str = "xtts_voice"
+KEY_XTTS_SPEED: str = "xtts_speed"
 KEY_XTTS_LANGUAGE: str = "xtts_language"
 KEY_XTTS_START: str = "xtts_start"
 KEY_VOICE_VOLUME: str = "voice_volume"
@@ -86,6 +87,11 @@ DEFAULT_TEXT: str = f"""; Settings of the AI companion server. The server reads 
 ; Empty: {DEFAULT_XTTS_VOICE}
 {KEY_XTTS_VOICE} =
 
+; Only for {KEY_VOICE} = {VOICE_XTTS}: how fast the voice speaks. 1.0 = as the voice speaks on its own, 1.2 = a fifth faster
+; ({LOWEST_XTTS_SPEED} to {HIGHEST_XTTS_SPEED}). The XTTS server gets it as "speed".
+; Empty: {DEFAULT_XTTS_SPEED}
+{KEY_XTTS_SPEED} =
+
 ; Only for {KEY_VOICE} = {VOICE_XTTS}: the language the companion speaks, as XTTS names it (de, en, fr ...).
 ; Empty: {DEFAULT_XTTS_LANGUAGE}
 {KEY_XTTS_LANGUAGE} =
@@ -143,6 +149,7 @@ class CompanionSettings:
     voice: str = VOICE_PIPER
     xtts_url: str = DEFAULT_XTTS_URL
     xtts_voice: str = DEFAULT_XTTS_VOICE
+    xtts_speed: float = DEFAULT_XTTS_SPEED
     xtts_language: str = DEFAULT_XTTS_LANGUAGE
     xtts_start: str = ""
     voice_volume: int = DEFAULT_VOICE_VOLUME
@@ -195,6 +202,11 @@ def load_settings(file: str = SETTINGS_FILE) -> tuple[CompanionSettings, str]:
     settings.voice = VOICE_XTTS if read(KEY_VOICE).lower() == VOICE_XTTS else VOICE_PIPER
     settings.xtts_url = read(KEY_XTTS_URL) or DEFAULT_XTTS_URL
     settings.xtts_voice = read(KEY_XTTS_VOICE) or DEFAULT_XTTS_VOICE
+    try:
+        # A comma is a decimal point for someone who writes German
+        settings.xtts_speed = min(max(float(read(KEY_XTTS_SPEED).replace(",", ".")), LOWEST_XTTS_SPEED), HIGHEST_XTTS_SPEED)
+    except ValueError:
+        settings.xtts_speed = DEFAULT_XTTS_SPEED
     settings.xtts_language = read(KEY_XTTS_LANGUAGE) or DEFAULT_XTTS_LANGUAGE
     settings.xtts_start = read(KEY_XTTS_START)
     volume_text = read(KEY_VOICE_VOLUME).rstrip("%").strip()

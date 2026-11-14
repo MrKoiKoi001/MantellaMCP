@@ -27,6 +27,9 @@ DEFAULT_PORT: int = 4998
 SERVER_START_TIMEOUT_SECONDS: float = 240.0
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 MCP_ROUTE_PREFIX: str = "/mcp/"
+# The tunnel goes on writing lines after it has told its address, and they push the address out of sight.
+# So the address is printed once more this many seconds later, when the tunnel has gone quiet
+ADDRESS_REPEAT_SECONDS: float = 8.0
 
 processes: list[subprocess.Popen] = []
 tunnel_url_found = threading.Event()
@@ -167,6 +170,7 @@ def main() -> int:
         if args.fake_game:
             start_process("game", [sys.executable, "-m", "src.companion.fake_game", "--port", str(args.port)])
 
+        address_repeat_time = None
         if cloudflared_path is not None:
             start_process("tunnel", [cloudflared_path, "tunnel", "--url", f"http://localhost:{args.port}"], watch_for_tunnel_url=True)
             if tunnel_url_found.wait(timeout=60):
@@ -177,6 +181,7 @@ def main() -> int:
                     "",
                     "The address changes every time the tunnel is started. Stop with Ctrl+C.",
                 ])
+                address_repeat_time = time.monotonic() + ADDRESS_REPEAT_SECONDS
             else:
                 print("The tunnel did not report an address within 60 seconds. See the [tunnel] lines above.")
         else:
@@ -188,6 +193,9 @@ def main() -> int:
 
         while True:
             time.sleep(0.5)
+            if address_repeat_time is not None and time.monotonic() >= address_repeat_time:
+                address_repeat_time = None
+                print_box(["Address for the AI app (custom connector):", "", f"{tunnel_url[0]}{MCP_ROUTE_PREFIX}{token}"])
             if server.poll() is not None:
                 print("The companion server has stopped.")
                 return 1

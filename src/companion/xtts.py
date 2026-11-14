@@ -4,7 +4,7 @@ XTTS (Coqui XTTS v2) speaks many languages, German among them, and can take on a
 It runs as a server of its own on the graphics card, and this file only asks it over HTTP the way OpenAI's
 speech route is asked:
 
-    POST <url>/v1/audio/speech   {"input": text, "voice": name of the voice, "language": "de"}   -> a WAV file
+    POST <url>/v1/audio/speech   {"input": text, "voice": name of the voice, "language": "de", "speed": 1.0}   -> a WAV file
     GET  <url>/health            -> answers while the server runs
 
 The server this was written for is the player's own (xtts_server.py, started with start-xtts-server.bat).
@@ -22,6 +22,10 @@ import wave
 DEFAULT_XTTS_URL: str = "http://127.0.0.1:8880"
 DEFAULT_XTTS_VOICE: str = "Uta Obando"
 DEFAULT_XTTS_LANGUAGE: str = "de"
+# How fast the voice speaks: 1.0 = as the model speaks on its own, more = faster
+DEFAULT_XTTS_SPEED: float = 1.0
+LOWEST_XTTS_SPEED: float = 0.5
+HIGHEST_XTTS_SPEED: float = 2.0
 SPEECH_ROUTE: str = "/v1/audio/speech"
 HEALTH_ROUTE: str = "/health"
 # With the game running next to it, a short sentence took up to five seconds on the player's machine
@@ -41,13 +45,16 @@ LANGUAGE_NAMES: dict[str, str] = {
 class XttsVoice:
     """Asks an XTTS server for the sound of a sentence"""
 
-    def __init__(self, url: str = DEFAULT_XTTS_URL, voice: str = DEFAULT_XTTS_VOICE, language: str = DEFAULT_XTTS_LANGUAGE) -> None:
+    def __init__(self, url: str = DEFAULT_XTTS_URL, voice: str = DEFAULT_XTTS_VOICE, language: str = DEFAULT_XTTS_LANGUAGE,
+                 speed: float = DEFAULT_XTTS_SPEED) -> None:
         """
         Args:
             url: Where the XTTS server listens, without a route (eg http://127.0.0.1:8880)
             voice: A voice the XTTS server knows: one of those built in, or the name of a recording in its folder of voices
             language: The language the text is in, as XTTS names it (eg de)
+            speed: How fast the voice speaks (1.0 = normal, 1.2 = a fifth faster)
         """
+        self.__speed: float = min(max(speed, LOWEST_XTTS_SPEED), HIGHEST_XTTS_SPEED)
         self.__url: str = url.strip().rstrip("/")
         self.__voice: str = voice.strip()
         self.__language: str = language.strip().lower()
@@ -103,7 +110,7 @@ class XttsVoice:
 
     def describe_setup(self) -> str:
         """Which XTTS server, voice and language, for the start of the server"""
-        return f"XTTS at {self.__url}, voice '{self.__voice}', language {self.language_name}"
+        return f"XTTS at {self.__url}, voice '{self.__voice}', language {self.language_name}, speed {self.__speed:g}"
 
     def make(self, text: str, sound_file: str) -> None:
         """Lets the XTTS server speak the text and saves the sound
@@ -111,7 +118,7 @@ class XttsVoice:
         Raises:
             RuntimeError: The server did not answer, or what it sent is no sound
         """
-        body = json.dumps({"input": text, "voice": self.__voice, "language": self.__language}).encode("utf-8")
+        body = json.dumps({"input": text, "voice": self.__voice, "language": self.__language, "speed": self.__speed}).encode("utf-8")
         request = urllib.request.Request(self.__url + SPEECH_ROUTE, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
             with self.__opener.open(request, timeout=SPEECH_TIMEOUT_SECONDS) as answer:
