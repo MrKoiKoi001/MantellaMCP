@@ -215,6 +215,16 @@ class companion_constants:
     ACTION_GIVE: str = "give"
     ACTION_TAKE: str = "take"
     ACTION_CAST_SPELL: str = "cast_spell"
+    # Riding: take a horse as the companion's own, get on it, get off it, and whether the companion mounts and
+    # dismounts together with the player (ride_lock on = it does not)
+    ACTION_CLAIM_HORSE: str = "claim_horse"
+    ACTION_MOUNT: str = "mount"
+    ACTION_DISMOUNT: str = "dismount"
+    ACTION_RIDE_LOCK: str = "ride_lock"
+    # The horse of the companion or the horse of the player runs to the player and stays there
+    ACTION_CALL_HORSE: str = "call_horse"
+    RIDE_LOCK_ON: str = "on"
+    RIDE_LOCK_OFF: str = "off"
     # Internal: makes the game collect its state and send it with its next request
     ACTION_REPORT_STATE: str = "report_state"
 
@@ -245,6 +255,11 @@ class companion_constants:
         ACTION_GIVE,
         ACTION_TAKE,
         ACTION_CAST_SPELL,
+        ACTION_CLAIM_HORSE,
+        ACTION_MOUNT,
+        ACTION_DISMOUNT,
+        ACTION_RIDE_LOCK,
+        ACTION_CALL_HORSE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
@@ -252,7 +267,7 @@ class companion_constants:
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
     # These take 'run': the companion runs instead of walking
     ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW]
-    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP] + ITEM_ACTIONS
+    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"

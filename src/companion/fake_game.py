@@ -83,6 +83,10 @@ SPACE: list[int] = [1, 3, -1,  0, 0, -1,  0, 0, 4,  2, 8, -1,  0, 0, -1,  0, 0, 
 SPACE_LOOK: list[int] = [0, 0, -1,  1, 40, -1,  0, 0, 12]
 SPACE_FACING_DEGREES: int = 90
 SPELL_REF_ID: str = "0004D3F2"
+HORSE_REF_ID: str = "0010982B"
+HORSE_NAME: str = "Horse"
+PLAYER_HORSE_REF_ID: str = "0010982C"
+PLAYER_HORSE_NAME: str = "Shadowmere"
 CHEST_REF_ID: str = "0005A400"
 LOCKED_CHEST_REF_ID: str = "0005A401"
 # What the chest among the THINGS holds
@@ -152,7 +156,9 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 are_weapons_drawn: bool = False, look_target_ref_id: str = "", leader_ref_id: str = "", expression: str = "",
                 has_stats: bool = False, is_visible_only: bool = False, has_traps: bool = False, has_space: bool = False, find: str = "",
                 is_player_sitting: bool = False, is_weapon_kept_away: bool = False,
-                is_running: bool = False, space_info: list[int] | None = None) -> dict:
+                is_running: bool = False, space_info: list[int] | None = None,
+                horse_ref_id: str = "", is_riding: bool = False, is_ride_locked: bool = False, is_player_riding: bool = False,
+                seat_name: str = "", player_horse_ref_id: str = "", called_horse_ref_id: str = "") -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -209,6 +215,24 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_HANDS: HANDS,
         game_state.KEY_TIMES: [0, 0],
     }
+    # On what the two sit. A rider and its horse: the simulator's horse stands 6 m to the left until it is ridden
+    if is_player_riding:
+        state[game_state.KEY_PLAYER_MOUNT] = PLAYER_HORSE_NAME
+    elif is_player_sitting and seat_name != "":
+        state[game_state.KEY_PLAYER_SEAT] = seat_name
+    if is_riding:
+        state[game_state.KEY_COMPANION_MOUNT] = HORSE_NAME
+    elif is_sitting and seat_name != "":
+        state[game_state.KEY_COMPANION_SEAT] = seat_name
+    if horse_ref_id != "":
+        state[game_state.KEY_HORSE] = [to_papyrus_number(horse_ref_id), 0 if is_riding else 6, 0 if is_riding else -90, int(is_riding), int(is_ride_locked)]
+        state[game_state.KEY_HORSE_NAME] = HORSE_NAME
+    # The horse the player rode last stands 14 m behind the player until it is ridden
+    if player_horse_ref_id != "":
+        state[game_state.KEY_PLAYER_HORSE] = [to_papyrus_number(player_horse_ref_id), 0 if is_player_riding else 14, 0 if is_player_riding else 180]
+        state[game_state.KEY_PLAYER_HORSE_NAME] = PLAYER_HORSE_NAME
+    if called_horse_ref_id != "":
+        state[game_state.KEY_HORSE_CALLED] = to_papyrus_number(called_horse_ref_id)
     wanted_inventories = [
         (game_state.KEY_INVENTORY_OWN, OWN_ITEMS, (consts.INVENTORY_OWN, consts.INVENTORY_BOTH)),
         (game_state.KEY_INVENTORY_PLAYER, PLAYER_ITEMS, (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH)),
@@ -284,7 +308,40 @@ def name_of(ref_id: str) -> str:
     return ""
 
 
-def run_command(action: str, target: str, target_ref_id: str, item_id: str = "", detail: str = "") -> tuple[bool, str, str]:
+def horse_after(action: str, target: str, horse_ref_id: str) -> str:
+    """Like the game: claim_horse, and mount with a target, make that horse the companion's own"""
+    if action in (consts.ACTION_CLAIM_HORSE, consts.ACTION_MOUNT) and target != "":
+        return target
+    return horse_ref_id
+
+
+def is_riding_after(action: str, is_riding: bool) -> bool:
+    """Like the game: mount puts the companion in the saddle (the simulator's companion is up at once),
+    dismount and wait take it down"""
+    if action == consts.ACTION_MOUNT:
+        return True
+    if action in (consts.ACTION_DISMOUNT, consts.ACTION_WAIT):
+        return False
+    return is_riding
+
+
+def called_horse_after(action: str, target: str, horse_ref_id: str, called_horse_ref_id: str) -> str:
+    """Like the game: call_horse makes the named horse run to the player (without a target the companion's own, and
+    if it has none, the player's). The simulator's horse never arrives, so it keeps running until it is mounted"""
+    if action == consts.ACTION_CALL_HORSE:
+        return target or horse_ref_id or PLAYER_HORSE_REF_ID
+    if action == consts.ACTION_MOUNT and called_horse_ref_id == (target or horse_ref_id):
+        return ""
+    return called_horse_ref_id
+
+
+def is_ride_locked_after(action: str, detail: str, is_ride_locked: bool) -> bool:
+    if action == consts.ACTION_RIDE_LOCK:
+        return detail != consts.RIDE_LOCK_OFF
+    return is_ride_locked
+
+
+def run_command(action: str, target: str, target_ref_id: str, item_id: str = "", detail: str = "", horse_ref_id: str = "") -> tuple[bool, str, str]:
     """Answers attack, move_to, loot, sit, look_at, gesture, flee and stand_down like the game mod does
 
     Args:
@@ -415,6 +472,12 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
             if item_id == target:
                 return True, f"Fake game did '{action}' with {name}.", target_ref_id
         return False, f"There is no item with the ID '{target}'. Take the ID from the inventory in STATE.", target_ref_id
+    if action == consts.ACTION_MOUNT and target == "" and horse_ref_id == "":
+        return False, "You have no horse. Take one as yours first: claim_horse with the ref_id of a horse from 'Nearby' in STATE (ask the player which one).", target_ref_id
+    if action == consts.ACTION_CALL_HORSE:
+        if target not in ("", horse_ref_id, PLAYER_HORSE_REF_ID):
+            return False, "That is neither your horse nor the horse of the player, so it does not come when called. claim_horse makes a horse yours.", target_ref_id
+        return True, f"{PLAYER_HORSE_NAME if (target or horse_ref_id) == PLAYER_HORSE_REF_ID or (target == '' and horse_ref_id == '') else HORSE_NAME} runs to the player and stays there.", target_ref_id
     if action == consts.ACTION_FLEE:
         return True, "You retreat: you do not fight and you run from enemies. This holds until your next command.", ""
     if action == consts.ACTION_STAND_DOWN:
@@ -495,6 +558,10 @@ def main():
     look_target_ref_id = ""
     leader_ref_id = ""
     expression = ""
+    horse_ref_id = ""
+    is_riding = False
+    is_ride_locked = False
+    called_horse_ref_id = ""
     is_around_companion = False
     are_stats_wanted = False
     is_visible_wanted = False
@@ -517,7 +584,9 @@ def main():
                                                          is_around_companion, target_ref_id != "", look_target_ref_id,
                                                          leader_ref_id, expression, are_stats_wanted, is_visible_wanted,
                                                          has_traps=True, has_space=is_space_wanted, find=wanted_find,
-                                                         space_info=space_info)
+                                                         space_info=space_info, horse_ref_id=horse_ref_id, is_riding=is_riding,
+                                                         is_ride_locked=is_ride_locked, player_horse_ref_id=PLAYER_HORSE_REF_ID,
+                                                         called_horse_ref_id=called_horse_ref_id)
             wanted_find = ""
             are_things_wanted = False
             is_space_wanted = False
@@ -570,8 +639,12 @@ def main():
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it
             item_number = (int(command.get(consts.KEY_COMMAND_ITEM_HIGH) or 0) << 16) | int(command.get(consts.KEY_COMMAND_ITEM_LOW) or 0)
             item_id = f"{item_number:08X}" if item_number != 0 else ""
-            is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""))
+            is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""), horse_ref_id)
             if is_ok:
+                called_horse_ref_id = called_horse_after(str(action), str(target or ""), horse_ref_id, called_horse_ref_id)
+                horse_ref_id = horse_after(str(action), str(target or ""), horse_ref_id)
+                is_riding = is_riding_after(str(action), is_riding)
+                is_ride_locked = is_ride_locked_after(str(action), str(detail or ""), is_ride_locked)
                 is_waiting = is_waiting_after(str(action), is_waiting)
                 # Looking somewhere, a gesture and stepping out of the way do not end a retreat
                 if action not in QUIET_ACTIONS + [consts.ACTION_MAKE_ROOM]:

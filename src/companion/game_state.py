@@ -133,6 +133,28 @@ KEY_INVENTORY_CORPSE: str = "inventory_corpse"
 # with NAMES_SUFFIX, built like KEY_NEARBY_NAMES
 KEY_SPELLS: str = "spells"
 VALUES_PER_SPELL: int = 2
+# On what the player and the companion sit, from a game mod that knows riding. The mount keys hold the name of the horse
+# a character rides (UNKNOWN_MOUNT_NAME if the game mod cannot tell which horse: its plugin is older than interface
+# version 14). The seat keys hold the name of the piece of furniture a character sits on. Each is missing if it does not apply
+KEY_PLAYER_MOUNT: str = "player_mount"
+KEY_PLAYER_SEAT: str = "player_seat"
+KEY_COMPANION_MOUNT: str = "companion_mount"
+KEY_COMPANION_SEAT: str = "companion_seat"
+UNKNOWN_MOUNT_NAME: str = "?"
+# The horse of the companion, missing if it has none: its form ID, how far it is from the companion in meters
+# (HORSE_NOT_LOADED = not in the loaded area), the angle seen from where the companion faces, 1 if the companion is to
+# ride it, 1 if the companion does not mount and dismount together with the player (ride_lock). Its name is under KEY_HORSE_NAME
+KEY_HORSE: str = "horse"
+KEY_HORSE_NAME: str = "horse_name"
+HORSE_VALUE_COUNT: int = 5
+HORSE_NOT_LOADED: int = -1
+# The horse the player rode last, missing if there is none: its form ID, how far it is from the player in meters
+# (HORSE_NOT_LOADED = not in the loaded area) and the angle seen from where the player faces. Its name is under
+# KEY_PLAYER_HORSE_NAME. KEY_HORSE_CALLED: the form ID of the horse that runs to the player because of call_horse
+KEY_PLAYER_HORSE: str = "player_horse"
+KEY_PLAYER_HORSE_NAME: str = "player_horse_name"
+PLAYER_HORSE_VALUE_COUNT: int = 3
+KEY_HORSE_CALLED: str = "horse_called"
 KEY_CORPSE: str = "corpse"
 KEY_CORPSE_NAME: str = "corpse_name"
 # What became of the commands loot, move_to and sit since the last state, as text for the AI. Missing if that is nothing
@@ -303,6 +325,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         if len(player_values) > PLAYER_PLACE_OF_SLEEPING:
             player["sitting"] = player_values[PLAYER_PLACE_OF_SITTING] in SIT_STATES_SEATED
             player["sleeping"] = player_values[PLAYER_PLACE_OF_SLEEPING] in SLEEP_STATES_ASLEEP
+    _add_seat(player, raw, KEY_PLAYER_MOUNT, KEY_PLAYER_SEAT)
     if len(player) > 0:
         state["player"] = player
 
@@ -330,7 +353,20 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 
     companion = _read_companion(raw)
     if companion is not None:
+        _add_seat(companion, raw, KEY_COMPANION_MOUNT, KEY_COMPANION_SEAT)
         state["companion"] = companion
+        horse = _read_horse(raw)
+        if horse is not None:
+            state["horse"] = horse
+    player_horse = _read_player_horse(raw)
+    if player_horse is not None:
+        state["player_horse"] = player_horse
+    # Which of the two horses runs to the player at the moment
+    called_form_id = raw.get(KEY_HORSE_CALLED)
+    if isinstance(called_form_id, int) and not isinstance(called_form_id, bool) and called_form_id != 0:
+        for known_horse in (state.get("horse"), state.get("player_horse")):
+            if known_horse is not None and known_horse["ref_id"] == _ref_id(called_form_id):
+                known_horse["called"] = True
 
     gold_values = _numbers(raw.get(KEY_GOLD))
     if gold_values is not None and len(gold_values) == GOLD_VALUE_COUNT:
@@ -665,6 +701,52 @@ def _read_found(raw_found: Any) -> list[dict[str, Any]]:
             match["dead"] = flag != 0
         found.append(match)
     return found
+
+
+def _add_seat(character: dict[str, Any], raw: dict[str, Any], mount_key: str, seat_key: str) -> None:
+    """Adds on what a character sits: 'riding' with the name of the horse under 'mount' (left out if the game mod could
+    not tell which horse), or the name of the piece of furniture under 'seat'"""
+    mount = raw.get(mount_key)
+    if isinstance(mount, str) and mount.strip() != "":
+        character["riding"] = True
+        if mount.strip() != UNKNOWN_MOUNT_NAME:
+            character["mount"] = _tidy_name(mount)
+        return
+    seat = raw.get(seat_key)
+    if isinstance(seat, str) and seat.strip() != "":
+        character["seat"] = _tidy_name(seat)
+
+
+def _read_horse(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """The horse of the companion, or None if it has none (or the game mod does not know riding)"""
+    values = _numbers(raw.get(KEY_HORSE))
+    if values is None or len(values) != HORSE_VALUE_COUNT:
+        return None
+    form_id, distance, angle, ride_wanted, ride_locked = values
+    horse: dict[str, Any] = {"ref_id": _ref_id(form_id), "ride_wanted": ride_wanted != 0, "ride_locked": ride_locked != 0}
+    name = raw.get(KEY_HORSE_NAME)
+    if isinstance(name, str) and name.strip() != "":
+        horse["name"] = _tidy_name(name)
+    if distance != HORSE_NOT_LOADED:
+        horse["distance_meters"] = distance
+        horse["angle_degrees"] = angle
+    return horse
+
+
+def _read_player_horse(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """The horse the player rode last, or None if there is none (or the game mod does not know it)"""
+    values = _numbers(raw.get(KEY_PLAYER_HORSE))
+    if values is None or len(values) != PLAYER_HORSE_VALUE_COUNT:
+        return None
+    form_id, distance, angle = values
+    horse: dict[str, Any] = {"ref_id": _ref_id(form_id)}
+    name = raw.get(KEY_PLAYER_HORSE_NAME)
+    if isinstance(name, str) and name.strip() != "":
+        horse["name"] = _tidy_name(name)
+    if distance != HORSE_NOT_LOADED:
+        horse["distance_meters"] = distance
+        horse["angle_degrees"] = angle
+    return horse
 
 
 def _read_spells(raw: dict[str, Any]) -> list[dict[str, Any]] | None:

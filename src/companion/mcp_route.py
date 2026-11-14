@@ -16,7 +16,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.25"
+SERVER_VERSION: str = "0.27"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -153,14 +153,27 @@ TOOLS: list[dict[str, Any]] = [
             "cast_spell = cast a spell you know: its ID or its exact name in 'detail', and whom you cast it on as the target "
             "(the player's ref_id to heal the player; no target for a spell on yourself). STATE with inventory 'own' lists "
             "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
-            "for a tome if you know none. The spell works at once and costs you no magicka."
+            "for a tome if you know none. The spell works at once and costs you no magicka. "
+            "Riding: claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
+            "the player tells you which horse is yours). mount = get on your horse and ride after the player; if the horse is "
+            "far away it is brought to your side. With a target you take that horse as yours first. dismount = get off, "
+            "the horse stays where it is. wait also gets you off. When the player mounts or dismounts, you do the same on your "
+            "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
+            "does, until ride_lock 'off'. mount and dismount always work. In the saddle you can speak, look, cast and "
+            "fight, but what is done on foot (move_to, move, enter, loot, pick_up, sit, open, close, make_room, following "
+            "someone other than the player) needs dismount first. You cannot ride indoors. "
+            "call_horse = a horse runs to the player and stays there: your horse, or the horse of the player (the target is "
+            "its ref_id from 'Your horse' or 'Player's horse' in STATE; no target = your horse, or the player's if you have "
+            "none). Use it when the player calls a horse by its name or asks for it. A horse too far away to run is brought "
+            "to the player's side. The horse of the player is known once the player has ridden it. Both horses stay where "
+            "they are left."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, mount, call_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
                 "run": {"type": "boolean", "description": "Only for move_to, move, enter and follow: true = run instead of walk."},
                 "manner": {"type": "string", "enum": list(consts.MANNERS), "description": "Only for say: how you speak. It picks how your hands move and the look on your face while you speak. Nothing = neutral."},
@@ -174,12 +187,17 @@ TOOLS: list[dict[str, Any]] = [
             "Get the current situation in the game as a few short lines. "
             "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
             "(clear, cloudy, rain or snow). "
-            "'Player': health, fighting or not, 'weapon drawn' if so, 'sitting' or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
+            "'Player': health, fighting or not, 'weapon drawn' if so, 'sitting on' with the piece of furniture, 'riding' with the name of the horse or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
-            "seen from you, waiting, following (the player, or the character named behind it), sitting or walking to someone, "
+            "seen from you, 'riding' with the name of the horse, waiting, following (the player, or the character named behind it), "
+            "'sitting on' with the piece of furniture, or walking to someone, "
             "retreating, whom it fights, 'running' while you run, 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
             "If you are not where the player is, the line names the place you are in instead. "
+            "'Player's horse' comes once the player has ridden a horse: its name and ref_id and where it is seen from the player. "
+            "'running to the player' stands behind a horse that was called with call_horse. "
+            "'Your horse' comes once you have one (see claim_horse): its name and ref_id, where it is seen from you, "
+            "and 'ride_lock on' while you do not mount and dismount together with the player. "
             "Without a follower of the player you have no body. "
             "'Nearby': up to 10 lines (more with 'max'), one per character, people and animals, within about 50 meters of the player (outdoors about 200 meters, so that "
             "archers on a tower and game far off are in it): first the living, hostile "
@@ -578,6 +596,14 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
             spell_form_id = parse_ref_id(detail) if len(detail) == SPELL_ID_LENGTH else None
             if spell_form_id is not None and spell_form_id != 0:
                 item = format_ref_id(spell_form_id)
+        if action == consts.ACTION_RIDE_LOCK:
+            target = ""
+            detail = detail.lower()
+            if detail not in (consts.RIDE_LOCK_ON, consts.RIDE_LOCK_OFF):
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"ride_lock needs '{consts.RIDE_LOCK_ON}' or '{consts.RIDE_LOCK_OFF}' in 'detail': "
+                                   f"'{consts.RIDE_LOCK_ON}' = you no longer mount and dismount when the player does, '{consts.RIDE_LOCK_OFF}' = you do again."}, True)
+        if action == consts.ACTION_DISMOUNT:
+            target = ""
         is_run = arguments.get("run") is True and action in consts.ACTIONS_WITH_RUN
         result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run)
         is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)

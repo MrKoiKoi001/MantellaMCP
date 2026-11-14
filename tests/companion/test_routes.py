@@ -2218,3 +2218,116 @@ def test_spells_are_listed_with_the_own_inventory_and_cast_by_id_or_name():
         rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cast_spell", "detail": "Fade"}})
         command = received_commands[1]
         assert (command[consts.KEY_COMMAND_ITEM_HIGH], command[consts.KEY_COMMAND_ITEM_LOW], command[consts.KEY_COMMAND_DETAIL]) == (0, 0, "Fade")
+
+
+def test_riding_shows_on_what_one_sits_and_the_horse_and_its_commands_reach_the_game():
+    from src.companion.fake_game import HORSE_REF_ID, build_state, horse_after, is_ride_locked_after, is_riding_after, run_command
+    from src.companion.game_state import KEY_COMPANION_MOUNT, UNKNOWN_MOUNT_NAME, read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict) -> str:
+        return describe_state({"connected": True, "fresh": True, "state": read_game_state(raw)})
+
+    # On foot and without a horse nothing changes
+    plain = text_for(build_state())
+    assert "riding" not in plain and "Your horse" not in plain
+    # Sitting names the piece of furniture, for the player and for the companion. Without a name it stays 'sitting'
+    seated = text_for(build_state(is_sitting=True, is_player_sitting=True, seat_name="Wooden Bench"))
+    assert seated.count("sitting on Wooden Bench") == 2
+    assert ", sitting," in text_for(build_state(is_player_sitting=True)) and "sitting on" not in text_for(build_state(is_player_sitting=True))
+    # A horse that stands around: where it is, seen from the companion
+    assert f"Your horse: Horse {HORSE_REF_ID}, 6 m left of you" in text_for(build_state(horse_ref_id=HORSE_REF_ID))
+    # In the saddle: both lines name the horses, the rider still follows, and the horse line says so
+    riding = text_for(build_state(horse_ref_id=HORSE_REF_ID, is_riding=True, is_player_riding=True, is_ride_locked=True))
+    assert "riding Shadowmere" in riding and "riding Horse, following" in riding
+    assert f"Your horse: Horse {HORSE_REF_ID}, you ride it, ride_lock on" in riding
+    # A plugin too old to tell which horse it is: 'riding' without a name
+    old = build_state(horse_ref_id=HORSE_REF_ID, is_riding=True)
+    old[KEY_COMPANION_MOUNT] = UNKNOWN_MOUNT_NAME
+    assert "riding, following" in text_for(old)
+
+    # The simulator keeps track like the game mod does
+    assert run_command("mount", "", "")[0] is False
+    assert run_command("mount", "", "", horse_ref_id=HORSE_REF_ID)[0] is True
+    assert horse_after("claim_horse", HORSE_REF_ID, "") == HORSE_REF_ID and horse_after("follow", "", HORSE_REF_ID) == HORSE_REF_ID
+    assert is_riding_after("mount", False) and not is_riding_after("wait", True) and is_riding_after("say", True)
+    assert is_ride_locked_after("ride_lock", "on", False) and not is_ride_locked_after("ride_lock", "off", True)
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        received_commands: list[dict] = []
+
+        def game():
+            results: list[dict] = []
+            for _ in range(5):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state(), consts.KEY_RESULTS: results}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}
+                           for sent in reply[consts.KEY_COMMANDS]]
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # What the server turns down itself never reaches the game
+        assert "needs a target" in command({"action": "claim_horse"})["message"]
+        assert "needs 'on' or 'off'" in command({"action": "ride_lock"})["message"]
+        assert "needs 'on' or 'off'" in command({"action": "ride_lock", "detail": "maybe"})["message"]
+        assert command({"action": "claim_horse", "target": HORSE_REF_ID.lower()})["status"] == consts.STATUS_DONE
+        assert command({"action": "mount"})["status"] == consts.STATUS_DONE
+        assert command({"action": "ride_lock", "detail": "ON", "target": HORSE_REF_ID})["status"] == consts.STATUS_DONE
+        assert command({"action": "dismount", "target": HORSE_REF_ID})["status"] == consts.STATUS_DONE
+        sent = [(one[consts.KEY_COMMAND_ACTION], one[consts.KEY_COMMAND_TARGET], one[consts.KEY_COMMAND_DETAIL]) for one in received_commands]
+        assert sent == [("claim_horse", HORSE_REF_ID, ""), ("mount", "", ""), ("ride_lock", "", "on"), ("dismount", "", "")]
+
+
+def test_a_horse_is_called_and_the_players_horse_shows_in_state():
+    from src.companion.fake_game import HORSE_REF_ID, PLAYER_HORSE_REF_ID, build_state, called_horse_after, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict) -> str:
+        return describe_state({"connected": True, "fresh": True, "state": read_game_state(raw)})
+
+    # Without a horse the player has ridden there is no line
+    assert "Player's horse" not in text_for(build_state())
+    # The horse the player rode last: where it stands seen from the player, right below the line of the player
+    lines = text_for(build_state(player_horse_ref_id=PLAYER_HORSE_REF_ID)).split("\n")
+    place = [number for number, line in enumerate(lines) if line.startswith("Player's horse")][0]
+    assert lines[place] == f"Player's horse: Shadowmere {PLAYER_HORSE_REF_ID}, 14 m behind of the player"
+    assert lines[place - 1].startswith("Player ")
+    # In the saddle, and far away
+    assert f"Player's horse: Shadowmere {PLAYER_HORSE_REF_ID}, the player rides it" in text_for(build_state(player_horse_ref_id=PLAYER_HORSE_REF_ID, is_player_riding=True))
+    away = build_state(player_horse_ref_id=PLAYER_HORSE_REF_ID)
+    away["player_horse"][1] = -1
+    assert "not nearby (call_horse brings it to the player)" in text_for(away)
+    # A called horse says so, whichever of the two it is
+    both = dict(player_horse_ref_id=PLAYER_HORSE_REF_ID, horse_ref_id=HORSE_REF_ID)
+    assert "14 m behind of the player, running to the player" in text_for(build_state(called_horse_ref_id=PLAYER_HORSE_REF_ID, **both))
+    called_own = text_for(build_state(called_horse_ref_id=HORSE_REF_ID, **both))
+    assert "6 m left of you, running to the player" in called_own and "of the player, running" not in called_own
+
+    # The simulator: without a target the companion's own horse, without one of its own the player's. No other horse comes
+    assert called_horse_after("call_horse", "", HORSE_REF_ID, "") == HORSE_REF_ID
+    assert called_horse_after("call_horse", "", "", "") == PLAYER_HORSE_REF_ID
+    assert called_horse_after("mount", "", HORSE_REF_ID, HORSE_REF_ID) == "" and called_horse_after("say", "", HORSE_REF_ID, HORSE_REF_ID) == HORSE_REF_ID
+    assert run_command("call_horse", "", "")[1].startswith("Shadowmere runs to the player")
+    assert run_command("call_horse", "000A0001", "", horse_ref_id=HORSE_REF_ID)[0] is False
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            results: list[dict] = []
+            for _ in range(3):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state(), consts.KEY_RESULTS: results}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}
+                           for sent in reply[consts.KEY_COMMANDS]]
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # With and without a target: both reach the game
+        for arguments in ({"action": "call_horse"}, {"action": "call_horse", "target": PLAYER_HORSE_REF_ID.lower()}):
+            assert tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))["status"] == consts.STATUS_DONE
+        assert [(one[consts.KEY_COMMAND_ACTION], one[consts.KEY_COMMAND_TARGET]) for one in received_commands] == [("call_horse", ""), ("call_horse", PLAYER_HORSE_REF_ID)]

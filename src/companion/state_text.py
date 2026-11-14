@@ -79,6 +79,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
     player_line = _describe_player(state.get("player"))
     if player_line != "":
         lines.append(player_line)
+    player_horse_line = _describe_player_horse(state.get("player_horse"), state.get("player"))
+    if player_horse_line != "":
+        lines.append(player_horse_line)
     nearby = state.get("nearby")
     if not isinstance(nearby, list):
         nearby = []
@@ -91,6 +94,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
     # Whether the game measured the lists below from the companion instead of from the player
     is_from_companion = bool(state.get("around_companion"))
     lines.append(_describe_companion(state.get("companion"), nearby + things + places))
+    horse_line = _describe_horse(state.get("horse"), state.get("companion"))
+    if horse_line != "":
+        lines.append(horse_line)
     gear_line = _describe_gear(state.get("player"), state.get("companion"))
     if gear_line != "":
         lines.append(gear_line)
@@ -372,8 +378,10 @@ def _describe_player(player: Any) -> str:
         parts.append("weapon drawn")
     if player.get("sleeping"):
         parts.append("lying asleep")
+    elif player.get("riding"):
+        parts.append(_describe_riding(player))
     elif player.get("sitting"):
-        parts.append("sitting")
+        parts.append(_describe_sitting(player))
     if "facing_degrees" in player:
         parts.append(f"faces {compass_direction(player['facing_degrees'])}")
     if "position" in player:
@@ -383,6 +391,60 @@ def _describe_player(player: Any) -> str:
     if len(parts) == 0:
         return title
     return f"{title}: {', '.join(parts)}"
+
+
+# A rider and the horse under it are in the same spot: closer than this the player's horse is the one the player rides
+RIDDEN_HORSE_METERS: int = 2
+
+
+def _describe_riding(character: dict[str, Any]) -> str:
+    """'riding' with the name of the horse, if the game mod could tell which horse it is"""
+    mount = str(character.get("mount", "")).strip()
+    return "riding" if mount == "" else f"riding {mount}"
+
+
+def _describe_sitting(character: dict[str, Any]) -> str:
+    """'sitting on' with the name of the piece of furniture, if the game mod sent one"""
+    seat = str(character.get("seat", "")).strip()
+    return "sitting" if seat == "" else f"sitting on {seat}"
+
+
+def _describe_horse(horse: Any, companion: Any) -> str:
+    """The line about the horse of the companion, or empty if it has none"""
+    if not isinstance(horse, dict):
+        return ""
+    title = " ".join(text for text in [str(horse.get("name", "")).strip(), str(horse.get("ref_id", ""))] if text != "")
+    is_riding = isinstance(companion, dict) and bool(companion.get("riding"))
+    if is_riding and horse.get("ride_wanted"):
+        where = "you ride it"
+    elif "distance_meters" in horse:
+        where = _describe_where(horse) + " of you"
+        if horse.get("ride_wanted"):
+            where += ", you are getting on it"
+    else:
+        where = "not nearby (mount brings it to you)"
+    if horse.get("called"):
+        where += ", running to the player"
+    lock = ", ride_lock on (you do not mount or dismount with the player)" if horse.get("ride_locked") else ""
+    return f"Your horse: {title}, {where}{lock}"
+
+
+def _describe_player_horse(horse: Any, player: Any) -> str:
+    """The line about the horse the player rode last, or empty if the game mod knows none"""
+    if not isinstance(horse, dict):
+        return ""
+    title = " ".join(text for text in [str(horse.get("name", "")).strip(), str(horse.get("ref_id", ""))] if text != "")
+    is_riding = isinstance(player, dict) and bool(player.get("riding"))
+    distance = horse.get("distance_meters")
+    if is_riding and isinstance(distance, int) and distance <= RIDDEN_HORSE_METERS:
+        where = "the player rides it"
+    elif "distance_meters" in horse:
+        where = _describe_where(horse) + " of the player"
+        if horse.get("called"):
+            where += ", running to the player"
+    else:
+        where = "not nearby (call_horse brings it to the player)"
+    return f"Player's horse: {title}, {where}"
 
 
 def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
@@ -402,11 +464,14 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
             parts.append(f"faces {compass_direction(companion['facing_degrees'])}")
         if "player_angle_degrees" in companion:
             parts.append(f"player {relative_direction(companion['player_angle_degrees'])} of you")
+    # A rider follows or waits as well, so that comes behind it
+    if companion.get("riding"):
+        parts.append(_describe_riding(companion))
     walk_target_ref_id = companion.get("walk_target_ref_id")
     if walk_target_ref_id is not None:
         parts.append(" ".join(text for text in ["walking to", _name_of(walk_target_ref_id, nearby), walk_target_ref_id] if text != ""))
-    elif companion.get("sitting"):
-        parts.append("sitting")
+    elif companion.get("sitting") and not companion.get("riding"):
+        parts.append(_describe_sitting(companion))
     elif companion.get("leader_ref_id") is not None:
         leader_ref_id = companion["leader_ref_id"]
         parts.append(" ".join(text for text in ["following", _name_of(leader_ref_id, nearby), leader_ref_id] if text != ""))
