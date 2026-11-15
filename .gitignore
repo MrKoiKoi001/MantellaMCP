@@ -30,4 +30,5 @@ data/voice_model_data_log_xtts.csv
 moonshine/
 companion_token.txt
 companion.ini
+companion_server.log*
 /piper/

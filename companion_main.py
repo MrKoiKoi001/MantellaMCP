@@ -19,7 +19,9 @@ import uvicorn
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.game_route import add_game_route
-from src.companion.mcp_route import add_mcp_route
+from src.companion.mcp_route import SERVER_VERSION, add_mcp_route
+from src.companion.game_state import GAME_PROTOCOL
+from src.companion.server_log import log, start_log_file
 from src.companion.lips import LipSync
 from src.companion.settings import SETTINGS_FILE, VOICE_XTTS, load_settings
 from src.companion.voice import CompanionVoice
@@ -81,6 +83,8 @@ def main():
                            volume_percent=settings.voice_volume, talk_gestures=settings.talk_gestures, piper_voice=settings.piper_voice)
     lip_files_change = voice.prepare_lip_files()
     app = create_app(token, args.hold_seconds, voice, settings.mute_game_lines, game_folder)
+    log_file = start_log_file()
+    log.info("SERVER started: version %s, protocol %d, port %d, a request of the game is held for %.0f s.", SERVER_VERSION, GAME_PROTOCOL, args.port, args.hold_seconds)
 
     print("")
     print("AI companion server")
@@ -88,6 +92,7 @@ def main():
     print(f"  MCP route:                      http://localhost:{args.port}{consts.ROUTE_MCP_PREFIX}{token}")
     print(f"  For the AI app, put the tunnel address in front: https://<tunnel-address>{consts.ROUTE_MCP_PREFIX}{token}")
     print(f"  Settings: {settings_source}")
+    print(f"  Log file: {log_file}")
     if xtts_start != "":
         print(f"  XTTS server: {xtts_start}")
     print(f"  Voice of the companion (command say): {voice.describe_setup()}")

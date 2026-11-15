@@ -3130,3 +3130,81 @@ def test_lead_auto_heal_and_trading_with_a_merchant():
         assert "is not a ref_id" in tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"merchant": "the smith"}}))["message"]
         wares_text = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"merchant": MERCHANT_REF_ID}}))
         assert "Steel Sword 00013989 x2 85 gold" in wares_text and "Hunting Bow 00013985 17 gold" in wares_text
+
+
+def test_the_log_tells_silence_and_what_became_of_commands():
+    import asyncio
+    import logging
+
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.server_log import log, shorten
+
+    assert shorten("a  b\n c") == "a b c"
+    assert len(shorten("x" * 400)) == 300 and shorten("x" * 400).endswith("...")
+
+    lines: list[str] = []
+
+    class Keeper(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(record.getMessage())
+
+    async def scenario() -> None:
+        # Without a grace period the game counts as silent right after its request
+        queue = CompanionCommandQueue(hold_seconds=0.05, connection_grace_seconds=0.0, pause_wait_seconds=0.5)
+        queue.SILENCE_LOG_SECONDS = 0.2
+        await queue.send_command(consts.ACTION_FOLLOW)
+        await queue.poll({"location": "Whiterun"}, [], busy=1, events=[{"text": "A fight began.", "urgent": True, "seconds_ago": 0}])
+        await asyncio.sleep(0.3)
+
+        async def come_back() -> None:
+            commands = await queue.poll(None, [])
+            await asyncio.sleep(0.3)
+            await queue.poll(None, [{consts.KEY_COMMAND_ID: commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True,
+                                     consts.KEY_RESULT_MESSAGE: "You follow the player."}], busy=0)
+        game = asyncio.create_task(come_back())
+        await queue.send_command(consts.ACTION_FOLLOW, target="000F6845")
+        await game
+        await asyncio.sleep(0.1)
+        await queue.get_state()
+        await queue.send_command(consts.ACTION_WAIT)
+
+    keeper = Keeper()
+    log.addHandler(keeper)
+    try:
+        asyncio.run(scenario())
+    finally:
+        log.removeHandler(keeper)
+
+    def line_with(*words: str) -> str:
+        found = [line for line in lines if all(word in line for word in words)]
+        assert len(found) > 0, (words, lines)
+        return found[0]
+
+    line_with("COMMAND", "follow", "not sent, no game has asked")
+    line_with("GAME first request")
+    line_with("GAME sent its state (number 1)")
+    line_with("GAME sent 1 urgent events: A fight began.")
+    line_with("GAME says the companion is busy.")
+    # The game stood still after a request that ran out, then it worked on a command
+    assert "nothing, its request had run out" in line_with("GAME back after", "of silence")
+    line_with("COMMAND", "follow 000F6845", "the game has been silent for", "waiting for it")
+    line_with("COMMAND", "follow 000F6845", "picked up by the game after")
+    assert line_with("GAME back after", "Before that it was handed:", "follow 000F6845")
+    line_with("GAME result of command", "ok: You follow the player.")
+    line_with("GAME says the companion is not busy any more.")
+    line_with("COMMAND", "follow 000F6845", "result after")
+    line_with("STATE got no fresh state", "has been silent for")
+    line_with("COMMAND", "wait", "NOT picked up after", "The game has been silent for")
+    # A request of the game that brings nothing and gets nothing leaves no line
+    assert not any("handed: nothing" in line and "0.0 s" in line for line in lines)
+
+    # The calls of the AI: what was asked, how long it took and how the answer begins
+    lines.clear()
+    log.addHandler(keeper)
+    try:
+        with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+            rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "dance"}})
+    finally:
+        log.removeHandler(keeper)
+    assert 'AI -> COMMAND {"action": "dance"}' in lines[0]
+    assert "AI <- COMMAND after" in lines[-1] and "(ERROR)" in lines[-1] and "Unknown action" in lines[-1]

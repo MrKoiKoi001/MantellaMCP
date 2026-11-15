@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.ref_ids import parse_ref_id, split_form_id
+from src.companion.server_log import log, shorten
 
 
 # From this long on describe_silence counts in minutes
@@ -68,6 +69,8 @@ class CompanionCommandQueue:
     # A game that has been silent for longer than this is not waited for at all. It may as well have been closed, and
     # then every command would hang for PAUSE_WAIT_SECONDS
     PAUSE_LONGEST_SECONDS: float = 300.0
+    # From this long on the log file tells that the game was silent between two of its requests
+    SILENCE_LOG_SECONDS: float = 2.0
 
     def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0,
                  pause_wait_seconds: float = PAUSE_WAIT_SECONDS) -> None:
@@ -90,6 +93,8 @@ class CompanionCommandQueue:
         self.__poll_generation: int = 0
         self.__is_poll_open: bool = False
         self.__last_poll_time: float | None = None
+        # For the log file: the commands the game got with the answer to its last request ("" = none, the request ran out)
+        self.__last_handed: str = ""
         # Whether the companion is in the middle of something that takes time (a walk, sitting down, mounting), as the
         # game told with its last request. None = the game mod does not tell (it is older than the chains of commands)
         self.__busy: bool | None = None
@@ -120,6 +125,14 @@ class CompanionCommandQueue:
             The commands the game should execute now. Empty if nothing came up within hold_seconds.
         """
         async with self.__changed:
+            silent_seconds = self.__silent_seconds()
+            if self.__is_poll_open:
+                log.info("GAME sent a new request while the one before was still open (a save was loaded, or its watchdog hit).")
+            elif silent_seconds is None:
+                log.info("GAME first request since the server started.")
+            elif silent_seconds >= self.SILENCE_LOG_SECONDS:
+                log.info("GAME back after %.1f s of silence. Before that it was handed: %s", silent_seconds, self.__last_handed
+                         or "nothing, its request had run out (so it stood still: a menu, its window not in front, a loading screen; or the answer got lost)")
             self.__poll_generation += 1
             own_generation = self.__poll_generation
             self.__is_poll_open = True
@@ -136,12 +149,24 @@ class CompanionCommandQueue:
                 self.__state = state
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
+                log.info("GAME sent its state (number %d).", self.__state_version)
             self.__keep_events(events)
+            if isinstance(events, list) and len(events) > 0:
+                log.info("GAME sent %d urgent events: %s", len(events), shorten(" | ".join(str(event.get("text", "")) for event in events if isinstance(event, dict))))
             self.__store_results(results)
+            if isinstance(results, list):
+                for result in results:
+                    if isinstance(result, dict):
+                        log.info("GAME result of command %s: %s: %s", str(result.get(consts.KEY_COMMAND_ID, ""))[:8],
+                                 "ok" if result.get(consts.KEY_RESULT_OK) else "failed", shorten(result.get(consts.KEY_RESULT_MESSAGE, "")))
             if isinstance(busy, int):
+                if self.__busy != (busy != 0):
+                    log.info("GAME says the companion is %s.", "busy" if busy != 0 else "not busy any more")
                 self.__busy = busy != 0
                 self.__busy_time = time.monotonic()
             if isinstance(fails, int) and not isinstance(fails, bool):
+                if fails != self.__fail_count:
+                    log.info("GAME counts %d things that failed (before: %d).", fails, self.__fail_count)
                 self.__fail_count = fails
             self.__releases_open_poll = False
             self.__changed.notify_all()
@@ -153,10 +178,12 @@ class CompanionCommandQueue:
                 if self.__poll_generation != own_generation:
                     # A newer request arrived (eg after loading a save). The newer one gets the commands.
                     return []
+                self.__last_handed = ""
                 commands = self.__pending_commands
                 self.__pending_commands = []
                 for command in commands:
                     self.__delivered_command_ids.add(command[consts.KEY_COMMAND_ID])
+                self.__last_handed = "; ".join(self.__describe_command(command) for command in commands)
                 return commands
             finally:
                 if self.__poll_generation == own_generation:
@@ -210,10 +237,13 @@ class CompanionCommandQueue:
             A dictionary with 'status' (see companion_constants.STATUS_*) and 'message'
         """
         async with self.__changed:
+            started = time.monotonic()
             silent_seconds = self.__silent_seconds()
             if silent_seconds is None:
+                log.info("COMMAND %s: not sent, no game has asked for commands since the server started.", shorten(f"{action} {target} {detail}"))
                 return self.__status(consts.STATUS_GAME_NOT_CONNECTED, "The game is not polling. Is Skyrim running with a loaded save?")
             if silent_seconds > self.PAUSE_LONGEST_SECONDS:
+                log.info("COMMAND %s: not sent, the game has been silent for %.0f s.", shorten(f"{action} {target} {detail}"), silent_seconds)
                 return self.__status(consts.STATUS_GAME_NOT_CONNECTED, describe_silence(silent_seconds) + " The command was not carried out.")
 
             command_id = uuid.uuid4().hex
@@ -248,6 +278,9 @@ class CompanionCommandQueue:
             }
             if extra is not None:
                 command.update(extra)
+            label = self.__describe_command(command)
+            if silent_seconds > self.__connection_grace_seconds:
+                log.info("COMMAND %s: the game has been silent for %.1f s, waiting for it.", label, silent_seconds)
             self.__pending_commands.append(command)
             self.__changed.notify_all()
 
@@ -258,17 +291,22 @@ class CompanionCommandQueue:
             is_delivered = await self.__wait_until(lambda: command_id in self.__delivered_command_ids, pickup_seconds)
             if not is_delivered:
                 self.__pending_commands = [c for c in self.__pending_commands if c is not command]
+                log.info("COMMAND %s: NOT picked up after %.1f s. The game has been silent for %.1f s.", label, time.monotonic() - started,
+                         self.__silent_seconds() or 0.0)
                 if not waits_for_pause:
                     return self.__status(consts.STATUS_NOT_DELIVERED, "The game did not pick up the command in time.")
                 return self.__status(consts.STATUS_NOT_DELIVERED, describe_silence(self.__silent_seconds() or 0.0)
                                      + " The command was NOT carried out and will not be made up for. Try again when the game goes on.")
             self.__delivered_command_ids.discard(command_id)
+            log.info("COMMAND %s: picked up by the game after %.1f s.", label, time.monotonic() - started)
 
             if action == consts.ACTION_REPORT_STATE:
                 return self.__status(consts.STATUS_DELIVERED, "")
 
             has_result = await self.__wait_until(lambda: command_id in self.__results, result_timeout_seconds)
             if not has_result:
+                log.info("COMMAND %s: no result after %.1f s. The game has %s.", label, time.monotonic() - started,
+                         "asked again since" if self.__is_poll_open else f"not asked again, silent for {self.__silent_seconds() or 0.0:.1f} s")
                 if not self.__is_poll_open:
                     # The game mod asks again right after it got an answer, unless the game stands still or a command keeps it
                     return self.__status(consts.STATUS_DELIVERED, "The game received the command but has not reported a result yet: "
@@ -277,6 +315,7 @@ class CompanionCommandQueue:
             result = self.__results.pop(command_id)
             is_ok = bool(result.get(consts.KEY_RESULT_OK, False))
             message = str(result.get(consts.KEY_RESULT_MESSAGE, ""))
+            log.info("COMMAND %s: result after %.1f s.", label, time.monotonic() - started)
             return self.__status(consts.STATUS_DONE if is_ok else consts.STATUS_FAILED, message)
 
     async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "",
@@ -347,6 +386,10 @@ class CompanionCommandQueue:
             age: float | None = None
             if self.__state is not None:
                 age = round(time.monotonic() - self.__state_time, 1)
+            if not is_fresh:
+                log.info("STATE got no fresh state: the game %s, the state it has is %s s old.",
+                         "is connected" if self.__is_game_connected() else f"has been silent for {self.__silent_seconds() or 0.0:.1f} s"
+                         if self.__silent_seconds() is not None else "never asked for commands", age)
             return {
                 "connected": self.__is_game_connected(),
                 # For how long the game has not asked for commands (0 = it is asking right now, None = it never did)
@@ -446,6 +489,12 @@ class CompanionCommandQueue:
         if self.__last_poll_time is None:
             return False
         return time.monotonic() - self.__last_poll_time <= self.__connection_grace_seconds
+
+    @staticmethod
+    def __describe_command(command: dict[str, Any]) -> str:
+        """A command as the log file names it: the start of its ID, then action, target and detail"""
+        words = [str(command.get(key, "") or "") for key in (consts.KEY_COMMAND_ACTION, consts.KEY_COMMAND_TARGET, consts.KEY_COMMAND_DETAIL)]
+        return shorten(str(command.get(consts.KEY_COMMAND_ID, ""))[:8] + " " + " ".join(word for word in words if word != ""), 120)
 
     def __silent_seconds(self) -> float | None:
         """For how long the game has not asked for commands (0 = a request of it is open, None = it never asked)"""

@@ -15,11 +15,12 @@ from src.companion.command_chain import MAX_WAITING_STEPS, CompanionChain, descr
 from src.companion.game_state import KEY_INVENTORY_OWN
 from src.companion.gestures import GESTURE_NAMES as ALL_GESTURE_NAMES, pick_gesture
 from src.companion.ref_ids import format_ref_id, parse_ref_id, split_form_id
+from src.companion.server_log import log, shorten
 from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.39"
+SERVER_VERSION: str = "0.40"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -484,6 +485,24 @@ def _tools_for(voice: CompanionVoice | None) -> list[dict[str, Any]]:
 
 
 async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
+    """One call of a tool by the AI. What was asked, how long it took and how the answer begins go into the log file"""
+    started = time.monotonic()
+    log.info("AI -> %s %s", name, shorten(json.dumps(arguments, ensure_ascii=False, default=str)))
+    try:
+        result = await _run_tool(name, arguments, queue, voice)
+    except Exception:
+        log.exception("AI <- %s broke off after %.1f s with an error of the server.", name, time.monotonic() - started)
+        raise
+    answer = ""
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
+        answer = str(content[0].get("text", ""))
+    log.info("AI <- %s after %.1f s%s: %s", name, time.monotonic() - started, " (ERROR)" if isinstance(result, dict) and result.get("isError") else "",
+             shorten(answer))
+    return result
+
+
+async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         arguments = {}
 
