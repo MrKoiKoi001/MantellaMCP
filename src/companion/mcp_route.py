@@ -117,7 +117,7 @@ TOOLS: list[dict[str, Any]] = [
             f"with the meters behind it if you like, eg 'left 5' (nothing = {consts.ROOM_DEFAULT_METERS}, at most {consts.ROOM_HIGHEST_METERS}). "
             "If that side is blocked you try another one yourself, and your next STATE tells you. "
             "If you were following the player, you stay at the new spot for a moment and then follow again. "
-            "face = turn your whole body to the target (anything with a ref_id, also a place or a quest target far away) "
+            "face = turn your whole body (you turn on the spot as characters do, and the answer comes when you face there) to the target (anything with a ref_id, also a place or a quest target far away) "
             f"or to the point of the compass in 'detail' ({COMPASS_NAMES}). Do this before you point at something with a gesture. "
             "Only while you stand: not while you walk, fight or sit. "
             "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
