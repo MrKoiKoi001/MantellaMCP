@@ -2858,3 +2858,123 @@ def test_events_books_and_sneaking():
         reads = [(one.get(consts.KEY_COMMAND_READ), one.get(consts.KEY_COMMAND_READ_HIGH), one.get(consts.KEY_COMMAND_READ_LOW), one.get(consts.KEY_COMMAND_READ_PAGE))
                  for one in received_commands if one[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE]
         assert reads == [(BOOK_REF_ID, 0x0001, 0xACDA, 2), (None, None, None, None)]
+
+
+def test_inventory_lines_of_the_plugin_and_seconds_for_a_held_spell():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    # A newer plugin lists an inventory as texts: how many kinds, then ID, how many, form type, flags and name per item.
+    # The flags: 1 = worn or held, 2 = favorite, and 16 times the kind (8 = bow, 20 = shield)
+    raw = build_state()
+    raw[game_state.KEY_INVENTORY_PLAYER + game_state.LINES_SUFFIX] = [
+        "3", "00013985\t1\t41\t" + str(1 + 2 + 16 * 8) + "\tHunting Bow", "00012EB6\t1\t26\t" + str(2 + 16 * 20) + "\tIron Shield",
+        "0000000F\t250\t32\t0\tGold", "broken", "0003EADD\tfive\t46\t0\tPotion"]
+    inventory = read_game_state(raw)[game_state.KEY_INVENTORY_PLAYER]
+    assert inventory["total"] == 3
+    # Gold is told as a number elsewhere, and a line that cannot be read is left out
+    assert inventory["items"] == [
+        {"id": "00013985", "name": "Hunting Bow", "count": 1, "group": "Weapons", "equipped": True, "favorite": True, "kind": "bow"},
+        {"id": "00012EB6", "name": "Iron Shield", "count": 1, "group": "Armor and clothing", "equipped": False, "favorite": True, "kind": "shield"}]
+    text = describe_state({"connected": True, "fresh": True, "state": read_game_state(raw), "inventory_wanted": "player",
+                           "inventory_filter": "favorites"})
+    assert "Hunting Bow" in text and "Iron Shield" in text
+    # A first text that is no number is no inventory
+    raw[game_state.KEY_INVENTORY_PLAYER + game_state.LINES_SUFFIX] = ["?"]
+    assert game_state.KEY_INVENTORY_PLAYER not in read_game_state(raw)
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            results: list[dict] = []
+            for _ in range(3):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: build_state(), consts.KEY_RESULTS: results}).json()
+                received_commands.extend(reply[consts.KEY_COMMANDS])
+                results = [{consts.KEY_COMMAND_ID: command[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You cast it."}
+                           for command in reply[consts.KEY_COMMANDS]]
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # The number behind the spell is for how long a held spell is held. It does not go to the game as a part of the name
+        too_long = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cast_spell", "detail": "Flames 60"}}))
+        assert too_long["status"] == consts.STATUS_FAILED and "1 to 15" in too_long["message"]
+        rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cast_spell", "detail": "Flames 6"}})
+        assert (received_commands[0][consts.KEY_COMMAND_DETAIL], received_commands[0][consts.KEY_COMMAND_SECONDS]) == ("Flames", 6)
+        rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cast_spell", "detail": "Healing Hands"}})
+        assert received_commands[1][consts.KEY_COMMAND_DETAIL] == "Healing Hands" and consts.KEY_COMMAND_SECONDS not in received_commands[1]
+
+
+def test_give_and_take_with_several_items_and_give_junk():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+    from src.companion.ref_ids import parse_ref_id, split_form_id
+
+    def halves(item_id: str) -> list[int]:
+        return list(split_form_id(parse_ref_id(item_id)))
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        received_commands: list[dict] = []
+        old_state = build_state()
+        old_state[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_PROTOCOL] = consts.HAND_OVER_PROTOCOL - 1
+        states: list[dict] = [old_state]
+
+        def game():
+            results: list[dict] = []
+            for _ in range(8):
+                body = {consts.KEY_RESULTS: results, consts.KEY_BUSY: 0, consts.KEY_FAILS: 0}
+                if len(states) > 0:
+                    body[consts.KEY_STATE] = states.pop(0)
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                results = []
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    if sent[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE:
+                        # Like the game mod: the inventory only comes when it was asked for
+                        states.append(build_state(inventory=str(sent.get(consts.KEY_COMMAND_DETAIL) or "")))
+                    else:
+                        received_commands.append(sent)
+                        results.append({consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True,
+                                        consts.KEY_RESULT_MESSAGE: "You give the player: 1 Hunting Bow."})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # A game mod from before this would only hand over the first item, so the server does not send it the list
+        too_old = command({"action": "give", "target": "00013985,0001397D"})
+        assert too_old["status"] == consts.STATUS_FAILED and "newer game mod" in too_old["message"]
+        # Any state of a game mod that is new enough lifts that (here the one the game sends when it is asked for it)
+        tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {}}))
+        # What the server turns down itself never reaches the game
+        assert "is not the ID of an item" in command({"action": "give", "target": "00013985, the bow"})["message"]
+        assert "2 items and 3 numbers" in command({"action": "take", "target": "00013985,0001397D", "detail": "1,2,3"})["message"]
+        assert "is not how many" in command({"action": "give", "target": "00013985;0001397D", "detail": "1,0"})["message"]
+        assert "Only give knows 'junk'" in command({"action": "take", "detail": "junk"})["message"]
+        assert not received_commands
+        # Several items: the IDs in two halves each with how many (0 = all), in the order they were named, each one once
+        given = command({"action": "give", "target": "00013985, 0001397d 00013985", "detail": "1,ALL,5"})
+        assert given["status"] == consts.STATUS_DONE and given["message"] == "You give the player: 1 Hunting Bow."
+        assert received_commands[0][consts.KEY_COMMAND_ITEMS] == halves("00013985") + [1] + halves("0001397D") + [0]
+        assert (received_commands[0][consts.KEY_COMMAND_TARGET], received_commands[0][consts.KEY_COMMAND_DETAIL]) == ("00013985", "00013985,0001397D")
+        # One number counts for every item, nothing means one of each
+        command({"action": "take", "target": "00012E49,0003EADD", "detail": "3"})
+        assert received_commands[1][consts.KEY_COMMAND_ITEMS] == halves("00012E49") + [3] + halves("0003EADD") + [3]
+        command({"action": "take", "target": "00012E49,0003EADD"})
+        assert received_commands[2][consts.KEY_COMMAND_ITEMS] == halves("00012E49") + [1] + halves("0003EADD") + [1]
+        # One item goes the way it always went
+        command({"action": "give", "target": "00013985", "detail": "all"})
+        assert consts.KEY_COMMAND_ITEMS not in received_commands[3] and received_commands[3][consts.KEY_COMMAND_COUNT] == consts.COUNT_ALL
+        # junk: the server asks for the inventory and names what is neither worn, held, a favorite, ammunition, a potion,
+        # a key nor gold. Of the simulator's companion that is the bow it does not hold
+        junk = command({"action": "give", "detail": "JUNK"})
+        assert junk["status"] == consts.STATUS_DONE
+        assert received_commands[4][consts.KEY_COMMAND_ITEMS] == halves("00013985") + [0]
+
+    # The simulator answers like the game mod: what changed hands and what did not
+    from src.companion.fake_game import hand_over
+    is_ok, message = hand_over(consts.ACTION_GIVE, halves("00013985") + [0] + halves("0000BEEF") + [2])
+    assert is_ok and message.startswith("You give the player: ") and message.endswith(" Not handed over: number 2 of your list (no such item).")
+    assert hand_over(consts.ACTION_TAKE, halves("0000BEEF") + [1]) == (False, "Nothing changed hands. Not handed over: number 1 of your list (no such item).")

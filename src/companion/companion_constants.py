@@ -254,7 +254,25 @@ class companion_constants:
     FAVORITE_OFF: str = "off"
     ACTION_GIVE: str = "give"
     ACTION_TAKE: str = "take"
+    # give and take with several items in one command: a list of numbers, VALUES_PER_HAND_OVER per item: the two
+    # halves of its ID and how many (COUNT_ALL = all of them). Game mods from HAND_OVER_PROTOCOL on know it.
+    # The game mod moves its hand once and answers with what changed hands and what did not
+    KEY_COMMAND_ITEMS: str = PREFIX + "items"
+    VALUES_PER_HAND_OVER: int = 3
+    HAND_OVER_PROTOCOL: int = 12
+    HAND_OVER_HIGHEST_ITEMS: int = 60
+    # Every item costs the game a few frames, so the answer to a long list takes longer than to other commands
+    HAND_OVER_TIMEOUT_SECONDS: float = 30.0
+    # give with this in 'detail': everything the companion neither wears, holds nor has marked as a favorite, apart
+    # from what belongs to these groups of the inventory (see game_state.ITEM_GROUPS). Gold is no item of the lists
+    HAND_OVER_JUNK: str = "junk"
+    JUNK_KEPT_GROUPS: list[str] = ["Ammunition", "Potions and food", "Keys"]
     ACTION_CAST_SPELL: str = "cast_spell"
+    # cast_spell: for how many seconds the companion holds a spell that is held as long as the hand stays up (flames,
+    # healing hands). 0 = the game mod decides (CAST_HOLD_SECONDS). The AI writes the seconds behind the name of the spell
+    KEY_COMMAND_SECONDS: str = PREFIX + "seconds"
+    CAST_HOLD_SECONDS: int = 3
+    CAST_HOLD_HIGHEST_SECONDS: int = 15
     # Riding: take a horse as the companion's own, get on it, get off it, and whether the companion mounts and
     # dismounts together with the player (ride_lock on = it does not)
     ACTION_CLAIM_HORSE: str = "claim_horse"

@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import random
+import re
 import time
 from typing import Any
 
@@ -11,13 +12,14 @@ from fastapi.responses import JSONResponse, Response
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.command_chain import MAX_WAITING_STEPS, CompanionChain, describe_step, read_pause_seconds
+from src.companion.game_state import KEY_INVENTORY_OWN
 from src.companion.gestures import GESTURE_NAMES as ALL_GESTURE_NAMES, pick_gesture
 from src.companion.ref_ids import format_ref_id, parse_ref_id, split_form_id
 from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.35"
+SERVER_VERSION: str = "0.37"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -179,10 +181,19 @@ TOOLS: list[dict[str, Any]] = [
             "(only when the player wants it). In the player's inventory 'favorite' marks what the player keeps among the "
             "favorites: ask before you take a weapon or a piece of armor that is one, for potions and food it does not matter. "
             "For give and take 'detail' says how many: a number or 'all', nothing = 1. "
+            "Several items in one go: the IDs in 'target' with commas between them, eg '00013987,000236A5,0002C672', and "
+            "in 'detail' how many of each ('1,1,3'), one number for all of them, or 'all'. You hold out your hand once "
+            f"and the answer lists what changed hands and what did not. At most {consts.HAND_OVER_HIGHEST_ITEMS} kinds of items at a time. "
+            f"give with 'detail' '{consts.HAND_OVER_JUNK}' and no target hands the player everything you neither wear, hold nor have "
+            "marked as a favorite, apart from ammunition, potions, food, keys and gold: for handing over loot. "
             "cast_spell = cast a spell you know: its ID or its exact name in 'detail', and whom you cast it on as the target "
             "(the player's ref_id to heal the player; no target for a spell on yourself). STATE with inventory 'own' lists "
             "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
-            "for a tome if you know none. The spell works at once and costs you no magicka. "
+            "for a tome if you know none. You take the spell into your right hand, cast it with the usual movement and "
+            "hold again what you held before; that takes a few seconds and costs you magicka as it does the player (too "
+            "little magicka = no spell). You turn to the target first. A spell that is held like flames or healing hands "
+            f"runs for {consts.CAST_HOLD_SECONDS} seconds; a number behind the spell sets other seconds (1 to "
+            f"{consts.CAST_HOLD_HIGHEST_SECONDS}), eg 'Flames 6'. In the saddle and on a seat it is cast without the movement. "
             "Riding: claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
             "the player tells you which horse is yours). The player can still ride it. A horse that belongs to someone "
             "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
@@ -220,7 +231,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, release_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, release_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take); for give and take also several IDs with commas between them. Required for these actions, except sit and look_at."},
                 "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, auto, on or off for sneak, the seconds for pause."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
                 "quiet": {"type": "boolean", "description": "Only for say: true = say it in a low voice instead of speaking normally, eg while you sneak. Not together with 'loud'."},
@@ -552,8 +563,17 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         return {"status": consts.STATUS_FAILED, "message": f"Unknown action '{action}'. Allowed: {', '.join(consts.PLAYER_ACTIONS)}"}, True
     if action == consts.ACTION_PAUSE:
         return {"status": consts.STATUS_FAILED, "message": "pause only waits between commands that follow each other (see 'then' and 'after_previous')."}, True
-    if action in consts.ACTIONS_REQUIRING_TARGET and target == "":
+    # give with 'junk' names no item. take with it is told further down that only give knows it
+    is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and detail.lower() == consts.HAND_OVER_JUNK
+    if action in consts.ACTIONS_REQUIRING_TARGET and target == "" and not is_junk_wanted:
         return {"status": consts.STATUS_FAILED, "message": f"Action '{action}' needs a target (ref_id from STATE)."}, True
+    if action in consts.ACTIONS_WITH_COUNT:
+        # Several items in one command, or everything that is junk
+        problem, hand_over, note = await _read_hand_over(action, target, detail, queue)
+        if problem != "":
+            return {"status": consts.STATUS_FAILED, "message": problem}, True
+        if len(hand_over) > 0:
+            return await _hand_over(action, hand_over, note, queue)
     if action == consts.ACTION_SIT and target == "":
         target = await _find_nearest_seat(queue)
         if target == "":
@@ -737,6 +757,14 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         if detail == "":
             return {"status": consts.STATUS_FAILED, "message": "cast_spell needs the ID or the name of the spell in 'detail'. STATE with inventory 'own' lists the spells you know."}, True
         # Eight hex digits are the ID of the spell from STATE, anything else is its name
+        # A number behind the spell is for how many seconds a spell that is held is held
+        words = detail.split()
+        if len(words) > 1 and words[-1].isdecimal():
+            seconds = int(words[-1])
+            if not 1 <= seconds <= consts.CAST_HOLD_HIGHEST_SECONDS:
+                return {"status": consts.STATUS_FAILED, "message": f"The number behind the spell is for how many seconds you hold it: 1 to {consts.CAST_HOLD_HIGHEST_SECONDS}."}, True
+            extra[consts.KEY_COMMAND_SECONDS] = seconds
+            detail = " ".join(words[:-1])
         spell_form_id = parse_ref_id(detail) if len(detail) == SPELL_ID_LENGTH else None
         if spell_form_id is not None and spell_form_id != 0:
             item = format_ref_id(spell_form_id)
@@ -770,6 +798,78 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     return result, is_error
 
 
+async def _read_hand_over(action: str, target: str, detail: str, queue: CompanionCommandQueue) -> tuple[str, list[tuple[str, int]], str]:
+    """Reads a give or take that names several items, or give with 'junk'
+
+    Returns:
+        What is wrong with it as text for the AI (empty = nothing), the items as (ID, how many; COUNT_ALL = all),
+        and a sentence to add to the answer. No items and no problem: the command names one item, as always
+    """
+    if detail.lower() == consts.HAND_OVER_JUNK:
+        if action != consts.ACTION_GIVE:
+            return f"Only give knows '{consts.HAND_OVER_JUNK}'. For take, name the items.", [], ""
+        # The server works out itself what is junk, from the inventory of the companion
+        state_result = await queue.get_state(inventory=consts.INVENTORY_OWN, is_for_the_ai=False)
+        state = state_result.get("state")
+        inventory = state.get(KEY_INVENTORY_OWN) if isinstance(state, dict) and state_result.get("inventory_wanted") else None
+        if not isinstance(inventory, dict):
+            return "The game did not send your inventory in time, so nothing was handed over. Try again.", [], ""
+        junk = [(str(item["id"]), consts.COUNT_ALL) for item in inventory["items"]
+                if not item["equipped"] and not item["favorite"] and item["group"] not in consts.JUNK_KEPT_GROUPS]
+        if len(junk) == 0:
+            return "You carry nothing that counts as junk: everything is worn, held, a favorite, ammunition, a potion, food or a key.", [], ""
+        note = ""
+        if len(junk) > consts.HAND_OVER_HIGHEST_ITEMS or inventory.get("total", 0) > len(inventory["items"]):
+            note = "That was not all of it: you carry more kinds of items than fit into one go. Give 'junk' once more."
+        return "", junk[:consts.HAND_OVER_HIGHEST_ITEMS], note
+
+    ids = [part for part in re.split(r"[,;\s]+", target) if part != ""]
+    if len(ids) < 2:
+        return "", [], ""
+    counts = [part.lower() for part in re.split(r"[,;\s]+", detail) if part != ""]
+    if len(counts) not in (0, 1, len(ids)):
+        return (f"You named {len(ids)} items and {len(counts)} numbers. 'detail' is how many of each ('1,1,3'), one number for "
+                f"all of them, '{consts.COUNT_ALL_TEXT}', or nothing for one of each."), [], ""
+    items: list[tuple[str, int]] = []
+    for place, id_text in enumerate(ids):
+        form_id = parse_ref_id(id_text)
+        if form_id is None or form_id == 0:
+            return f"'{id_text}' is not the ID of an item. Take the IDs from an inventory in STATE.", [], ""
+        count_text = "1" if len(counts) == 0 else counts[0] if len(counts) == 1 else counts[place]
+        if count_text == consts.COUNT_ALL_TEXT:
+            count = consts.COUNT_ALL
+        elif count_text.isdecimal() and int(count_text) > 0:
+            count = int(count_text)
+        else:
+            return f"'{count_text}' is not how many: a number above 0 or '{consts.COUNT_ALL_TEXT}'.", [], ""
+        # An item that is named twice changes hands once
+        if format_ref_id(form_id) not in [item_id for item_id, _ in items]:
+            items.append((format_ref_id(form_id), count))
+    if len(items) > consts.HAND_OVER_HIGHEST_ITEMS:
+        return f"At most {consts.HAND_OVER_HIGHEST_ITEMS} kinds of items at a time. You named {len(items)}.", [], ""
+    return "", items, ""
+
+
+async def _hand_over(action: str, items: list[tuple[str, int]], note: str, queue: CompanionCommandQueue) -> tuple[dict[str, Any], bool]:
+    """Sends a give or take with several items to the game and returns what it answered and whether that is an error"""
+    state = await queue.peek_state()
+    protocol = state.get("protocol") if isinstance(state, dict) else 0
+    if not isinstance(protocol, int) or protocol < consts.HAND_OVER_PROTOCOL:
+        return {"status": consts.STATUS_FAILED, "message": "Several items in one go need a newer game mod than the one that is running "
+                "(build and install it again with build.py --install). Nothing was handed over. One item at a time still works."}, True
+    numbers: list[int] = []
+    for item_id, count in items:
+        high, low = split_form_id(parse_ref_id(item_id) or 0)
+        numbers.extend([high, low, count])
+    # The first item goes along the usual way as well. The game mod reads the list
+    result = await queue.send_command(action, target=items[0][0], detail=",".join(item_id for item_id, _ in items), count=items[0][1],
+                                      extra={consts.KEY_COMMAND_ITEMS: numbers}, result_timeout_seconds=consts.HAND_OVER_TIMEOUT_SECONDS)
+    if note != "":
+        result = dict(result)
+        result["message"] = (str(result.get("message", "")) + " " + note).strip()
+    return result, result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+
+
 def _chain_of(queue: CompanionCommandQueue, voice: CompanionVoice | None) -> CompanionChain:
     """The chain of commands that wait for each other, made when it is needed for the first time"""
     if queue.chain is None:
@@ -790,7 +890,8 @@ def _check_step(step: Any) -> str:
     action = str(step.get("action", "")).strip().lower()
     if action not in consts.PLAYER_ACTIONS:
         return f"has the unknown action '{action}'"
-    if action in consts.ACTIONS_REQUIRING_TARGET and str(step.get("target", "") or "").strip() == "":
+    is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and str(step.get("detail", "") or "").strip().lower() == consts.HAND_OVER_JUNK
+    if action in consts.ACTIONS_REQUIRING_TARGET and str(step.get("target", "") or "").strip() == "" and not is_junk_wanted:
         return f"needs a target for '{action}' (ref_id from STATE)"
     if action == consts.ACTION_PAUSE and read_pause_seconds(step) is None:
         return "needs the seconds of the pause in 'detail': a number from 1 to 60"

@@ -121,6 +121,12 @@ KEY_HANDS: str = "hands"
 # First number: how many kinds of items there are in all (the game mod cuts long inventories off).
 # Then four numbers per item: form ID, how many, form type (see ITEM_GROUPS), worn or held (0 or 1). All 0 = left out.
 # The names are under the same key with NAMES_SUFFIX, built like KEY_NEARBY_NAMES
+# From a game mod whose plugin lists inventories (interface version 18) they come as texts instead, under the same
+# key with LINES_SUFFIX: first how many kinds of items there are (or passed the filter), then one text per item, its
+# parts separated by tabs: form ID as eight hex digits, how many, form type, the fourth number from above, name.
+# The SKSE plugin of the game mod writes these lines (GetInventoryLines in plugin.cpp of the plugin repository)
+LINES_SUFFIX: str = "_lines"
+INVENTORY_LINE_PART_COUNT: int = 5
 KEY_INVENTORY_OWN: str = "inventory_own"
 KEY_INVENTORY_PLAYER: str = "inventory_player"
 # Only when the server asked for it: what a dead character carries or a container holds, built like the inventories above.
@@ -240,7 +246,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 11
+GAME_PROTOCOL: int = 12
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -908,6 +914,9 @@ def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False)
     Args:
         is_gold_listed: Whether gold is one of the items. Without it, gold is left out (the state carries it as a number)
     """
+    lines = raw.get(key + LINES_SUFFIX)
+    if isinstance(lines, list):
+        return _read_inventory_lines(lines, is_gold_listed)
     values = _numbers(raw.get(key))
     if values is None or len(values) == 0 or (len(values) - 1) % VALUES_PER_ITEM != 0:
         return None
@@ -929,6 +938,38 @@ def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False)
             "kind": ITEM_KINDS.get(flags // ITEM_KIND_STEP, ""),
         })
     return {"total": values[0], "items": items}
+
+
+def _read_inventory_lines(raw_lines: list, is_gold_listed: bool) -> dict[str, Any] | None:
+    """The same for an inventory the plugin of the game mod listed (see LINES_SUFFIX). None if the first text is no number"""
+    if len(raw_lines) == 0 or not isinstance(raw_lines[0], str) or not raw_lines[0].strip().isdecimal():
+        return None
+    items: list[dict[str, Any]] = []
+    for entry in raw_lines[1:]:
+        if not isinstance(entry, str):
+            continue
+        # The name comes last and is not split any further
+        parts = entry.split(QUEST_PART_SEPARATOR, INVENTORY_LINE_PART_COUNT - 1)
+        if len(parts) != INVENTORY_LINE_PART_COUNT:
+            continue
+        id_text, count_text, type_text, flags_text, name = parts
+        form_id = parse_ref_id(id_text)
+        if form_id is None or form_id == 0 or not count_text.isdecimal() or not type_text.isdecimal() or not flags_text.isdecimal():
+            continue
+        item_id = format_ref_id(form_id)
+        if name.strip() == "" or (item_id == GOLD_ITEM_ID and not is_gold_listed):
+            continue
+        flags = int(flags_text)
+        items.append({
+            "id": item_id,
+            "name": _tidy_name(name),
+            "count": int(count_text),
+            "group": ITEM_GROUPS.get(int(type_text), OTHER_ITEM_GROUP),
+            "equipped": flags & ITEM_FLAG_EQUIPPED != 0,
+            "favorite": flags & ITEM_FLAG_FAVORITE != 0,
+            "kind": ITEM_KINDS.get(flags // ITEM_KIND_STEP, ""),
+        })
+    return {"total": int(raw_lines[0].strip()), "items": items}
 
 
 def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:

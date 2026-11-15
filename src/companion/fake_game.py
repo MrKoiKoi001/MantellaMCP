@@ -559,6 +559,32 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     return True, f"Fake game did '{action}'.", target_ref_id
 
 
+def hand_over(action: str, numbers: list[int]) -> tuple[bool, str]:
+    """Answers give and take with several items like the game mod does: what changed hands and what did not
+
+    Args:
+        numbers: consts.VALUES_PER_HAND_OVER numbers per item: the two halves of its ID and how many (0 = all of them)
+    """
+    items = PLAYER_ITEMS if action == consts.ACTION_TAKE else OWN_ITEMS
+    done: list[str] = []
+    failed: list[str] = []
+    for place in range(len(numbers) // consts.VALUES_PER_HAND_OVER):
+        high, low, wanted_count = numbers[place * consts.VALUES_PER_HAND_OVER:(place + 1) * consts.VALUES_PER_HAND_OVER]
+        wanted_id = f"{(high << 16) | low:08X}"
+        found = [(count, name) for item_id, count, form_type, equipped, name in items if item_id == wanted_id]
+        if len(found) == 0:
+            failed.append(f"number {place + 1} of your list (no such item)")
+            continue
+        count, name = found[0]
+        done.append(f"{min(wanted_count, count) if wanted_count > 0 else count} {name}")
+    message = "Nothing changed hands."
+    if len(done) > 0:
+        message = ("You take from the player: " if action == consts.ACTION_TAKE else "You give the player: ") + ", ".join(done) + "."
+    if len(failed) > 0:
+        message += " Not handed over: " + ", ".join(failed) + "."
+    return len(done) > 0, message
+
+
 def is_sitting_after(action: str, is_sitting: bool) -> bool:
     """Like the game: 'sit' seats the companion (the simulator's companion is there at once), 'wait', 'stand_down',
     'look_at', 'gesture' and what it does with its things leave it seated, every other command makes it get up"""
@@ -729,6 +755,9 @@ def main():
             item_id = f"{item_number:08X}" if item_number != 0 else ""
             is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""), horse_ref_id,
                                                         bool(command.get(consts.KEY_COMMAND_QUIET)))
+            if isinstance(command.get(consts.KEY_COMMAND_ITEMS), list):
+                # give or take with several items in one go
+                is_ok, message = hand_over(str(action), [int(number) for number in command[consts.KEY_COMMAND_ITEMS]])
             if is_ok:
                 called_horse_ref_id = called_horse_after(str(action), str(target or ""), horse_ref_id, called_horse_ref_id)
                 horse_ref_id = horse_after(str(action), str(target or ""), horse_ref_id)
