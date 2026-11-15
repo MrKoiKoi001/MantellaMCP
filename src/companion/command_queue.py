@@ -7,6 +7,24 @@ from src.companion.companion_constants import companion_constants as consts
 from src.companion.ref_ids import parse_ref_id, split_form_id
 
 
+# From this long on describe_silence counts in minutes
+SILENCE_IN_MINUTES_FROM_SECONDS: float = 120.0
+
+
+def describe_silence(silent_seconds: float) -> str:
+    """Returns as text for the AI that the game has stopped asking for commands, and what that means
+
+    The server only sees that the requests of the game stay away. A menu, a loading screen and a game that was
+    closed look the same from here
+    """
+    if silent_seconds < SILENCE_IN_MINUTES_FROM_SECONDS:
+        duration = f"{max(int(silent_seconds), 1)} seconds"
+    else:
+        duration = f"{int(silent_seconds // 60)} minutes"
+    return (f"The game has not asked for commands for {duration}: it is paused (the player is probably in a menu "
+            "or at a loading screen) or was closed.")
+
+
 class CompanionCommandQueue:
     """Hands commands from the MCP side (the AI) to the game side (Skyrim).
 
@@ -44,9 +62,17 @@ class CompanionCommandQueue:
     QUICK_HOLD_SECONDS: float = 1.0
     # What the game said about being busy counts as fresh for this long
     BUSY_FRESH_SECONDS: float = 1.5
+    # In a menu and at a loading screen the game stands still and its mod asks for nothing. A command waits this long
+    # for a game that was there before to go on. It does not stay any longer: carried out minutes later it would be stale
+    PAUSE_WAIT_SECONDS: float = 20.0
+    # A game that has been silent for longer than this is not waited for at all. It may as well have been closed, and
+    # then every command would hang for PAUSE_WAIT_SECONDS
+    PAUSE_LONGEST_SECONDS: float = 300.0
 
-    def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0) -> None:
+    def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0,
+                 pause_wait_seconds: float = PAUSE_WAIT_SECONDS) -> None:
         self.__hold_seconds: float = hold_seconds
+        self.__pause_wait_seconds: float = pause_wait_seconds
         # Whether the game mod is to cut off the sentences the game lets the companion say on its own.
         # Goes along with every command, the game mod takes it from report_state
         self.mutes_game_lines: bool = False
@@ -147,7 +173,7 @@ class CompanionCommandQueue:
                            run: bool = False, say_ms: int = 0, space_meters: int = 0,
                            space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
                            space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES,
-                           extra: dict[str, Any] | None = None) -> dict[str, Any]:
+                           extra: dict[str, Any] | None = None, waits_for_pause: bool = True) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -175,6 +201,8 @@ class CompanionCommandQueue:
             say_ms: For say: how long the sound of the sentence is in milliseconds
             things: For report_state: whether the state should carry the things close to the player.
                 'count' is then how many characters (and things of each kind) the state should list at most
+            waits_for_pause: Whether the command waits for a game that stands still (a menu, a loading screen) to go on,
+                for up to PAUSE_WAIT_SECONDS. False = it only waits the short time the game needs to ask again
             result_timeout_seconds: How long to wait for the result. The game reports it right away,
                 unless a request for the state came in together with the command
 
@@ -182,8 +210,11 @@ class CompanionCommandQueue:
             A dictionary with 'status' (see companion_constants.STATUS_*) and 'message'
         """
         async with self.__changed:
-            if not self.__is_game_connected():
+            silent_seconds = self.__silent_seconds()
+            if silent_seconds is None:
                 return self.__status(consts.STATUS_GAME_NOT_CONNECTED, "The game is not polling. Is Skyrim running with a loaded save?")
+            if silent_seconds > self.PAUSE_LONGEST_SECONDS:
+                return self.__status(consts.STATUS_GAME_NOT_CONNECTED, describe_silence(silent_seconds) + " The command was not carried out.")
 
             command_id = uuid.uuid4().hex
             target_high, target_low = split_form_id(parse_ref_id(target) or 0)
@@ -220,12 +251,17 @@ class CompanionCommandQueue:
             self.__pending_commands.append(command)
             self.__changed.notify_all()
 
-            is_delivered = await self.__wait_until(
-                lambda: command_id in self.__delivered_command_ids,
-                self.__connection_grace_seconds + 2.0)
+            # A game that stands still (a menu, a loading screen) is waited for
+            pickup_seconds = self.__connection_grace_seconds + 2.0
+            if waits_for_pause:
+                pickup_seconds = max(pickup_seconds, self.__pause_wait_seconds)
+            is_delivered = await self.__wait_until(lambda: command_id in self.__delivered_command_ids, pickup_seconds)
             if not is_delivered:
                 self.__pending_commands = [c for c in self.__pending_commands if c is not command]
-                return self.__status(consts.STATUS_NOT_DELIVERED, "The game did not pick up the command in time.")
+                if not waits_for_pause:
+                    return self.__status(consts.STATUS_NOT_DELIVERED, "The game did not pick up the command in time.")
+                return self.__status(consts.STATUS_NOT_DELIVERED, describe_silence(self.__silent_seconds() or 0.0)
+                                     + " The command was NOT carried out and will not be made up for. Try again when the game goes on.")
             self.__delivered_command_ids.discard(command_id)
 
             if action == consts.ACTION_REPORT_STATE:
@@ -233,6 +269,10 @@ class CompanionCommandQueue:
 
             has_result = await self.__wait_until(lambda: command_id in self.__results, result_timeout_seconds)
             if not has_result:
+                if not self.__is_poll_open:
+                    # The game mod asks again right after it got an answer, unless the game stands still or a command keeps it
+                    return self.__status(consts.STATUS_DELIVERED, "The game received the command but has not reported a result yet: "
+                                         "it is paused (the player may be in a menu) or busy. It carries the command out as soon as it goes on.")
                 return self.__status(consts.STATUS_DELIVERED, "The game received the command but has not reported a result yet.")
             result = self.__results.pop(command_id)
             is_ok = bool(result.get(consts.KEY_RESULT_OK, False))
@@ -245,13 +285,14 @@ class CompanionCommandQueue:
                         space: bool = False, find: str = "", space_meters: int = 0,
                         space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
                         space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "",
-                        inventory_filter: str = "", read: str = "", read_page: int = 1) -> dict[str, Any]:
+                        inventory_filter: str = "", read: str = "", read_page: int = 1, merchant: str = "") -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
             inventory: Whose inventory the fresh state should carry (companion_constants.INVENTORY_...), or empty for none
             inventory_filter: Only a part of that inventory (companion_constants.FILTER_FAVORITES or FILTER_EQUIPPED), or empty for all of it
             corpse: ref_id of a dead character or a container. The fresh state then carries what is in it, instead of 'inventory'
+            merchant: ref_id of a merchant. The fresh state then carries what it offers, instead of 'inventory'
             things: Whether the fresh state should carry the things close to the player (furniture, containers, loose items)
             max_lines: How many characters, and how many things, the fresh state should list at most
             around_companion: Whether the fresh state should list everything as the companion sees it (what is around
@@ -267,13 +308,16 @@ class CompanionCommandQueue:
                 happened and what became of earlier commands stays kept for the next time the AI asks
 
         Returns:
-            A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted', 'corpse_wanted',
+            A dictionary with 'connected', 'silent_seconds', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted', 'corpse_wanted',
             'things_wanted', 'max_lines', 'around_wanted', 'stats_wanted', 'visible_wanted', 'space_wanted', 'find_wanted',
             'read_wanted', 'heard' (what the characters in the game said since this was called the last time),
             'events' (what happened in the game since then) and 'reports' (what became of loot and move_to since then)
         """
         if corpse != "":
             inventory = consts.INVENTORY_CORPSE
+            merchant = ""
+        elif merchant != "":
+            inventory = consts.INVENTORY_MERCHANT
         if inventory != "":
             refresh_timeout_seconds = max(refresh_timeout_seconds, self.INVENTORY_TIMEOUT_SECONDS)
         async with self.__changed:
@@ -289,11 +333,11 @@ class CompanionCommandQueue:
                 read_high, read_low = split_form_id(parse_ref_id(read) or 0)
                 extra.update({consts.KEY_COMMAND_READ: read, consts.KEY_COMMAND_READ_HIGH: read_high,
                               consts.KEY_COMMAND_READ_LOW: read_low, consts.KEY_COMMAND_READ_PAGE: read_page})
-            request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory, count=max_lines, things=things,
+            request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse or merchant, detail=inventory, count=max_lines, things=things,
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
                                               find=find, space_meters=space_meters, space_degrees=space_degrees,
                                               space_from_facing=space_from_facing, space_angle=space_angle,
-                                              extra=extra if len(extra) > 0 else None)
+                                              extra=extra if len(extra) > 0 else None, waits_for_pause=False)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -305,6 +349,8 @@ class CompanionCommandQueue:
                 age = round(time.monotonic() - self.__state_time, 1)
             return {
                 "connected": self.__is_game_connected(),
+                # For how long the game has not asked for commands (0 = it is asking right now, None = it never did)
+                "silent_seconds": self.__silent_seconds(),
                 "fresh": is_fresh,
                 "state_age_seconds": age,
                 "state": self.__state,
@@ -313,6 +359,7 @@ class CompanionCommandQueue:
                 "inventory_filter": inventory_filter,
                 "inventory_missed": inventory != "" and not is_fresh,
                 "corpse_wanted": corpse if is_fresh else "",
+                "merchant_wanted": merchant if is_fresh else "",
                 # The kept state may still carry things from an earlier question
                 "things_wanted": things and is_fresh,
                 "things_missed": things and not is_fresh,
@@ -399,6 +446,14 @@ class CompanionCommandQueue:
         if self.__last_poll_time is None:
             return False
         return time.monotonic() - self.__last_poll_time <= self.__connection_grace_seconds
+
+    def __silent_seconds(self) -> float | None:
+        """For how long the game has not asked for commands (0 = a request of it is open, None = it never asked)"""
+        if self.__is_poll_open:
+            return 0.0
+        if self.__last_poll_time is None:
+            return None
+        return time.monotonic() - self.__last_poll_time
 
     def __store_results(self, results: list[dict[str, Any]] | None):
         if not isinstance(results, list):

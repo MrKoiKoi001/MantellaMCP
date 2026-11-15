@@ -6,8 +6,9 @@ the AI needs to decide, instead of the whole state as JSON.
 """
 from typing import Any
 
+from src.companion.command_queue import describe_silence
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import (ITEM_KINDS_BY_GROUP, GAME_PROTOCOL, PLUGIN_VERSION_WITH_SIGHT, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
+from src.companion.game_state import (LEAD_WAITING, LEAD_WALKING, MERCHANT_IS_CLOSED, MERCHANT_IS_NONE, ITEM_KINDS_BY_GROUP, GAME_PROTOCOL, PLUGIN_VERSION_WITH_SIGHT, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
                                       TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM,
                                       SPACE_SLOPE, SPACE_WALL)
@@ -57,7 +58,12 @@ def describe_state(state_result: dict[str, Any]) -> str:
     state = state_result.get("state")
     is_connected = bool(state_result.get("connected"))
     if not is_connected:
-        lines.append("The game is not connected. Is Skyrim running with a loaded save?")
+        silent_seconds = state_result.get("silent_seconds")
+        if isinstance(silent_seconds, (int, float)):
+            # The game was there before: it stands still (a menu, a loading screen) or was closed
+            lines.append(describe_silence(silent_seconds))
+        else:
+            lines.append("The game is not connected. Is Skyrim running with a loaded save?")
     if not isinstance(state, dict):
         if is_connected:
             lines.append("The game has not sent its state yet. Ask again in a moment.")
@@ -196,6 +202,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
     corpse_wanted = state_result.get("corpse_wanted")
     if isinstance(corpse_wanted, str) and corpse_wanted != "":
         lines.extend(_describe_corpse(corpse_wanted, state.get("corpse"), state.get(KEY_INVENTORY_CORPSE)))
+    merchant_wanted = state_result.get("merchant_wanted")
+    if isinstance(merchant_wanted, str) and merchant_wanted != "":
+        lines.extend(_describe_merchant(merchant_wanted, state.get("merchant")))
     if state_result.get("inventory_missed"):
         lines.append("The game did not send the inventory in time. Ask again.")
     read_wanted = state_result.get("read_wanted")
@@ -395,6 +404,56 @@ def _describe_corpse(wanted_ref_id: str, corpse: Any, inventory: Any) -> list[st
     return lines if len(lines) > 1 else [f"The body of {name} carries nothing."]
 
 
+def _describe_trade_items(items: list[dict[str, Any]]) -> list[str]:
+    """One line per kind of item. After each item its ID, how many there are if not one, and the price of one piece"""
+    lines: list[str] = []
+    for group in list(ITEM_GROUPS.values()) + [OTHER_ITEM_GROUP]:
+        texts: list[str] = []
+        for item in items:
+            if item.get("group") != group:
+                continue
+            text = f"{item.get('name')} {item.get('id')}"
+            if item.get("count", 1) != 1:
+                text += f" x{item['count']}"
+            texts.append(f"{text} {item.get('price')} gold")
+        if len(texts) > 0:
+            lines.append(f"- {group}: {', '.join(texts)}")
+    return lines
+
+
+def _describe_merchant(wanted_ref_id: str, merchant: Any) -> list[str]:
+    """What the merchant the AI asked about offers, and what the companion could sell to it, for the commands buy and sell"""
+    if not isinstance(merchant, dict) or merchant.get("ref_id") != wanted_ref_id:
+        return [f"The game told nothing about a merchant with the ref_id {wanted_ref_id}: there is no such character around, or the "
+                "game mod is too old to know merchants. Take the ref_id from 'Nearby'."]
+    name = f"{merchant.get('name')} {wanted_ref_id}"
+    if merchant.get("status") == MERCHANT_IS_NONE:
+        return [f"{name} is no merchant."]
+    hours = f"from {merchant.get('start_hour')} to {merchant.get('end_hour')} o'clock"
+    if merchant.get("status") == MERCHANT_IS_CLOSED:
+        head = f"{name} does not trade at this hour, only {hours}."
+    else:
+        head = f"{name} trades ({hours})."
+    lines: list[str] = [f"{head} Gold: the merchant has {merchant.get('gold')}, you have {merchant.get('own_gold')}."]
+    wares = merchant.get("wares", [])
+    if len(wares) == 0:
+        lines.append("Wares: the game lists none. It may not have filled the chest of a merchant the player has never traded with.")
+    else:
+        lines.append("Wares, each with its ID and the price of one piece, for the command buy:")
+        lines.extend(_describe_trade_items(wares))
+        if merchant.get("ware_total", 0) > len(wares):
+            lines.append(f"- The list is cut off: only {len(wares)} of {merchant['ware_total']} kinds of wares are shown.")
+    sellable = merchant.get("sellable", [])
+    if len(sellable) > 0:
+        lines.append("What you could sell here (nothing you wear or hold), each with the price one piece brings, for the command sell:")
+        lines.extend(_describe_trade_items(sellable))
+        if merchant.get("sell_total", 0) > len(sellable):
+            lines.append(f"- The list is cut off: only {len(sellable)} of {merchant['sell_total']} kinds of things are shown.")
+    else:
+        lines.append("You carry nothing this merchant would buy.")
+    return lines
+
+
 def _describe_heard(heard: Any, companion: Any) -> list[str]:
     """What the characters in the game said since the AI asked the last time. No lines at all if that is nothing"""
     if not isinstance(heard, list) or len(heard) == 0:
@@ -578,6 +637,16 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
     # The command sneak took the companion out of sneaking as the player does
     if companion.get("sneak_mode") in (consts.SNEAK_ON, consts.SNEAK_OFF):
         parts.append(f"sneak {companion['sneak_mode']}")
+    if companion.get("leading") == LEAD_WAITING:
+        parts.append("leading the player (waiting for the player to catch up)")
+    elif companion.get("leading") == LEAD_WALKING:
+        parts.append("leading the player")
+    # Healing by itself is only told when it is not as usual
+    auto_heal_percent = companion.get("auto_heal_percent")
+    if auto_heal_percent == 0:
+        parts.append("auto-heal off")
+    elif auto_heal_percent is not None and auto_heal_percent != consts.AUTO_HEAL_USUAL_PERCENT:
+        parts.append(f"auto-heal below {auto_heal_percent}%")
     if companion.get("retreating"):
         parts.append("retreating")
     target_ref_id = companion.get("target_ref_id")

@@ -165,6 +165,19 @@ KEY_CORPSE: str = "corpse"
 KEY_CORPSE_NAME: str = "corpse_name"
 # What became of the commands loot, move_to and sit since the last state, as text for the AI. Missing if that is nothing
 KEY_REPORT: str = "report"
+# What a merchant offers, as the plugin of the game mod lists it (only when the server asked for it). The first text,
+# its parts separated by tabs: ref ID of the merchant as eight hex digits, status (see MERCHANT_STATUSES), gold of the
+# merchant, gold of the companion, the hours the merchant trades from and to, how many kinds of wares it has, how
+# many kinds of things the companion could sell, name. Then one text per thing: side (0 = the merchant sells it,
+# 1 = the companion could sell it), form ID as eight hex digits, how many, form type, price of one piece, name
+KEY_MERCHANT_LINES: str = "merchant_lines"
+MERCHANT_HEAD_PART_COUNT: int = 9
+MERCHANT_ITEM_PART_COUNT: int = 6
+MERCHANT_TRADES: str = "trades"
+MERCHANT_IS_NONE: str = "none"
+MERCHANT_IS_CLOSED: str = "closed"
+MERCHANT_STATUSES: dict[int, str] = {0: MERCHANT_TRADES, 1: MERCHANT_IS_NONE, 2: MERCHANT_IS_CLOSED}
+MERCHANT_SIDE_COMPANION: int = 1
 # One text per thing that happened since the last state (a fight, a death, hits, what the player used, read, took),
 # oldest first. Its parts are separated by tabs: how many seconds ago, the time of day in the game in minutes since
 # midnight, urgent (1 or 0), what happened. The companion is called "you" in these texts.
@@ -197,7 +210,15 @@ PLAYER_VALUE_COUNT_WITHOUT_WEAPON: int = 7
 PLAYER_PLACE_OF_WEAPON: int = 7
 PLAYER_PLACE_OF_SITTING: int = 8
 PLAYER_PLACE_OF_SLEEPING: int = 9
-COMPANION_VALUE_COUNT: int = 20
+COMPANION_VALUE_COUNT: int = 22
+# Older game mods say nothing about healing by itself (below how many percent of health, 0 = off) and about leading
+# the player (see LEAD_STATES)
+COMPANION_VALUE_COUNT_WITHOUT_HEALING: int = 20
+COMPANION_PLACE_OF_AUTO_HEAL: int = 20
+COMPANION_PLACE_OF_LEADING: int = 21
+LEAD_WALKING: str = "walking"
+LEAD_WAITING: str = "waiting"
+LEAD_STATES: dict[int, str] = {1: LEAD_WALKING, 2: LEAD_WAITING}
 # Older game mods say nothing about sneaking: whether the companion sneaks, and how it does because of the command
 # sneak (see SNEAK_MODES)
 COMPANION_VALUE_COUNT_WITHOUT_SNEAKING: int = 18
@@ -246,7 +267,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 12
+GAME_PROTOCOL: int = 13
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -442,6 +463,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
             }
             if corpse_inventory is not None:
                 state[KEY_INVENTORY_CORPSE] = corpse_inventory
+    merchant = _read_merchant(raw.get(KEY_MERCHANT_LINES))
+    if merchant is not None:
+        state["merchant"] = merchant
     report = raw.get(KEY_REPORT)
     if isinstance(report, str) and report.strip() != "":
         state["report"] = report.strip()
@@ -492,7 +516,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     """No companion in the result means: the player has no follower at the moment"""
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
-    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_SNEAKING, COMPANION_VALUE_COUNT_WITHOUT_RUNNING,
+    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_HEALING,
+                                             COMPANION_VALUE_COUNT_WITHOUT_SNEAKING, COMPANION_VALUE_COUNT_WITHOUT_RUNNING,
                                              COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
                                              COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
         return None
@@ -536,6 +561,10 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     if len(values) > COMPANION_PLACE_OF_SNEAK_MODE:
         companion["sneaking"] = values[COMPANION_PLACE_OF_SNEAKING] != 0
         companion["sneak_mode"] = SNEAK_MODES.get(values[COMPANION_PLACE_OF_SNEAK_MODE], SNEAK_MODES[0])
+    if len(values) > COMPANION_PLACE_OF_LEADING:
+        companion["auto_heal_percent"] = values[COMPANION_PLACE_OF_AUTO_HEAL]
+        if values[COMPANION_PLACE_OF_LEADING] in LEAD_STATES:
+            companion["leading"] = LEAD_STATES[values[COMPANION_PLACE_OF_LEADING]]
     for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() != "":
@@ -970,6 +999,52 @@ def _read_inventory_lines(raw_lines: list, is_gold_listed: bool) -> dict[str, An
             "kind": ITEM_KINDS.get(flags // ITEM_KIND_STEP, ""),
         })
     return {"total": int(raw_lines[0].strip()), "items": items}
+
+
+def _read_merchant(raw_lines: Any) -> dict[str, Any] | None:
+    """What a merchant offers and what the companion could sell to it (see KEY_MERCHANT_LINES). None if the game sent none"""
+    if not isinstance(raw_lines, list) or len(raw_lines) == 0 or not isinstance(raw_lines[0], str):
+        return None
+    # The name comes last and is not split any further
+    head = raw_lines[0].split(QUEST_PART_SEPARATOR, MERCHANT_HEAD_PART_COUNT - 1)
+    if len(head) != MERCHANT_HEAD_PART_COUNT:
+        return None
+    form_id = parse_ref_id(head[0])
+    if form_id is None or not all(text.isdecimal() for text in head[1:-1]):
+        return None
+    status, gold, own_gold, start_hour, end_hour, ware_total, sell_total = (int(text) for text in head[1:-1])
+    merchant: dict[str, Any] = {
+        "ref_id": format_ref_id(form_id),
+        "name": _tidy_name(head[-1]) if head[-1].strip() != "" else UNKNOWN_NAME,
+        "status": MERCHANT_STATUSES.get(status, MERCHANT_IS_NONE),
+        "gold": gold,
+        "own_gold": own_gold,
+        "start_hour": start_hour,
+        "end_hour": end_hour,
+        "ware_total": ware_total,
+        "sell_total": sell_total,
+        "wares": [],
+        "sellable": [],
+    }
+    for entry in raw_lines[1:]:
+        if not isinstance(entry, str):
+            continue
+        parts = entry.split(QUEST_PART_SEPARATOR, MERCHANT_ITEM_PART_COUNT - 1)
+        if len(parts) != MERCHANT_ITEM_PART_COUNT:
+            continue
+        side_text, id_text, count_text, type_text, price_text, name = parts
+        item_form_id = parse_ref_id(id_text)
+        if item_form_id is None or item_form_id == 0 or name.strip() == "" or not all(text.isdecimal() for text in (side_text, count_text, type_text, price_text)):
+            continue
+        item = {
+            "id": format_ref_id(item_form_id),
+            "name": _tidy_name(name),
+            "count": int(count_text),
+            "group": ITEM_GROUPS.get(int(type_text), OTHER_ITEM_GROUP),
+            "price": int(price_text),
+        }
+        merchant["sellable" if int(side_text) == MERCHANT_SIDE_COMPANION else "wares"].append(item)
+    return merchant
 
 
 def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:

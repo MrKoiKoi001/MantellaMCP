@@ -2978,3 +2978,155 @@ def test_give_and_take_with_several_items_and_give_junk():
     is_ok, message = hand_over(consts.ACTION_GIVE, halves("00013985") + [0] + halves("0000BEEF") + [2])
     assert is_ok and message.startswith("You give the player: ") and message.endswith(" Not handed over: number 2 of your list (no such item).")
     assert hand_over(consts.ACTION_TAKE, halves("0000BEEF") + [1]) == (False, "Nothing changed hands. Not handed over: number 1 of your list (no such item).")
+
+
+def test_a_paused_game_is_told_apart_from_no_game():
+    import asyncio
+
+    from src.companion.command_queue import CompanionCommandQueue, describe_silence
+    from src.companion.state_text import describe_state
+
+    silence_start = "The game has not asked for commands for "
+    assert describe_silence(12.7) == silence_start + "12 seconds: it is paused (the player is probably in a menu or at a loading screen) or was closed."
+    assert describe_silence(0.2).startswith(silence_start + "1 seconds") and describe_silence(200).startswith(silence_start + "3 minutes")
+    # The text of STATE: a game that never came is told apart from one that went silent
+    paused_lines = describe_state({"connected": False, "silent_seconds": 42.0, "fresh": False, "state_age_seconds": 50.0,
+                                   "state": {"location": "Whiterun", "nearby": []}}).splitlines()
+    assert paused_lines[:2] == [describe_silence(42.0), "Last known state, 50.0 seconds old:"]
+    assert describe_state({"connected": False, "silent_seconds": None, "state": None}) == "The game is not connected. Is Skyrim running with a loaded save?"
+
+    async def scenario() -> dict:
+        answers: dict = {}
+        # Without a grace period the game counts as silent right after its request
+        queue = CompanionCommandQueue(hold_seconds=0.05, connection_grace_seconds=0.0, pause_wait_seconds=3.0)
+        # No game ever asked: the command fails at once
+        answers["never"] = await queue.send_command(consts.ACTION_FOLLOW)
+        answers["never_state"] = await queue.get_state()
+        await queue.poll({"location": "Whiterun"}, [])
+        # The game was there and went silent (a menu): the command waits for it, and the game comes back in time
+        async def come_back() -> list[dict]:
+            await asyncio.sleep(0.5)
+            commands = await queue.poll(None, [])
+            await queue.poll(None, [{consts.KEY_COMMAND_ID: commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True,
+                                     consts.KEY_RESULT_MESSAGE: "You follow the player."}])
+            return commands
+        game = asyncio.create_task(come_back())
+        answers["waited"] = await queue.send_command(consts.ACTION_FOLLOW)
+        answers["picked_up"] = await game
+        # It stays silent: STATE tells so at once and shows what it knows, and the command gives up after its wait
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        answers["paused_state"] = await queue.get_state()
+        answers["state_seconds"] = time.monotonic() - started
+        answers["given_up"] = await queue.send_command(consts.ACTION_FOLLOW)
+        # A command that was given up is not carried out later
+        answers["later"] = await queue.poll(None, [])
+        return answers
+
+    answers = asyncio.run(scenario())
+    assert answers["never"] == {"status": consts.STATUS_GAME_NOT_CONNECTED, "message": "The game is not polling. Is Skyrim running with a loaded save?"}
+    assert answers["never_state"]["connected"] is False and answers["never_state"]["silent_seconds"] is None
+    assert answers["waited"] == {"status": consts.STATUS_DONE, "message": "You follow the player."} and len(answers["picked_up"]) == 1
+    assert answers["paused_state"]["connected"] is False and 0.0 < answers["paused_state"]["silent_seconds"] < 2.0
+    assert answers["paused_state"]["state"]["location"] == "Whiterun" and answers["state_seconds"] < 1.0
+    assert answers["given_up"]["status"] == consts.STATUS_NOT_DELIVERED
+    assert answers["given_up"]["message"].startswith(silence_start + "3 seconds") and "NOT carried out" in answers["given_up"]["message"]
+    assert answers["later"] == []
+
+
+def test_lead_auto_heal_and_trading_with_a_merchant():
+    from src.companion import game_state
+    from src.companion.fake_game import MERCHANT_REF_ID, build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(state: dict, **wanted) -> str:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, **wanted})
+
+    # Healing by itself is only told when it is not as usual, leading always
+    usual = read_game_state(build_state())
+    assert usual["companion"]["auto_heal_percent"] == consts.AUTO_HEAL_USUAL_PERCENT and "leading" not in usual["companion"]
+    assert "auto-heal" not in text_for(usual) and "leading" not in text_for(usual)
+    assert "auto-heal off" in text_for(read_game_state(build_state(auto_heal_percent=0)))
+    assert "auto-heal below 60%" in text_for(read_game_state(build_state(auto_heal_percent=60)))
+    leading_text = text_for(read_game_state(build_state(lead_state=1)))
+    assert "leading the player" in leading_text and "catch up" not in leading_text
+    assert "leading the player (waiting for the player to catch up)" in text_for(read_game_state(build_state(lead_state=2)))
+    # A game mod from before says nothing about either
+    old_state = build_state()
+    old_state[game_state.KEY_COMPANION_VALUES] = old_state[game_state.KEY_COMPANION_VALUES][:game_state.COMPANION_VALUE_COUNT_WITHOUT_HEALING]
+    assert "auto_heal_percent" not in read_game_state(old_state)["companion"]
+
+    # What a merchant offers: wares with prices, the gold of both, and what the companion could sell
+    merchant_state = read_game_state(build_state(inventory=consts.INVENTORY_MERCHANT, corpse_ref_id=MERCHANT_REF_ID))
+    merchant = merchant_state["merchant"]
+    assert (merchant["status"], merchant["gold"], merchant["own_gold"]) == (game_state.MERCHANT_TRADES, 750, 30)
+    assert [(ware["id"], ware["count"], ware["price"]) for ware in merchant["wares"]] == [("00013989", 2, 85), ("0003EADD", 3, 56)]
+    merchant_lines = text_for(merchant_state, merchant_wanted=MERCHANT_REF_ID).splitlines()
+    start = merchant_lines.index(f"Whiterun Guard {MERCHANT_REF_ID} trades (from 8 to 20 o'clock). Gold: the merchant has 750, you have 30.")
+    assert merchant_lines[start + 1:start + 6] == [
+        "Wares, each with its ID and the price of one piece, for the command buy:",
+        "- Weapons: Steel Sword 00013989 x2 85 gold", "- Potions and food: Potion of Minor Healing 0003EADD x3 56 gold",
+        "What you could sell here (nothing you wear or hold), each with the price one piece brings, for the command sell:",
+        "- Weapons: Hunting Bow 00013985 17 gold"]
+    # Without the argument the wares are not shown, and somebody who is no merchant is told as such
+    assert "Wares" not in text_for(merchant_state)
+    no_merchant = read_game_state(build_state(inventory=consts.INVENTORY_MERCHANT, corpse_ref_id="FF000A01"))
+    assert f"FF000A01 is no merchant." in text_for(no_merchant, merchant_wanted="FF000A01")
+    assert "told nothing about a merchant" in text_for(usual, merchant_wanted=MERCHANT_REF_ID)
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        received_commands: list[dict] = []
+        states: list[dict] = [build_state()]
+
+        def game():
+            results: list[dict] = []
+            for _ in range(9):
+                body = {consts.KEY_RESULTS: results, consts.KEY_BUSY: 0, consts.KEY_FAILS: 0}
+                if len(states) > 0:
+                    body[consts.KEY_STATE] = states.pop(0)
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                results = []
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    if sent[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE:
+                        states.append(build_state(inventory=str(sent.get(consts.KEY_COMMAND_DETAIL) or ""),
+                                                  corpse_ref_id=str(sent.get(consts.KEY_COMMAND_TARGET) or "")))
+                    else:
+                        received_commands.append(sent)
+                        results.append({consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # What the server turns down itself never reaches the game
+        assert "needs a target" in command({"action": "lead"})["message"]
+        assert "needs a target" in command({"action": "buy", "detail": "00013989"})["message"]
+        assert "ID of the item" in command({"action": "buy", "target": MERCHANT_REF_ID})["message"]
+        assert "ID of the item" in command({"action": "sell", "target": MERCHANT_REF_ID, "detail": "two swords"})["message"]
+        assert "how many" in command({"action": "buy", "target": MERCHANT_REF_ID, "detail": "00013989 0"})["message"]
+        assert "auto_heal needs" in command({"action": "auto_heal", "detail": "sometimes"})["message"]
+        assert "auto_heal needs" in command({"action": "auto_heal", "detail": "95"})["message"]
+        assert "how many meters" in command({"action": "lead", "target": "000F6845", "detail": "far"})["message"]
+        assert not received_commands
+        # lead carries the distance to keep like move_to, and 'run'
+        assert command({"action": "lead", "target": "000f6845", "detail": "3 m", "run": True})["status"] == consts.STATUS_DONE
+        lead = received_commands[0]
+        assert (lead[consts.KEY_COMMAND_ACTION], lead[consts.KEY_COMMAND_TARGET], lead[consts.KEY_COMMAND_COUNT], lead[consts.KEY_COMMAND_RUN]) == ("lead", "000F6845", 3, 1)
+        # auto_heal: off, on, or the percent (which means on)
+        command({"action": "auto_heal", "detail": "OFF"})
+        command({"action": "auto_heal", "detail": "60%"})
+        assert [(sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_COUNT]) for sent in received_commands[1:3]] == [("off", 0), ("on", 60)]
+        # buy and sell: the merchant as the target, the item in two halves, and how many (0 = all)
+        command({"action": "buy", "target": MERCHANT_REF_ID, "detail": "0003eadd 2"})
+        command({"action": "sell", "target": MERCHANT_REF_ID, "detail": "00013985, all"})
+        command({"action": "buy", "target": MERCHANT_REF_ID, "detail": "00013989"})
+        bought, sold, bought_one = received_commands[3:6]
+        assert (bought[consts.KEY_COMMAND_TARGET], bought[consts.KEY_COMMAND_ITEM_HIGH], bought[consts.KEY_COMMAND_ITEM_LOW], bought[consts.KEY_COMMAND_COUNT]) == (MERCHANT_REF_ID, 0x0003, 0xEADD, 2)
+        assert (sold[consts.KEY_COMMAND_ACTION], sold[consts.KEY_COMMAND_ITEM_LOW], sold[consts.KEY_COMMAND_COUNT]) == ("sell", 0x3985, consts.COUNT_ALL)
+        assert bought_one[consts.KEY_COMMAND_COUNT] == 1
+        # STATE with 'merchant' asks the game about that character and shows what it offers
+        assert "is not a ref_id" in tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"merchant": "the smith"}}))["message"]
+        wares_text = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"merchant": MERCHANT_REF_ID}}))
+        assert "Steel Sword 00013989 x2 85 gold" in wares_text and "Hunting Bow 00013985 17 gold" in wares_text

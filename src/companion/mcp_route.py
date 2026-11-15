@@ -19,7 +19,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.37"
+SERVER_VERSION: str = "0.39"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -39,6 +39,7 @@ ARGUMENT_DEBUG: str = "debug"
 ARGUMENT_INVENTORY: str = "inventory"
 ARGUMENT_FILTER: str = "filter"
 ARGUMENT_CORPSE: str = "corpse"
+ARGUMENT_MERCHANT: str = "merchant"
 ARGUMENT_THINGS: str = "things"
 ARGUMENT_MAX: str = "max"
 ARGUMENT_AROUND: str = "around"
@@ -193,7 +194,23 @@ TOOLS: list[dict[str, Any]] = [
             "hold again what you held before; that takes a few seconds and costs you magicka as it does the player (too "
             "little magicka = no spell). You turn to the target first. A spell that is held like flames or healing hands "
             f"runs for {consts.CAST_HOLD_SECONDS} seconds; a number behind the spell sets other seconds (1 to "
-            f"{consts.CAST_HOLD_HIGHEST_SECONDS}), eg 'Flames 6'. In the saddle and on a seat it is cast without the movement. "
+            f"{consts.CAST_HOLD_HIGHEST_SECONDS}), eg 'Flames 6'. In the saddle and on a seat it is cast without the movement, for the same magicka. "
+            "auto_heal = whether you heal by yourself: when the player is below a part of full health (and close and in "
+            "sight) you cast a healing spell on the player, and otherwise on yourself when you are that low. Only with a "
+            "spell you know that heals (one for others, like healing hands, or one for yourself, like healing), and only "
+            "while your magicka lasts. It is on from the start, below "
+            f"{consts.AUTO_HEAL_USUAL_PERCENT}% of health. 'detail': '{consts.AUTO_HEAL_OFF}', '{consts.AUTO_HEAL_ON}', or a number from "
+            f"{consts.AUTO_HEAL_LOWEST_PERCENT} to {consts.AUTO_HEAL_HIGHEST_PERCENT} (on, below that many percent). Each heal is told in your next STATE. "
+            "lead = walk ahead of the player to the target (a character, a door, a place or a quest target, as for move_to, "
+            "with the same 'detail' and 'run'): you stop whenever the player falls more than about 15 meters behind, look "
+            "back, and go on once the player has caught up. When you are there you follow the player again. Use it when "
+            "the player asks you to show the way. Not in the saddle. "
+            "Trading: buy = buy something from a merchant, sell = sell something of yours to one. The target is the "
+            "merchant (its ref_id from 'Nearby'), 'detail' the ID of the item and after it how many or 'all' (nothing = 1), "
+            "eg '00034CDF 2'. See what there is and what it costs with STATE and 'merchant' first. You walk over to the "
+            "merchant if you are not there, and your next STATE tells you how it went. You pay with your own gold (the "
+            "player can give you some with the gold's ID 0000000F), the merchant pays with its own. If the gold does not "
+            "last for all of them, nothing is traded and the answer says for how many it lasts. "
             "Riding: claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
             "the player tells you which horse is yours). The player can still ride it. A horse that belongs to someone "
             "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
@@ -326,6 +343,9 @@ TOOLS: list[dict[str, Any]] = [
             "cast, whom the player talked to, and when the player started or stopped sneaking. At most 25 lines, none older "
             "than 10 minutes, each given only once. The urgent ones (a fight begins, someone dies, someone is badly hurt) "
             "also hang onto the answer of your next COMMAND as 'Meanwhile'. "
+            "While the player is in a menu (trading, the inventory, the map) or at a loading screen, the game stands still "
+            "and answers nothing: STATE then tells for how long it has been silent and shows the last state it knows, and "
+            f"a COMMAND waits up to {int(CompanionCommandQueue.PAUSE_WAIT_SECONDS)} seconds for the game to go on. "
             "With 'read' you read a book or a note: the ID of the book from an inventory (under 'Books'), from 'Things' "
             "(a book that lies around) or from 'Events' (what the player just read). You get one page of its text, and "
             "'page' gets you the next ones. Reading this way changes nothing in the game. If you carry the book, you open "
@@ -337,6 +357,8 @@ TOOLS: list[dict[str, Any]] = [
             "what it is (bow, sword, shield, helmet ...). Use that to switch weapons in a fight, eg equip your bow. "
             "'equipped' marks what is worn or held, 'favorite' what the player has among the favorites and, in your own inventory, what you marked with the command favorite. "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
+            "With 'merchant' you get what a merchant sells, with the price of each thing, how much gold the merchant and "
+            "you have, and what of your things the merchant would buy and for how much: for the commands buy and sell. "
             "'Queue' comes while commands wait for each other (see 'then' of COMMAND): what you do now and what follows. "
             "With 'find_gesture' you get no state at all, only the gestures whose name has that word, for the command gesture. "
             "'Since your last STATE': what became of a loot, pick_up, move_to, move, enter, make_room or sit you started (what you took, or that you did not get there). "
@@ -353,6 +375,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_INVENTORY: {"type": "string", "enum": consts.INVENTORY_CHOICES, "description": "Also list an inventory: own = yours, player = the player's, both. Only when you need it."},
                 ARGUMENT_FILTER: {"type": "string", "enum": consts.INVENTORY_FILTERS, "description": "Only a part of the inventory, as one short line (name, ID and kind of each item): favorites = what is marked as a favorite, equipped = what is worn and held, all = everything (the default). Without 'inventory' it is your own. Use it to switch weapons in a fight."},
                 ARGUMENT_CORPSE: {"type": "string", "description": "ref_id of a dead character or of a container from 'Nearby': also list what is in it. Replaces 'inventory' for this call."},
+                ARGUMENT_MERCHANT: {"type": "string", "description": "ref_id of a merchant from 'Nearby': also list what it sells and what it would buy from you, with prices. Replaces 'inventory' for this call."},
                 ARGUMENT_THINGS: {"type": "boolean", "description": "true = also list the furniture, containers and loose items within about 10 meters of the player. Only when you need them."},
                 ARGUMENT_AROUND: {"type": "string", "enum": consts.AROUND_CHOICES, "description": "Whose surroundings the lists show: player (the default) or you = your own character."},
                 ARGUMENT_STATS: {"type": "boolean", "description": "true = also give the level, the skills and so on of the player, and your own level. Only when the talk is about that."},
@@ -486,6 +509,12 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
             if corpse_form_id is None:
                 return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{corpse}' is not a ref_id. Use the one of a dead character or a container from 'Nearby' in STATE."}, True)
             corpse = format_ref_id(corpse_form_id)
+        merchant = str(arguments.get(ARGUMENT_MERCHANT, "") or "").strip()
+        if merchant != "":
+            merchant_form_id = parse_ref_id(merchant)
+            if merchant_form_id is None:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{merchant}' is not a ref_id. Use the one of the merchant from 'Nearby' in STATE."}, True)
+            merchant = format_ref_id(merchant_form_id)
         max_lines = arguments.get(ARGUMENT_MAX)
         if not isinstance(max_lines, int) or isinstance(max_lines, bool):
             max_lines = CompanionCommandQueue.DEFAULT_MAX_LINES
@@ -541,7 +570,7 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                                              space=is_space_wanted, find=find, space_meters=space_meters,
                                              space_degrees=space_degrees, space_from_facing=is_space_from_facing,
                                              space_angle=space_angle, space_direction=space_direction,
-                                             inventory_filter=inventory_filter, read=read, read_page=read_page)
+                                             inventory_filter=inventory_filter, read=read, read_page=read_page, merchant=merchant)
         if queue.chain is not None:
             state_result["queue"] = queue.chain.describe()
         if arguments.get(ARGUMENT_DEBUG) is True:
@@ -584,7 +613,7 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
             return {"status": consts.STATUS_FAILED, "message": f"'{target}' is not a ref_id or item ID. Use one from STATE, eg 000A2C94."}, True
         target = format_ref_id(target_form_id)
     count = 1
-    if action == consts.ACTION_MOVE_TO:
+    if action in (consts.ACTION_MOVE_TO, consts.ACTION_LEAD):
         # How far in front of the target to stop. Without a number the game mod decides
         count = consts.MOVE_TO_USUAL_DISTANCE
         words = detail.lower().split()
@@ -593,7 +622,7 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         if len(words) > 0:
             number = words[0].removesuffix("m")
             if len(words) != 1 or not number.isdecimal() or int(number) > consts.MOVE_TO_HIGHEST_KEEP_METERS:
-                return {"status": consts.STATUS_FAILED, "message": f"For move_to 'detail' is how many meters in front of the target you stop: a number from 0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, or nothing."}, True
+                return {"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is how many meters in front of the target you stop: a number from 0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, or nothing."}, True
             count = int(number)
             detail = number
     if action == consts.ACTION_FAVORITE:
@@ -616,6 +645,33 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         if item_form_id is None or item_form_id == 0:
             return {"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True
         item = format_ref_id(item_form_id)
+    if action in consts.TRADE_ACTIONS:
+        # The ID of the item, and after it how many
+        words = detail.replace(",", " ").split()
+        item_form_id = parse_ref_id(words[0]) if len(words) > 0 else None
+        if len(words) not in (1, 2) or item_form_id is None or item_form_id == 0:
+            return {"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is the ID of the item, and after it how many or '{consts.COUNT_ALL_TEXT}' "
+                               "(nothing = 1), eg '00034CDF 2'. STATE with 'merchant' lists the IDs and the prices."}, True
+        item = format_ref_id(item_form_id)
+        if len(words) == 2:
+            if words[1].lower() == consts.COUNT_ALL_TEXT:
+                count = consts.COUNT_ALL
+            elif words[1].isdecimal() and int(words[1]) > 0:
+                count = int(words[1])
+            else:
+                return {"status": consts.STATUS_FAILED, "message": f"For {action} the number after the ID is how many: a number above 0 or '{consts.COUNT_ALL_TEXT}'."}, True
+        detail = item
+    if action == consts.ACTION_AUTO_HEAL:
+        target = ""
+        detail = detail.lower().removesuffix("%").strip()
+        count = 0
+        if detail.isdecimal() and consts.AUTO_HEAL_LOWEST_PERCENT <= int(detail) <= consts.AUTO_HEAL_HIGHEST_PERCENT:
+            # Below how many percent of health. That turns it on as well
+            count = int(detail)
+            detail = consts.AUTO_HEAL_ON
+        elif detail not in (consts.AUTO_HEAL_ON, consts.AUTO_HEAL_OFF):
+            return {"status": consts.STATUS_FAILED, "message": f"auto_heal needs '{consts.AUTO_HEAL_ON}', '{consts.AUTO_HEAL_OFF}' or a number from "
+                               f"{consts.AUTO_HEAL_LOWEST_PERCENT} to {consts.AUTO_HEAL_HIGHEST_PERCENT} in 'detail' (heal below that many percent of health)."}, True
     if action == consts.ACTION_SAY:
         is_loud = arguments.get("loud") is True
         is_quiet = arguments.get("quiet") is True

@@ -82,6 +82,8 @@ class companion_constants:
     INVENTORY_BOTH: str = "both"
     # Internal: what the dead character carries or the container holds that the target of the report_state command names
     INVENTORY_CORPSE: str = "corpse"
+    # Internal, like INVENTORY_CORPSE: what the merchant in the target offers and what the companion could sell to it
+    INVENTORY_MERCHANT: str = "merchant"
     # For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything.
     # For gesture: the ID of the animation to play (see gestures.py). Both 0 = end the gesture
     KEY_COMMAND_ITEM_HIGH: str = PREFIX + "item_high"
@@ -292,6 +294,21 @@ class companion_constants:
     SNEAK_ON: str = "on"
     SNEAK_OFF: str = "off"
     SNEAK_CHOICES: list[str] = [SNEAK_AUTO, SNEAK_ON, SNEAK_OFF]
+    # lead: the companion walks ahead of the player to a target, like move_to, and waits whenever the player falls behind
+    ACTION_LEAD: str = "lead"
+    # auto_heal: whether the companion heals the player and itself without being told, when their health is low.
+    # 'detail' is AUTO_HEAL_ON, AUTO_HEAL_OFF or below how many percent of health it heals (which turns it on)
+    ACTION_AUTO_HEAL: str = "auto_heal"
+    AUTO_HEAL_ON: str = "on"
+    AUTO_HEAL_OFF: str = "off"
+    AUTO_HEAL_LOWEST_PERCENT: int = 10
+    AUTO_HEAL_HIGHEST_PERCENT: int = 90
+    # What the game mod does when the AI never said anything else
+    AUTO_HEAL_USUAL_PERCENT: int = 40
+    # buy and sell: trading with a merchant. The target is the merchant, 'detail' the ID of the item and how many
+    ACTION_BUY: str = "buy"
+    ACTION_SELL: str = "sell"
+    TRADE_ACTIONS: list[str] = [ACTION_BUY, ACTION_SELL]
     HORSE_NAME_MAX_LENGTH: int = 40
     # call_horse: whom the horse runs to, if not to its owner
     CALL_TO_PLAYER: str = "player"
@@ -339,6 +356,10 @@ class companion_constants:
         ACTION_CALL_HORSE,
         ACTION_RENAME_HORSE,
         ACTION_SNEAK,
+        ACTION_LEAD,
+        ACTION_AUTO_HEAL,
+        ACTION_BUY,
+        ACTION_SELL,
         ACTION_PAUSE,
     ]
     # These run at once and leave the commands alone that wait in a chain. Every other command throws them away
@@ -346,15 +367,16 @@ class companion_constants:
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
         ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
-        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK,
+        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE]
     # 'detail' says how many
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
     # These take 'run': the companion runs instead of walking
-    ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW]
-    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE] + ITEM_ACTIONS
+    ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW, ACTION_LEAD]
+    ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE,
+                                           ACTION_LEAD, ACTION_BUY, ACTION_SELL] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"

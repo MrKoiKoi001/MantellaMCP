@@ -181,7 +181,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 horse_ref_id: str = "", is_riding: bool = False, is_ride_locked: bool = False, is_player_riding: bool = False,
                 seat_name: str = "", player_horse_ref_id: str = "", called_horse_ref_id: str = "",
                 horse_names: dict[str, str] | None = None, is_sneaking: bool = False, is_player_sneaking: bool = False,
-                sneak_mode: int = 0, has_events: bool = False, read: str = "", read_page: int = 1) -> dict:
+                sneak_mode: int = 0, has_events: bool = False, read: str = "", read_page: int = 1,
+                auto_heal_percent: int = consts.AUTO_HEAL_USUAL_PERCENT, lead_state: int = 0) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -234,7 +235,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
             SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
             int(are_weapons_drawn), to_papyrus_number(look_target_ref_id), to_papyrus_number(leader_ref_id),
-            int(is_weapon_kept_away), int(is_running), int(is_sneaking), sneak_mode,
+            int(is_weapon_kept_away), int(is_running), int(is_sneaking), sneak_mode, auto_heal_percent, lead_state,
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -272,6 +273,9 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         state[game_state.KEY_SPELLS] = [1, to_papyrus_number(SPELL_REF_ID), 25]
         state[game_state.KEY_SPELLS + game_state.NAMES_SUFFIX] = ["0:Healing Hands"]
     # Three numbers for what the server asked about: ref ID, container or body, locked. A locked container has no inventory
+    if inventory == consts.INVENTORY_MERCHANT and corpse_ref_id != "":
+        # Like the plugin: whoever is asked about gets a line, a merchant or not
+        state[game_state.KEY_MERCHANT_LINES] = MERCHANT_LINES if corpse_ref_id == MERCHANT_REF_ID else [f"{corpse_ref_id}\t1\t0\t30\t0\t0\t0\t0\t{name_of(corpse_ref_id)}"]
     names_key = game_state.KEY_INVENTORY_CORPSE + game_state.NAMES_SUFFIX
     if inventory == consts.INVENTORY_CORPSE and corpse_ref_id == CORPSE_REF_ID:
         state[game_state.KEY_CORPSE] = [to_papyrus_number(CORPSE_REF_ID), 0, 0]
@@ -324,6 +328,14 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             state[game_state.KEY_BOOK] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in [header] + BOOK_PAGES[page - 1]]
     return state
 
+
+# In the simulator the guard is a merchant as well: what it sells, and what it would buy from the companion
+MERCHANT_REF_ID: str = "000F6845"
+MERCHANT_LINES: list[str] = [
+    "000F6845\t0\t750\t30\t8\t20\t2\t1\tWhiterun Guard",
+    "0\t00013989\t2\t41\t85\tSteel Sword", "0\t0003EADD\t3\t46\t56\tPotion of Minor Healing",
+    "1\t00013985\t1\t41\t17\tHunting Bow",
+]
 
 # What the companion does without changing where it walks, whom it follows or whether it sits
 QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE, consts.ACTION_SNEAK,
@@ -544,6 +556,18 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if target == "" and horse_ref_id == "":
             return False, "You have no horse to rename. Name a horse as the target, or take one as yours first with claim_horse.", target_ref_id
         return True, f"The horse is called {detail} now.", target_ref_id
+    if action == consts.ACTION_LEAD:
+        if name_of(target) == "" or target == PLAYER_REF_ID:
+            return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
+        return True, f"You lead the player to {name_of(target)}: you walk ahead, stop whenever the player falls behind, and go on once the player has caught up.", target_ref_id
+    if action == consts.ACTION_AUTO_HEAL:
+        if detail == consts.AUTO_HEAL_OFF:
+            return True, "You do not heal by yourself any more. cast_spell still heals when you say so.", target_ref_id
+        return True, "You heal the player by yourself, and after that yourself, whenever one of you is low on health.", target_ref_id
+    if action in consts.TRADE_ACTIONS:
+        if target != MERCHANT_REF_ID:
+            return False, f"{name_of(target) or target} is no merchant.", target_ref_id
+        return True, f"Fake game did '{action}' with the item {item_id} at {name_of(target)}.", target_ref_id
     if action == consts.ACTION_SNEAK:
         if detail == consts.SNEAK_ON:
             return True, "You sneak now, whatever the player does, until sneak with 'off' or 'auto'. Speak with 'quiet' while you sneak.", target_ref_id

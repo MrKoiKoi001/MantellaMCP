@@ -44,15 +44,17 @@ def load_or_create_token(token_file: str) -> str:
 
 
 def create_app(token: str, hold_seconds: float = DEFAULT_HOLD_SECONDS, voice: CompanionVoice | None = None,
-               mutes_game_lines: bool = False, game_folder: str = "") -> FastAPI:
+               mutes_game_lines: bool = False, game_folder: str = "",
+               pause_wait_seconds: float = CompanionCommandQueue.PAUSE_WAIT_SECONDS) -> FastAPI:
     """
     Args:
+        pause_wait_seconds: How long a command waits for a game that stands still (a menu) to go on
         game_folder: The folder of the game, for finding its animations by a word (find_gesture). Empty = not known
         voice: Makes the sound for the command say (see src/companion/voice.py). Without it the companion cannot speak
         mutes_game_lines: Whether the game mod is to cut off the sentences the game lets the companion say on its own
     """
     app = FastAPI()
-    queue = CompanionCommandQueue(hold_seconds=hold_seconds)
+    queue = CompanionCommandQueue(hold_seconds=hold_seconds, pause_wait_seconds=pause_wait_seconds)
     queue.mutes_game_lines = mutes_game_lines
     queue.game_folder = game_folder
     add_game_route(app, queue)
