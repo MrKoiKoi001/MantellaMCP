@@ -177,6 +177,7 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.append("The game did not send the things in time. Ask again.")
     lines.extend(_describe_places(places if is_visible_only else state.get("places"), is_from_companion))
     lines.extend(_describe_quests(state.get("quests"), is_from_companion))
+    lines.extend(_describe_events(state_result.get("events")))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
     wanted = state_result.get("inventory_wanted")
     item_filter = state_result.get("inventory_filter")
@@ -197,6 +198,11 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.extend(_describe_corpse(corpse_wanted, state.get("corpse"), state.get(KEY_INVENTORY_CORPSE)))
     if state_result.get("inventory_missed"):
         lines.append("The game did not send the inventory in time. Ask again.")
+    read_wanted = state_result.get("read_wanted")
+    if isinstance(read_wanted, str) and read_wanted != "":
+        lines.extend(_describe_book(read_wanted, state.get("book_for"), state.get("book")))
+    elif state_result.get("read_missed"):
+        lines.append("The game did not send the page in time. Ask again.")
     return "\n".join(lines)
 
 
@@ -401,6 +407,37 @@ def _describe_heard(heard: Any, companion: Any) -> list[str]:
     return lines
 
 
+def _describe_events(events: Any) -> list[str]:
+    """What happened in the game since the AI asked the last time, each with how long ago and the time of day in the
+    game. No lines at all if that is nothing"""
+    if not isinstance(events, list) or len(events) == 0:
+        return []
+    lines: list[str] = ["Events:"]
+    for event in events:
+        game_time = str(event.get("game_time") or "")
+        when = _describe_age(event.get("seconds_ago", 0)) + (f" ({game_time})" if game_time != "" else "")
+        lines.append(f"- {when}: {event.get('text')}")
+    return lines
+
+
+def _describe_book(wanted_id: str, book_for: Any, book: Any) -> list[str]:
+    """The page of a book or a note the AI asked to read"""
+    if not isinstance(book_for, str) or book_for == "":
+        return ["The game mod cannot read books yet: that needs its plugin with interface version 17 (KI_MCP_Gefaehrte.dll) "
+                "and the game mod built with it."]
+    if not isinstance(book, dict):
+        return [f"'{wanted_id}' is not a book or a note. Take the ID of a book from an inventory ('Books'), from 'Things' or from 'Events'."]
+    title = f"'{book.get('title')}' ({book.get('kind')}, ID {book.get('id')})"
+    pages = book.get("pages", 0)
+    if pages == 0 or str(book.get("text") or "") == "":
+        return [f"{title} has no text to read."]
+    page = book.get("page", 1)
+    lines = [f"Reading {title}, page {page} of {pages}:", str(book.get("text"))]
+    if page < pages:
+        lines.append(f"More: STATE with read '{book.get('id')}' and page {page + 1}.")
+    return lines
+
+
 def _describe_age(seconds: int) -> str:
     if seconds <= MAX_AGE_IN_SECONDS:
         return f"{seconds} s ago"
@@ -429,6 +466,8 @@ def _describe_player(player: Any) -> str:
         parts.append("fighting" if player["in_combat"] else "not fighting")
     if player.get("weapon_drawn"):
         parts.append("weapon drawn")
+    if player.get("sneaking"):
+        parts.append("sneaking")
     if player.get("sleeping"):
         parts.append("lying asleep")
     elif player.get("riding"):
@@ -534,6 +573,11 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append("waiting" if companion.get("waiting") else "following")
     if companion.get("running"):
         parts.append("running")
+    if companion.get("sneaking"):
+        parts.append("sneaking")
+    # The command sneak took the companion out of sneaking as the player does
+    if companion.get("sneak_mode") in (consts.SNEAK_ON, consts.SNEAK_OFF):
+        parts.append(f"sneak {companion['sneak_mode']}")
     if companion.get("retreating"):
         parts.append("retreating")
     target_ref_id = companion.get("target_ref_id")

@@ -17,7 +17,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.34"
+SERVER_VERSION: str = "0.35"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -50,6 +50,9 @@ ARGUMENT_SPACE_METERS: str = "space_meters"
 ARGUMENT_SPACE_ANGLE: str = "space_angle"
 ARGUMENT_FIND: str = "find"
 ARGUMENT_FIND_GESTURE: str = "find_gesture"
+ARGUMENT_READ: str = "read"
+ARGUMENT_PAGE: str = "page"
+SNEAK_NAMES: str = ", ".join(consts.SNEAK_CHOICES)
 ARGUMENT_THEN: str = "then"
 ARGUMENT_AFTER_PREVIOUS: str = "after_previous"
 # What a step of 'then' can carry: the same as a command, without a chain of its own
@@ -122,7 +125,8 @@ TOOLS: list[dict[str, Any]] = [
             "Only while you stand: not while you walk, fight or sit. "
             "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
             "everything, or only the kind of item whose ID is in 'detail' (see what is in it with STATE and 'corpse' first). "
-            "The walk takes a while, your next STATE tells you what you got. Afterwards you follow or wait as before. "
+            "The walk takes a while. At a body you kneel down, at a container you go through it, and only then you have "
+            "the things; your next STATE tells you what you got. Afterwards you follow or wait as before. "
             "Containers in a house or a shop belong to someone, so empty those only when the player wants it. "
             "pick_up = walk to the target, an item that lies around (from 'Things' in STATE, also an arrow that was shot), "
             "and take it. Your next STATE tells you whether you got it. Afterwards you follow or wait as before. "
@@ -199,6 +203,11 @@ TOOLS: list[dict[str, Any]] = [
             "The horse of the player is known once the player has ridden it. Both horses stay where they are left. "
             "rename_horse = give a horse a new name, the one in 'detail' (the target is the horse, no target = your horse). "
             "Use it when the player says what a horse is called from now on. "
+            "sneak = how you sneak, in 'detail': auto (the way it is unless you change it) = you sneak whenever the player "
+            "sneaks and stand up when the player does, on = you sneak whatever the player does (to wait crouched, or to "
+            "creep ahead on your own), off = you walk upright whatever the player does. on and off hold until sneak with "
+            "'auto'. STATE shows 'sneaking' for the player and for you. Not in the saddle, and in a fight it only takes "
+            "hold afterwards. While you sneak, speak with 'quiet'. "
             "Commands one after the other: 'then' is a list of up to " + str(MAX_WAITING_STEPS) + " more commands (each with "
             "action, target, detail and so on) that start one by one, each when you are done with the one before: move_to a "
             "bard and then gesture dance, sit and then say, say and then mount. 'after_previous': true puts a single command "
@@ -212,7 +221,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, release_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, the seconds for pause."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, auto, on or off for sneak, the seconds for pause."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
                 "quiet": {"type": "boolean", "description": "Only for say: true = say it in a low voice instead of speaking normally, eg while you sneak. Not together with 'loud'."},
                 "run": {"type": "boolean", "description": "Only for move_to, move, enter and follow: true = run instead of walk."},
@@ -235,12 +244,12 @@ TOOLS: list[dict[str, Any]] = [
             "Get the current situation in the game as a few short lines. "
             "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
             "(clear, cloudy, rain or snow). "
-            "'Player': health, fighting or not, 'weapon drawn' if so, 'sitting on' with the piece of furniture, 'riding' with the name of the horse or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
+            "'Player': health, fighting or not, 'weapon drawn' if so, 'sneaking' if so, 'sitting on' with the piece of furniture, 'riding' with the name of the horse or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
             "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
             "'You': your own character with health, where it is, the compass direction it faces, where the player is "
             "seen from you, 'riding' with the name of the horse, waiting, following (the player, or the character named behind it), "
             "'sitting on' with the piece of furniture, or walking to someone, "
-            "retreating, whom it fights, 'running' while you run, 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
+            "retreating, whom it fights, 'running' while you run, 'sneaking' while you sneak ('sneak on' or 'sneak off' behind it after the command sneak), 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
             "If you are not where the player is, the line names the place you are in instead. "
             "'Player's horse' comes once the player has ridden a horse: its name and ref_id and where it is seen from the player. "
             "'running to the player' stands behind a horse that was called with call_horse. "
@@ -299,6 +308,17 @@ TOOLS: list[dict[str, Any]] = [
             "That covers dialogues and what characters say in passing, but only while both kinds of subtitles are switched on "
             "in the settings of the game. "
             "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "
+            "'Events': what happened since your last STATE, oldest first, each with how long ago and the time of day in the "
+            "game: who started fighting you or the player and when the player's fight began and ended, who died and who "
+            "killed whom, the hits you and the player took (counted together, with the health they cost), where the player "
+            "went, what the player used (doors, chests, levers), read (with the ID of the book), took, put on, drank and "
+            "cast, whom the player talked to, and when the player started or stopped sneaking. At most 25 lines, none older "
+            "than 10 minutes, each given only once. The urgent ones (a fight begins, someone dies, someone is badly hurt) "
+            "also hang onto the answer of your next COMMAND as 'Meanwhile'. "
+            "With 'read' you read a book or a note: the ID of the book from an inventory (under 'Books'), from 'Things' "
+            "(a book that lies around) or from 'Events' (what the player just read). You get one page of its text, and "
+            "'page' gets you the next ones. Reading this way changes nothing in the game. If you carry the book, you open "
+            "it and read. "
             "'Gear': what you hold in your hands, your gold and the player's gold. "
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
@@ -333,6 +353,8 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_VISIBLE: {"type": "boolean", "description": "true = only what can be seen: in front of the viewer and not behind a wall. The viewer is the one 'around' names."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
                 ARGUMENT_FIND_GESTURE: {"type": "string", "description": "A word like drink, dance or lean: list the animations of the game with that word in their name, for the command gesture. The answer is only that list, no state."},
+                ARGUMENT_READ: {"type": "string", "description": "The ID of a book or a note (from an inventory, from 'Things' or from 'Events'): also give one page of its text."},
+                ARGUMENT_PAGE: {"type": "integer", "description": "With 'read': which page of the book. Nothing = the first one."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
         },
@@ -491,6 +513,16 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
             space_degrees = 0
             is_space_from_facing = True
         is_space_wanted = arguments.get(ARGUMENT_SPACE) is True or space_direction != "" or space_meters > 0 or has_space_angle
+        # A book to read, by its ID, and the page of it
+        read = str(arguments.get(ARGUMENT_READ, "") or "").strip()
+        if read != "":
+            read_form_id = parse_ref_id(read)
+            if read_form_id is None or read_form_id == 0:
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{read}' is not the ID of a book. Take it from an inventory ('Books'), from 'Things' or from 'Events' in STATE."}, True)
+            read = format_ref_id(read_form_id)
+        read_page = arguments.get(ARGUMENT_PAGE)
+        if not isinstance(read_page, int) or isinstance(read_page, bool) or read_page < 1:
+            read_page = 1
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
                                              max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS,
                                              stats=arguments.get(ARGUMENT_STATS) is True,
@@ -498,7 +530,7 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                                              space=is_space_wanted, find=find, space_meters=space_meters,
                                              space_degrees=space_degrees, space_from_facing=is_space_from_facing,
                                              space_angle=space_angle, space_direction=space_direction,
-                                             inventory_filter=inventory_filter)
+                                             inventory_filter=inventory_filter, read=read, read_page=read_page)
         if queue.chain is not None:
             state_result["queue"] = queue.chain.describe()
         if arguments.get(ARGUMENT_DEBUG) is True:
@@ -716,6 +748,13 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
                                f"'{consts.RIDE_LOCK_ON}' = you no longer mount and dismount when the player does, '{consts.RIDE_LOCK_OFF}' = you do again."}, True
     if action == consts.ACTION_DISMOUNT:
         target = ""
+    if action == consts.ACTION_SNEAK:
+        target = ""
+        detail = detail.lower()
+        if detail not in consts.SNEAK_CHOICES:
+            return {"status": consts.STATUS_FAILED, "message": f"sneak needs one of these in 'detail': {SNEAK_NAMES}. "
+                               f"'{consts.SNEAK_ON}' = you sneak whatever the player does, '{consts.SNEAK_OFF}' = you walk upright whatever the player does, "
+                               f"'{consts.SNEAK_AUTO}' = you sneak whenever the player sneaks again."}, True
     if action == consts.ACTION_RENAME_HORSE:
         # One line without the breaks and double blanks a name does not have
         detail = " ".join(detail.split())
@@ -807,6 +846,10 @@ async def _call_command(arguments: dict[str, Any], queue: CompanionCommandQueue,
                       first_wait_seconds=_last_say_seconds if action == consts.ACTION_SAY else 0.0,
                       can_running_fail=action not in consts.ACTIONS_KEEPING_QUEUE)
             notes.append(f"Queue: {chain.describe()}.")
+    # What cannot wait until the next STATE: a fight that began, someone who died (see 'Events' of STATE)
+    urgent_events = await queue.take_urgent_events()
+    if len(urgent_events) > 0:
+        notes.append("Meanwhile: " + " ".join(f"{event['text']} ({event['seconds_ago']} s ago)" for event in urgent_events))
     if len(notes) > 0:
         payload = dict(payload)
         payload["message"] = " ".join([str(payload.get("message", ""))] + notes).strip()

@@ -19,6 +19,9 @@ class companion_constants:
     # something that takes time (a walk, sitting down, getting on a horse), and how many things it started have failed so far
     KEY_BUSY: str = PREFIX + "busy"
     KEY_FAILS: str = PREFIX + "fails"
+    # With a request, if there are any, from a game mod whose plugin keeps events: the urgent events since the request
+    # before (a fight begins, someone dies), one text per event (see game_state.read_events)
+    KEY_EVENTS: str = PREFIX + "events"
     KEY_RESULT_OK: str = PREFIX + "ok"
     KEY_RESULT_MESSAGE: str = PREFIX + "message"
 
@@ -64,6 +67,12 @@ class companion_constants:
     SPACE_DEFAULT_LOOK_DEGREES: int = 60
     # For report_state: a name, or a part of one, to look for in the whole loaded area (empty = no search)
     KEY_COMMAND_FIND: str = PREFIX + "find"
+    # For report_state: the ID of a book or a note to read (as text, and cut in two like the target; empty = none),
+    # and the page of it (from 1)
+    KEY_COMMAND_READ: str = PREFIX + "read"
+    KEY_COMMAND_READ_HIGH: str = PREFIX + "read_high"
+    KEY_COMMAND_READ_LOW: str = PREFIX + "read_low"
+    KEY_COMMAND_READ_PAGE: str = PREFIX + "read_page"
     # What the AI can name as the centre of those lists
     AROUND_PLAYER: str = "player"
     AROUND_COMPANION: str = "you"
@@ -258,6 +267,13 @@ class companion_constants:
     ACTION_CALL_HORSE: str = "call_horse"
     # The horse gets a new name, the one in 'detail'
     ACTION_RENAME_HORSE: str = "rename_horse"
+    # Sneaking: the game makes a follower sneak whenever the player sneaks. 'detail' on = the companion sneaks whatever
+    # the player does, off = it walks upright whatever the player does, auto = it does as the player does again
+    ACTION_SNEAK: str = "sneak"
+    SNEAK_AUTO: str = "auto"
+    SNEAK_ON: str = "on"
+    SNEAK_OFF: str = "off"
+    SNEAK_CHOICES: list[str] = [SNEAK_AUTO, SNEAK_ON, SNEAK_OFF]
     HORSE_NAME_MAX_LENGTH: int = 40
     # call_horse: whom the horse runs to, if not to its owner
     CALL_TO_PLAYER: str = "player"
@@ -304,6 +320,7 @@ class companion_constants:
         ACTION_RIDE_LOCK,
         ACTION_CALL_HORSE,
         ACTION_RENAME_HORSE,
+        ACTION_SNEAK,
         ACTION_PAUSE,
     ]
     # These run at once and leave the commands alone that wait in a chain. Every other command throws them away
@@ -311,7 +328,7 @@ class companion_constants:
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
         ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
-        ACTION_CALL_HORSE, ACTION_RENAME_HORSE,
+        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE]

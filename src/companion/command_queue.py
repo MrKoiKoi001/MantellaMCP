@@ -33,6 +33,12 @@ class CompanionCommandQueue:
     INVENTORY_TIMEOUT_SECONDS: float = 15.0
     # What became of commands that take time (loot, move_to, sit) is kept here until the AI asks for the state the next time
     MAX_REPORTS: int = 5
+    # What happened in the game is kept here until the AI asks for the state the next time: the newest events, none
+    # older than this. The urgent ones (a fight begins, someone dies) hang onto the answer of the next COMMAND already
+    MAX_EVENT_LINES: int = 25
+    MAX_EVENT_AGE_SECONDS: float = 600.0
+    MAX_URGENT_EVENTS: int = 5
+    MAX_STORED_EVENTS: int = 60
     # While commands wait in a chain (see command_chain.py) the request of the game is only held open this long,
     # so that the game asks again every second and tells whether the companion is still busy
     QUICK_HOLD_SECONDS: float = 1.0
@@ -54,6 +60,7 @@ class CompanionCommandQueue:
         self.__state_version: int = 0
         self.__heard: list[dict[str, Any]] = []
         self.__reports: list[str] = []
+        self.__events: list[dict[str, Any]] = []
         self.__poll_generation: int = 0
         self.__is_poll_open: bool = False
         self.__last_poll_time: float | None = None
@@ -73,7 +80,7 @@ class CompanionCommandQueue:
     # ------------------------------------------------------------------ game side
 
     async def poll(self, state: dict[str, Any] | None, results: list[dict[str, Any]] | None,
-                   busy: Any = None, fails: Any = None) -> list[dict[str, Any]]:
+                   busy: Any = None, fails: Any = None, events: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Called for every long polling request of the game.
 
         Args:
@@ -81,6 +88,7 @@ class CompanionCommandQueue:
             results: Results of commands the game has executed since its last request
             busy: 1 if the companion is in the middle of something that takes time, 0 if not, None if the game mod does not tell
             fails: How many things the companion started have failed so far, None if the game mod does not tell
+            events: The urgent events since the request before (see game_state.read_events), or None
 
         Returns:
             The commands the game should execute now. Empty if nothing came up within hold_seconds.
@@ -97,9 +105,12 @@ class CompanionCommandQueue:
                 report = state.pop("report", None)
                 if isinstance(report, str) and report.strip() != "":
                     self.__reports = (self.__reports + [report.strip()])[-self.MAX_REPORTS:]
+                # And for what happened in the game
+                self.__keep_events(state.pop("events", None))
                 self.__state = state
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
+            self.__keep_events(events)
             self.__store_results(results)
             if isinstance(busy, int):
                 self.__busy = busy != 0
@@ -234,7 +245,7 @@ class CompanionCommandQueue:
                         space: bool = False, find: str = "", space_meters: int = 0,
                         space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
                         space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "",
-                        inventory_filter: str = "") -> dict[str, Any]:
+                        inventory_filter: str = "", read: str = "", read_page: int = 1) -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
@@ -251,14 +262,15 @@ class CompanionCommandQueue:
             space_meters, space_degrees, space_from_facing, space_angle: How the rays should look (see send_command)
             space_direction: The word of the AI for the direction the rays look into, for the text of the answer (empty = none)
             find: A name, or a part of one, the game should look for in the whole loaded area (empty = no search)
-            is_for_the_ai: False if the server itself needs the state (eg to pick a seat). Then what was heard and
-                what became of earlier commands stays kept for the next time the AI asks
+            read: The ID of a book or a note the fresh state should carry a page of (empty = none), and which page (from 1)
+            is_for_the_ai: False if the server itself needs the state (eg to pick a seat). Then what was heard, what
+                happened and what became of earlier commands stays kept for the next time the AI asks
 
         Returns:
             A dictionary with 'connected', 'fresh', 'state_age_seconds', 'state', 'inventory_wanted', 'corpse_wanted',
             'things_wanted', 'max_lines', 'around_wanted', 'stats_wanted', 'visible_wanted', 'space_wanted', 'find_wanted',
-            'heard' (what the characters in the game said since this was called the last time)
-            and 'reports' (what became of loot and move_to since then)
+            'read_wanted', 'heard' (what the characters in the game said since this was called the last time),
+            'events' (what happened in the game since then) and 'reports' (what became of loot and move_to since then)
         """
         if corpse != "":
             inventory = consts.INVENTORY_CORPSE
@@ -270,11 +282,18 @@ class CompanionCommandQueue:
 
         is_fresh = False
         if is_connected:
+            extra: dict[str, Any] = {}
+            if inventory_filter != "":
+                extra[consts.KEY_COMMAND_INVENTORY_FILTER] = inventory_filter
+            if read != "":
+                read_high, read_low = split_form_id(parse_ref_id(read) or 0)
+                extra.update({consts.KEY_COMMAND_READ: read, consts.KEY_COMMAND_READ_HIGH: read_high,
+                              consts.KEY_COMMAND_READ_LOW: read_low, consts.KEY_COMMAND_READ_PAGE: read_page})
             request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory, count=max_lines, things=things,
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
                                               find=find, space_meters=space_meters, space_degrees=space_degrees,
                                               space_from_facing=space_from_facing, space_angle=space_angle,
-                                              extra={consts.KEY_COMMAND_INVENTORY_FILTER: inventory_filter} if inventory_filter != "" else None)
+                                              extra=extra if len(extra) > 0 else None)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -314,7 +333,11 @@ class CompanionCommandQueue:
                 # What the search was for. Whether the game did it is in the state itself ('found_for')
                 "find_wanted": find if is_fresh else "",
                 "find_missed": find != "" and not is_fresh,
+                # The kept state may still carry a page from an earlier question
+                "read_wanted": read if is_fresh else "",
+                "read_missed": read != "" and not is_fresh,
                 "heard": self.__take_heard() if is_for_the_ai else [],
+                "events": self.__take_events() if is_for_the_ai else [],
                 "reports": self.__take_reports() if is_for_the_ai else [],
             }
 
@@ -353,6 +376,15 @@ class CompanionCommandQueue:
         """Keeps a sentence for the AI until it asks for the state the next time (under 'Since your last STATE')"""
         async with self.__changed:
             self.__reports = (self.__reports + [report])[-self.MAX_REPORTS:]
+
+    async def take_urgent_events(self) -> list[dict[str, Any]]:
+        """The urgent events the AI has not been told yet (a fight begins, someone dies), oldest first, for the answer
+        to a COMMAND. They are forgotten afterwards, the other events stay for the next STATE"""
+        async with self.__changed:
+            now = time.monotonic()
+            urgent = [event for event in self.__events if event["urgent"] and now - event["time"] <= self.MAX_EVENT_AGE_SECONDS]
+            self.__events = [event for event in self.__events if not event["urgent"]]
+            return [self.__describe_event(event, now) for event in urgent[-self.MAX_URGENT_EVENTS:]]
 
     async def peek_state(self) -> dict[str, Any] | None:
         """Returns the state the game sent last, without asking the game for a fresh one (None = it sent none yet)"""
@@ -408,6 +440,31 @@ class CompanionCommandQueue:
             "name": line["name"],
             "text": line["text"],
         } for line in lines[-self.MAX_HEARD_LINES:]]
+
+    def __keep_events(self, events: Any):
+        if not isinstance(events, list):
+            return
+        now = time.monotonic()
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            self.__events.append({"time": now - float(event.get("seconds_ago", 0)), "game_time": str(event.get("game_time", "")),
+                                  "urgent": bool(event.get("urgent", False)), "text": str(event.get("text", ""))})
+        # Urgent ones come with an earlier request than what happened before them, so the order is put right here.
+        # Bounded even if the AI never asks
+        self.__events = sorted(self.__events, key=lambda event: event["time"])[-self.MAX_STORED_EVENTS:]
+
+    def __take_events(self) -> list[dict[str, Any]]:
+        """What happened and the AI has not been told yet, oldest first. Forgotten afterwards"""
+        now = time.monotonic()
+        events = [event for event in self.__events if now - event["time"] <= self.MAX_EVENT_AGE_SECONDS]
+        self.__events = []
+        return [self.__describe_event(event, now) for event in events[-self.MAX_EVENT_LINES:]]
+
+    @staticmethod
+    def __describe_event(event: dict[str, Any], now: float) -> dict[str, Any]:
+        return {"seconds_ago": max(0, round(now - event["time"])), "game_time": event["game_time"],
+                "urgent": event["urgent"], "text": event["text"]}
 
     def __take_reports(self) -> list[str]:
         """What became of loot and move_to and the AI has not been told yet, oldest first. Forgotten afterwards"""

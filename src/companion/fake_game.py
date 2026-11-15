@@ -107,6 +107,25 @@ HEARD: list[list[str]] = [
 ]
 
 
+# What happened since the last state as the SKSE plugin writes it: seconds ago, time of day in the game in minutes
+# since midnight, urgent (1 or 0), what happened. The companion is "you" in these texts
+EVENTS: list[list[str]] = [
+    ["40", "870", "0", "The player entered Whiterun."],
+    ["12", "874", "1", "Bandit started fighting the player."],
+    ["3", "875", "0", "The player took 2 hits from Bandit and lost about 15 health (85% left)."],
+]
+# The one book the simulator can read, as the plugin writes its pages: about the book (page, pages, kind, ID, title),
+# then the pieces of the page (how each joins what came before, and its text)
+BOOK_REF_ID: str = "0001ACDA"
+BOOK_TITLE: str = "Thief's Letter"
+BOOK_PAGES: list[list[list[str]]] = [
+    [["1", "Dear [Thief],"], ["1", "meet me at the mill when the"], ["0", "moon is up."]],
+    [["1", "Bring the claw."]],
+]
+# The numbers the game mod gives the ways of sneaking (see game_state.SNEAK_MODES)
+SNEAK_NUMBERS: dict[str, int] = {consts.SNEAK_AUTO: 0, consts.SNEAK_ON: 1, consts.SNEAK_OFF: 2}
+
+
 GOLD: list[int] = [250, 30]
 # What the game mod sends about the player on request: level, health, magicka, stamina, magicka and stamina in percent,
 # weight carried, most that can be carried, perk points to spend, experience in this level, experience for the next one,
@@ -161,7 +180,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 is_running: bool = False, space_info: list[int] | None = None,
                 horse_ref_id: str = "", is_riding: bool = False, is_ride_locked: bool = False, is_player_riding: bool = False,
                 seat_name: str = "", player_horse_ref_id: str = "", called_horse_ref_id: str = "",
-                horse_names: dict[str, str] | None = None) -> dict:
+                horse_names: dict[str, str] | None = None, is_sneaking: bool = False, is_player_sneaking: bool = False,
+                sneak_mode: int = 0, has_events: bool = False, read: str = "", read_page: int = 1) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -183,6 +203,10 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         is_player_sitting: Whether the player sits on a seat
         is_weapon_kept_away: Whether the companion keeps its weapon put away because of the command sheathe
         is_running: Whether the companion runs at the moment
+        is_sneaking, is_player_sneaking: Whether the companion and the player sneak
+        sneak_mode: How the companion sneaks because of the command sneak (see SNEAK_NUMBERS)
+        has_events: The plugin of the game mod hands out every event only once, so only one state should carry them
+        read: The ID of the book the server asked to read (empty = none), and read_page the page of it
     """
     is_fighting = target_ref_id != ""
     nearby_values: list[int] = []
@@ -197,7 +221,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         game_state.KEY_LOCATION: "Whiterun, Plains District",
         game_state.KEY_PLAYER_NAME: "Dragonborn",
         game_state.KEY_PLAYER_VALUES: [85, int(is_fighting), 23500, -7900, -3300, 45, 0, int(are_weapons_drawn),
-                                       SIT_STATE_SEATED if is_player_sitting else SIT_STATE_STANDING, 0],
+                                       SIT_STATE_SEATED if is_player_sitting else SIT_STATE_STANDING, 0, int(is_player_sneaking)],
         # Snow at 14:35
         game_state.KEY_WORLD_VALUES: [3, 875, NATIVE_PLUGIN_VERSION, 1, game_state.GAME_PROTOCOL, int(is_around_companion), int(is_visible_only)],
         game_state.KEY_QUESTS: [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in QUESTS],
@@ -210,7 +234,7 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
             to_papyrus_number(target_ref_id), 180, int(is_fleeing), to_papyrus_number(walk_target_ref_id),
             SIT_STATE_SEATED if is_sitting else SIT_STATE_STANDING,
             int(are_weapons_drawn), to_papyrus_number(look_target_ref_id), to_papyrus_number(leader_ref_id),
-            int(is_weapon_kept_away), int(is_running),
+            int(is_weapon_kept_away), int(is_running), int(is_sneaking), sneak_mode,
         ],
         game_state.KEY_NEARBY_VALUES: nearby_values,
         game_state.KEY_NEARBY_NAMES: nearby_names,
@@ -289,11 +313,20 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         state[game_state.KEY_REPORT] = report
     if has_heard_lines:
         state[game_state.KEY_HEARD] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in HEARD]
+    if has_events:
+        state[game_state.KEY_EVENTS] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in EVENTS]
+    if read != "":
+        # Like the game mod: the ID that was asked for goes back, and the page only if it is a book
+        state[game_state.KEY_BOOK_FOR] = read
+        if read == BOOK_REF_ID:
+            page = min(max(read_page, 1), len(BOOK_PAGES))
+            header = [str(page), str(len(BOOK_PAGES)), "1", BOOK_REF_ID, BOOK_TITLE]
+            state[game_state.KEY_BOOK] = [game_state.QUEST_PART_SEPARATOR.join(parts) for parts in [header] + BOOK_PAGES[page - 1]]
     return state
 
 
 # What the companion does without changing where it walks, whom it follows or whether it sits
-QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE,
+QUIET_ACTIONS: list[str] = [consts.ACTION_LOOK_AT, consts.ACTION_GESTURE, consts.ACTION_EXPRESSION, consts.ACTION_SAY, consts.ACTION_FACE, consts.ACTION_SNEAK,
                             consts.ACTION_SHEATHE, consts.ACTION_DRAW, consts.ACTION_OPEN, consts.ACTION_CLOSE,
                             consts.ACTION_SAY_TALK, consts.ACTION_SAY_END]
 
@@ -345,6 +378,13 @@ def called_horse_after(action: str, target: str, horse_ref_id: str, called_horse
     if action == consts.ACTION_MOUNT and called_horse_ref_id == (target or horse_ref_id):
         return ""
     return called_horse_ref_id
+
+
+def sneak_mode_after(action: str, detail: str, sneak_mode: int) -> int:
+    """Like the game: sneak with on or off holds until sneak with auto"""
+    if action == consts.ACTION_SNEAK:
+        return SNEAK_NUMBERS.get(detail, 0)
+    return sneak_mode
 
 
 def is_ride_locked_after(action: str, detail: str, is_ride_locked: bool) -> bool:
@@ -504,6 +544,12 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if target == "" and horse_ref_id == "":
             return False, "You have no horse to rename. Name a horse as the target, or take one as yours first with claim_horse.", target_ref_id
         return True, f"The horse is called {detail} now.", target_ref_id
+    if action == consts.ACTION_SNEAK:
+        if detail == consts.SNEAK_ON:
+            return True, "You sneak now, whatever the player does, until sneak with 'off' or 'auto'. Speak with 'quiet' while you sneak.", target_ref_id
+        if detail == consts.SNEAK_OFF:
+            return True, "You walk upright now, also while the player sneaks, until sneak with 'on' or 'auto'.", target_ref_id
+        return True, "You sneak whenever the player sneaks again. The player walks upright at the moment, so you do too.", target_ref_id
     if action == consts.ACTION_FLEE:
         return True, "You retreat: you do not fight and you run from enemies. This holds until your next command.", ""
     if action == consts.ACTION_STAND_DOWN:
@@ -587,6 +633,9 @@ def main():
     horse_ref_id = ""
     is_riding = False
     is_ride_locked = False
+    sneak_mode = 0
+    wanted_read = ""
+    wanted_read_page = 1
     called_horse_ref_id = ""
     horse_names: dict[str, str] = {}
     # The simulator's companion arrives where it walks to after a few requests, and nothing it starts fails
@@ -620,8 +669,11 @@ def main():
                                                          has_traps=True, has_space=is_space_wanted, find=wanted_find,
                                                          space_info=space_info, horse_ref_id=horse_ref_id, is_riding=is_riding,
                                                          is_ride_locked=is_ride_locked, player_horse_ref_id=PLAYER_HORSE_REF_ID,
-                                                         called_horse_ref_id=called_horse_ref_id, horse_names=horse_names)
+                                                         called_horse_ref_id=called_horse_ref_id, horse_names=horse_names,
+                                                         is_sneaking=sneak_mode == SNEAK_NUMBERS[consts.SNEAK_ON], sneak_mode=sneak_mode,
+                                                         has_events=poll_id == 1, read=wanted_read, read_page=wanted_read_page)
             wanted_find = ""
+            wanted_read = ""
             are_things_wanted = False
             is_space_wanted = False
             is_around_companion = False
@@ -668,6 +720,8 @@ def main():
                 space_info = [space_heading, space_angle, int(command.get(consts.KEY_COMMAND_SPACE_METERS, 0)) or consts.SPACE_DEFAULT_METERS,
                               SPACE_FACING_DEGREES]
                 wanted_find = str(command.get(consts.KEY_COMMAND_FIND) or "")
+                wanted_read = str(command.get(consts.KEY_COMMAND_READ) or "")
+                wanted_read_page = int(command.get(consts.KEY_COMMAND_READ_PAGE) or 1)
                 continue
             print(f"COMMAND  action={action}  target={target}  detail={detail}")
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it
@@ -680,6 +734,7 @@ def main():
                 horse_ref_id = horse_after(str(action), str(target or ""), horse_ref_id)
                 is_riding = is_riding_after(str(action), is_riding)
                 is_ride_locked = is_ride_locked_after(str(action), str(detail or ""), is_ride_locked)
+                sneak_mode = sneak_mode_after(str(action), str(detail or ""), sneak_mode)
                 is_waiting = is_waiting_after(str(action), is_waiting)
                 # Looking somewhere, a gesture and stepping out of the way do not end a retreat
                 if action not in QUIET_ACTIONS + [consts.ACTION_MAKE_ROOM]:

@@ -159,18 +159,46 @@ KEY_CORPSE: str = "corpse"
 KEY_CORPSE_NAME: str = "corpse_name"
 # What became of the commands loot, move_to and sit since the last state, as text for the AI. Missing if that is nothing
 KEY_REPORT: str = "report"
+# One text per thing that happened since the last state (a fight, a death, hits, what the player used, read, took),
+# oldest first. Its parts are separated by tabs: how many seconds ago, the time of day in the game in minutes since
+# midnight, urgent (1 or 0), what happened. The companion is called "you" in these texts.
+# The SKSE plugin of the game mod writes these lines (TakeEvents in plugin.cpp of the plugin repository)
+KEY_EVENTS: str = "events"
+EVENT_PART_COUNT: int = 4
+# Only when the server asked to read a book: the ID it asked for under KEY_BOOK_FOR, and under KEY_BOOK the page.
+# The first text tells about the book, its parts separated by tabs: the number of this page, how many pages there
+# are (0 = the book has no text), the kind (see BOOK_KINDS), the form ID of the book as eight hex digits, its title.
+# Then one text per piece of the page: how it joins what came before (see BOOK_PIECE_...), a tab, the text.
+# No KEY_BOOK means that the ID is no book. The plugin writes these lines (GetBookText in plugin.cpp)
+KEY_BOOK: str = "book"
+KEY_BOOK_FOR: str = "book_for"
+BOOK_HEADER_PART_COUNT: int = 5
+BOOK_KINDS: dict[int, str] = {0: "book", 1: "note", 2: "spell tome"}
+BOOK_PIECE_BEGINS_PARAGRAPH: str = "1"
+BOOK_PIECE_FOLLOWS_BLANK: str = "0"
+BOOK_PIECE_FOLLOWS_DIRECTLY: str = "2"
 NAMES_SUFFIX: str = "_names"
 # How long the game mod took in milliseconds: for the whole state, and for the characters nearby alone
 KEY_TIMES: str = "times_ms"
 
-PLAYER_VALUE_COUNT: int = 10
-# Older game mods say nothing about sitting and sleeping, still older ones nothing about the weapon
+PLAYER_VALUE_COUNT: int = 11
+# Older game mods say nothing about sneaking, still older ones nothing about sitting and sleeping, and the oldest
+# nothing about the weapon
+PLAYER_VALUE_COUNT_WITHOUT_SNEAKING: int = 10
+PLAYER_PLACE_OF_SNEAKING: int = 10
 PLAYER_VALUE_COUNT_WITHOUT_SITTING: int = 8
 PLAYER_VALUE_COUNT_WITHOUT_WEAPON: int = 7
 PLAYER_PLACE_OF_WEAPON: int = 7
 PLAYER_PLACE_OF_SITTING: int = 8
 PLAYER_PLACE_OF_SLEEPING: int = 9
-COMPANION_VALUE_COUNT: int = 18
+COMPANION_VALUE_COUNT: int = 20
+# Older game mods say nothing about sneaking: whether the companion sneaks, and how it does because of the command
+# sneak (see SNEAK_MODES)
+COMPANION_VALUE_COUNT_WITHOUT_SNEAKING: int = 18
+COMPANION_PLACE_OF_SNEAKING: int = 18
+COMPANION_PLACE_OF_SNEAK_MODE: int = 19
+# The command sneak as the game mod numbers it: as the player does, always, never
+SNEAK_MODES: dict[int, str] = {0: "auto", 1: "on", 2: "off"}
 # Older game mods say nothing about running
 COMPANION_VALUE_COUNT_WITHOUT_RUNNING: int = 17
 COMPANION_PLACE_OF_RUNNING: int = 17
@@ -212,7 +240,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 10
+GAME_PROTOCOL: int = 11
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -317,7 +345,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     if isinstance(player_name, str):
         player["name"] = player_name
     player_values = _numbers(raw.get(KEY_PLAYER_VALUES))
-    if player_values is not None and len(player_values) in (PLAYER_VALUE_COUNT, PLAYER_VALUE_COUNT_WITHOUT_SITTING, PLAYER_VALUE_COUNT_WITHOUT_WEAPON):
+    if player_values is not None and len(player_values) in (PLAYER_VALUE_COUNT, PLAYER_VALUE_COUNT_WITHOUT_SNEAKING, PLAYER_VALUE_COUNT_WITHOUT_SITTING,
+                                                            PLAYER_VALUE_COUNT_WITHOUT_WEAPON):
         health, in_combat, position_x, position_y, position_z, facing, indoors = player_values[:PLAYER_VALUE_COUNT_WITHOUT_WEAPON]
         player["health_percent"] = health
         player["in_combat"] = in_combat != 0
@@ -329,6 +358,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         if len(player_values) > PLAYER_PLACE_OF_SLEEPING:
             player["sitting"] = player_values[PLAYER_PLACE_OF_SITTING] in SIT_STATES_SEATED
             player["sleeping"] = player_values[PLAYER_PLACE_OF_SLEEPING] in SLEEP_STATES_ASLEEP
+        if len(player_values) > PLAYER_PLACE_OF_SNEAKING:
+            player["sneaking"] = player_values[PLAYER_PLACE_OF_SNEAKING] != 0
     _add_seat(player, raw, KEY_PLAYER_MOUNT, KEY_PLAYER_SEAT)
     if len(player) > 0:
         state["player"] = player
@@ -408,6 +439,16 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     report = raw.get(KEY_REPORT)
     if isinstance(report, str) and report.strip() != "":
         state["report"] = report.strip()
+    # Only a game mod whose plugin keeps events sends this list, and only if something happened
+    if isinstance(raw.get(KEY_EVENTS), list):
+        state["events"] = read_events(raw.get(KEY_EVENTS))
+    # Only when the server asked to read a book. Without 'book' the ID that was asked for is no book
+    book_for = raw.get(KEY_BOOK_FOR)
+    if isinstance(book_for, str) and book_for.strip() != "":
+        state["book_for"] = book_for.strip()
+        book = _read_book(raw.get(KEY_BOOK))
+        if book is not None:
+            state["book"] = book
     _add_stats(state, raw)
 
     if isinstance(raw.get(KEY_NEARBY_LINES), list):
@@ -445,7 +486,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
 def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
     """No companion in the result means: the player has no follower at the moment"""
     values = _numbers(raw.get(KEY_COMPANION_VALUES))
-    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_RUNNING, COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
+    if values is None or len(values) not in (COMPANION_VALUE_COUNT, COMPANION_VALUE_COUNT_WITHOUT_SNEAKING, COMPANION_VALUE_COUNT_WITHOUT_RUNNING,
+                                             COMPANION_VALUE_COUNT_WITHOUT_KEPT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_LEADER,
                                              COMPANION_VALUE_COUNT_WITHOUT_WEAPON, COMPANION_VALUE_COUNT_WITHOUT_SITTING):
         return None
     (form_id, health, dead, in_combat, waiting, is_loaded, distance, angle, target_form_id, facing, retreating,
@@ -485,6 +527,9 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
         companion["weapon_kept_away"] = values[COMPANION_PLACE_OF_KEPT_WEAPON] != 0
     if len(values) > COMPANION_PLACE_OF_RUNNING:
         companion["running"] = values[COMPANION_PLACE_OF_RUNNING] != 0
+    if len(values) > COMPANION_PLACE_OF_SNEAK_MODE:
+        companion["sneaking"] = values[COMPANION_PLACE_OF_SNEAKING] != 0
+        companion["sneak_mode"] = SNEAK_MODES.get(values[COMPANION_PLACE_OF_SNEAK_MODE], SNEAK_MODES[0])
     for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() != "":
@@ -909,6 +954,71 @@ def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:
             "text": text.strip(),
         })
     return heard
+
+
+def read_events(raw_lines: Any) -> list[dict[str, Any]]:
+    """What happened in the game as the plugin of the game mod wrote it, oldest first: 'seconds_ago', 'game_time'
+    (the time of day in the game, eg 14:35), 'urgent' and 'text'. Empty if there is nothing, or nothing readable"""
+    events: list[dict[str, Any]] = []
+    if not isinstance(raw_lines, list):
+        return events
+    for entry in raw_lines:
+        if not isinstance(entry, str):
+            continue
+        # The text comes last and is not split any further
+        parts = entry.split(QUEST_PART_SEPARATOR, EVENT_PART_COUNT - 1)
+        if len(parts) != EVENT_PART_COUNT:
+            continue
+        age_text, minutes_text, urgent_text, text = parts
+        if not age_text.isdecimal() or not minutes_text.isdecimal() or text.strip() == "":
+            continue
+        minutes = int(minutes_text) % MINUTES_PER_DAY
+        events.append({
+            "seconds_ago": int(age_text),
+            "game_time": f"{minutes // MINUTES_PER_HOUR:02d}:{minutes % MINUTES_PER_HOUR:02d}",
+            "urgent": urgent_text == "1",
+            "text": text.strip(),
+        })
+    return events
+
+
+def _read_book(raw_lines: Any) -> dict[str, Any] | None:
+    """One page of a book as the plugin of the game mod wrote it: 'page', 'pages', 'kind' (book, note or spell tome),
+    'id', 'title' and 'text' (its paragraphs, one per line). None if the game sent no book"""
+    if not isinstance(raw_lines, list) or len(raw_lines) == 0 or not isinstance(raw_lines[0], str):
+        return None
+    # The title comes last and is not split any further
+    header = raw_lines[0].split(QUEST_PART_SEPARATOR, BOOK_HEADER_PART_COUNT - 1)
+    if len(header) != BOOK_HEADER_PART_COUNT:
+        return None
+    page_text, pages_text, kind_text, id_text, title = header
+    form_id = parse_ref_id(id_text)
+    if not page_text.isdecimal() or not pages_text.isdecimal() or not kind_text.isdecimal() or form_id is None:
+        return None
+    text = ""
+    for entry in raw_lines[1:]:
+        if not isinstance(entry, str):
+            continue
+        join, separator, piece = entry.partition(QUEST_PART_SEPARATOR)
+        piece = piece.strip()
+        if separator == "" or piece == "":
+            continue
+        if text == "":
+            text = piece
+        elif join == BOOK_PIECE_FOLLOWS_DIRECTLY:
+            text += piece
+        elif join == BOOK_PIECE_FOLLOWS_BLANK:
+            text += " " + piece
+        else:
+            text += "\n" + piece
+    return {
+        "page": int(page_text),
+        "pages": int(pages_text),
+        "kind": BOOK_KINDS.get(int(kind_text), BOOK_KINDS[0]),
+        "id": format_ref_id(form_id),
+        "title": title.strip() or UNKNOWN_NAME,
+        "text": text,
+    }
 
 
 def _add_view_of_companion(state: dict[str, Any]) -> None:

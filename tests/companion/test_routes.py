@@ -2752,3 +2752,109 @@ def test_inventory_filter_gives_a_short_list():
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert tools[1]["inputSchema"]["properties"]["filter"]["enum"] == ["favorites", "equipped", "all"]
         assert "favorite" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+
+
+def test_events_books_and_sneaking():
+    from src.companion import game_state
+    from src.companion.fake_game import BOOK_REF_ID, SNEAK_NUMBERS, build_state, run_command, sneak_mode_after
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    def text_for(raw: dict, **wanted) -> str:
+        return describe_state({"connected": True, "fresh": True, "state": read_game_state(raw), **wanted})
+
+    # Events: the plugin writes how long ago, the time of day in the game, urgent or not, and what happened. Broken lines are left out
+    assert game_state.read_events(["12\t874\t1\tBandit started fighting the player.", "broken", "x\t1\t0\tNo age", "3\t875\t0\t "]) == [
+        {"seconds_ago": 12, "game_time": "14:34", "urgent": True, "text": "Bandit started fighting the player."}]
+    assert game_state.read_events(None) == [] and "events" not in read_game_state(build_state())
+    assert len(read_game_state(build_state(has_events=True))["events"]) == 3
+
+    # Sneaking: the player, the companion, and the command sneak that takes the companion out of doing as the player does
+    plain = text_for(build_state())
+    assert "sneaking" not in plain and "sneak o" not in plain
+    sneaking = text_for(build_state(is_sneaking=True, is_player_sneaking=True, sneak_mode=SNEAK_NUMBERS["on"]))
+    assert "weapon drawn" not in sneaking and sneaking.count("sneaking") == 2 and "sneaking, sneak on" in sneaking
+    assert "following, sneak off" in text_for(build_state(sneak_mode=SNEAK_NUMBERS["off"]))
+    # A game mod from before says nothing about sneaking, and is still read
+    old = build_state(is_sneaking=True, is_player_sneaking=True)
+    old[game_state.KEY_PLAYER_VALUES] = old[game_state.KEY_PLAYER_VALUES][:game_state.PLAYER_VALUE_COUNT_WITHOUT_SNEAKING]
+    old[game_state.KEY_COMPANION_VALUES] = old[game_state.KEY_COMPANION_VALUES][:game_state.COMPANION_VALUE_COUNT_WITHOUT_SNEAKING]
+    old_state = read_game_state(old)
+    assert "sneaking" not in old_state["player"] and "sneaking" not in old_state["companion"] and old_state["companion"]["name"] == "Lydia"
+    assert sneak_mode_after("sneak", "on", 0) == 1 and sneak_mode_after("sneak", "auto", 2) == 0 and sneak_mode_after("follow", "", 2) == 2
+    assert "whatever the player does" in run_command("sneak", "", "", detail="on")[1]
+
+    # A book: one page of it, with where the next one is. The pieces of a paragraph are put together again
+    page_one = text_for(build_state(read=BOOK_REF_ID), read_wanted=BOOK_REF_ID).splitlines()
+    assert page_one[-4:] == [f"Reading 'Thief's Letter' (note, ID {BOOK_REF_ID}), page 1 of 2:", "Dear [Thief],",
+                             "meet me at the mill when the moon is up.", f"More: STATE with read '{BOOK_REF_ID}' and page 2."]
+    page_two = text_for(build_state(read=BOOK_REF_ID, read_page=2), read_wanted=BOOK_REF_ID).splitlines()
+    assert page_two[-2:] == [f"Reading 'Thief's Letter' (note, ID {BOOK_REF_ID}), page 2 of 2:", "Bring the claw."]
+    assert "is not a book or a note" in text_for(build_state(read="0005A410"), read_wanted="0005A410")
+    assert "interface version 17" in text_for(build_state(), read_wanted=BOOK_REF_ID)
+    assert "did not send the page in time" in text_for(build_state(), read_missed=True)
+    without_text = build_state(read=BOOK_REF_ID)
+    without_text[game_state.KEY_BOOK] = [f"0\t0\t2\t{BOOK_REF_ID}\tSpell Tome: Flames"]
+    assert f"'Spell Tome: Flames' (spell tome, ID {BOOK_REF_ID}) has no text to read." in text_for(without_text, read_wanted=BOOK_REF_ID)
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        def state_lines(arguments: dict) -> list[str]:
+            return tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": arguments})).splitlines()
+
+        received_commands: list[dict] = []
+
+        def game():
+            results: list[dict] = []
+            urgent: list[str] = ["4\t875\t1\tBandit Outlaw started fighting you."]
+            state = build_state(has_events=True)
+            for _ in range(8):
+                body = {consts.KEY_RESULTS: results, consts.KEY_BUSY: 0, consts.KEY_FAILS: 0}
+                if state is not None:
+                    body[consts.KEY_STATE] = state
+                if len(urgent) > 0 and len(results) > 0:
+                    # The urgent events go along with the results of the commands, as the game mod sends them
+                    body[consts.KEY_EVENTS] = urgent
+                    urgent = []
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                state = None
+                results = []
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    received_commands.append(sent)
+                    if sent[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE:
+                        state = build_state(read=str(sent.get(consts.KEY_COMMAND_READ) or ""), read_page=int(sent.get(consts.KEY_COMMAND_READ_PAGE) or 1))
+                    else:
+                        results.append({consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # What the server turns down itself never reaches the game. The urgent event of the first state hangs onto
+        # the first answer to a command, whatever became of the command, and only onto that one
+        refused = command({"action": "sneak"})["message"]
+        assert "sneak needs one of these" in refused and " Meanwhile: Bandit started fighting the player. (" in refused
+        refused_again = command({"action": "sneak", "detail": "maybe"})["message"]
+        assert "sneak needs one of these" in refused_again and "Meanwhile" not in refused_again
+        assert "is not the ID of a book" in tool_payload(rpc(client, "tools/call", {"name": "STATE", "arguments": {"read": "the letter"}}))["message"]
+        # The urgent event that came with the result hangs onto the answer of the command, with how long ago it was
+        sneak = command({"action": "sneak", "detail": "ON", "target": "000A2C94"})
+        assert sneak["status"] == consts.STATUS_DONE
+        assert sneak["message"].startswith("Done. Meanwhile: Bandit Outlaw started fighting you. (") and sneak["message"].endswith(" s ago)")
+        # The other events of the first state were kept until the AI asked. The urgent ones that were told already are not told again
+        first = state_lines({"read": BOOK_REF_ID.lower(), "page": 2})
+        events = first[first.index("Events:") + 1:first.index("Events:") + 3]
+        assert [line.partition(": ")[2] for line in events] == [
+            "The player entered Whiterun.", "The player took 2 hits from Bandit and lost about 15 health (85% left)."]
+        assert events[0].endswith("(14:30): The player entered Whiterun.") and " s ago (14:35): The player took" in events[1]
+        assert not any("started fighting" in line for line in first)
+        assert first[-2:] == [f"Reading 'Thief's Letter' (note, ID {BOOK_REF_ID}), page 2 of 2:", "Bring the claw."]
+        # Each event is given only once, and a state without 'read' carries no page
+        second = state_lines({})
+        assert "Events:" not in second and not any(line.startswith("Reading") for line in second)
+        sent = [(one[consts.KEY_COMMAND_ACTION], one[consts.KEY_COMMAND_TARGET], one[consts.KEY_COMMAND_DETAIL]) for one in received_commands
+                if one[consts.KEY_COMMAND_ACTION] != consts.ACTION_REPORT_STATE]
+        assert sent == [("sneak", "", "on")]
+        reads = [(one.get(consts.KEY_COMMAND_READ), one.get(consts.KEY_COMMAND_READ_HIGH), one.get(consts.KEY_COMMAND_READ_LOW), one.get(consts.KEY_COMMAND_READ_PAGE))
+                 for one in received_commands if one[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE]
+        assert reads == [(BOOK_REF_ID, 0x0001, 0xACDA, 2), (None, None, None, None)]
