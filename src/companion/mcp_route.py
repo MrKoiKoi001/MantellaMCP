@@ -18,7 +18,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.29"
+SERVER_VERSION: str = "0.31"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -53,7 +53,7 @@ ARGUMENT_FIND_GESTURE: str = "find_gesture"
 ARGUMENT_THEN: str = "then"
 ARGUMENT_AFTER_PREVIOUS: str = "after_previous"
 # What a step of 'then' can carry: the same as a command, without a chain of its own
-STEP_FIELDS: list[str] = ["action", "target", "detail", "loud", "run", "manner"]
+STEP_FIELDS: list[str] = ["action", "target", "detail", "loud", "quiet", "run", "manner"]
 # How long the sentence of the say that was sent last takes, for a chain that waits until it is spoken
 _last_say_seconds: float = 0.0
 # The animations of the game, per folder of the game (see idle_search.py)
@@ -145,6 +145,9 @@ TOOLS: list[dict[str, Any]] = [
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
             "you there. " + SAY_LANGUAGE_NOTE + "One or two sentences at a time. "
             "With 'loud': true you call it out with a raised voice: for a warning, or when the player is far away. "
+            "With 'quiet': true you say it in a low voice, with a calm face and still hands: while you sneak, or when "
+            "nobody else is to listen. The player hears it less far, so stay close. Your voice only gets quieter, it "
+            "does not whisper. "
             "target = whom you speak to; nothing = the player. You turn to them and look at them while you speak, and "
             "afterwards your eyes are free again (or back on what look_at holds; while look_at holds and you name no "
             "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
@@ -204,12 +207,14 @@ TOOLS: list[dict[str, Any]] = [
                 "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
                 "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, the seconds for pause."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
+                "quiet": {"type": "boolean", "description": "Only for say: true = say it in a low voice instead of speaking normally, eg while you sneak. Not together with 'loud'."},
                 "run": {"type": "boolean", "description": "Only for move_to, move, enter and follow: true = run instead of walk."},
                 "manner": {"type": "string", "enum": list(consts.MANNERS), "description": "Only for say: how you speak. It picks how your hands move and the look on your face while you speak. Nothing = neutral."},
                 ARGUMENT_THEN: {"type": "array", "maxItems": MAX_WAITING_STEPS, "description": "More commands that start one after the other, each when you are done with the one before.",
                                 "items": {"type": "object", "properties": {
                                     "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
                                     "target": {"type": "string"}, "detail": {"type": "string"}, "loud": {"type": "boolean"},
+                                    "quiet": {"type": "boolean"},
                                     "run": {"type": "boolean"}, "manner": {"type": "string", "enum": list(consts.MANNERS)}},
                                     "required": ["action"]}},
                 ARGUMENT_AFTER_PREVIOUS: {"type": "boolean", "description": "true = do not start this command at once: put it behind what you are doing and what waits already."},
@@ -296,7 +301,8 @@ TOOLS: list[dict[str, Any]] = [
             "With 'find_gesture' you get no state at all, only the animations of the game whose name has that word, for gesture. "
             "'Since your last STATE': what became of a loot, pick_up, move_to, move, enter, make_room or sit you started (what you took, or that you did not get there). "
             "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
-            "characters in front with no wall in between, living first, then the dead, then the things in front. "
+            "characters in front with no wall in between, living first, then the dead, then the things in front, and only the "
+            "doors and places in front with no wall in between. "
             "Use it when the talk is about what someone sees, not for an overview. "
             "With 'stats' you get the level of the player, whether a level-up is waiting, perk points to spend, health, magicka, "
             "stamina, the weight carried and all skills (highest first), and your own level, health, magicka and stamina."
@@ -536,10 +542,13 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         item = format_ref_id(item_form_id)
     if action == consts.ACTION_SAY:
         is_loud = arguments.get("loud") is True
+        is_quiet = arguments.get("quiet") is True
+        if is_loud and is_quiet:
+            return {"status": consts.STATUS_FAILED, "message": "say takes 'loud' or 'quiet', not both."}, True
         manner = str(arguments.get("manner", "") or "").strip().lower()
         if manner != "" and manner not in consts.MANNERS:
             return {"status": consts.STATUS_FAILED, "message": f"There is no manner '{manner}'. The manners: {MANNER_NAMES}. Nothing = neutral."}, True
-        problem, line = await _prepare_speech(detail, queue, voice, is_loud)
+        problem, line = await _prepare_speech(detail, queue, voice, is_loud, is_quiet)
         if problem != "":
             return {"status": consts.STATUS_FAILED, "message": problem}, True
         # The game gets the number of the line to speak, the sound is in its folder already.
@@ -548,6 +557,9 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         # Hands that move while talking: the game mod plays the animations the server picks, the first one with say
         seconds = voice.spoken_seconds if voice is not None else 0.0
         animations = _pick_talk_animations(manner, seconds) if voice is not None and voice.has_talk_gestures else []
+        # In a low voice the hands stay still, unless the AI names how it speaks
+        if is_quiet and manner == "":
+            animations = []
         face_name = consts.MANNERS[manner][1] if manner != "" else ""
         talk, idle = _split_animation(animations[0]) if len(animations) > 0 else ("", "")
         global _say_number, _speech_task, _last_say_seconds
@@ -560,7 +572,7 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
             _speech_task = None
         result = await queue.send_command(action, target=target, detail=clean_text(detail), count=line, talk=talk, item=idle,
                                           say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE),
-                                          say_ms=int(seconds * 1000))
+                                          say_ms=int(seconds * 1000), extra={consts.KEY_COMMAND_QUIET: 1} if is_quiet else None)
         is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
         state = await queue.peek_state()
         protocol = state.get("protocol") if isinstance(state, dict) else 0
@@ -859,7 +871,8 @@ async def _finish_speech(queue: CompanionCommandQueue, number: int, seconds: flo
     await queue.send_command(consts.ACTION_SAY_END, say_number=number)
 
 
-async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: CompanionVoice | None, is_loud: bool = False) -> tuple[str, int]:
+async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: CompanionVoice | None, is_loud: bool = False,
+                          is_quiet: bool = False) -> tuple[str, int]:
     """Makes the sound of what the companion says and puts it into the game folder (see voice.py)
 
     Returns:
@@ -881,7 +894,7 @@ async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: Compan
         return (f"The game did not tell which voice {companion.get('name')} has. That needs the newest plugin of the game mod "
                 "(KI_MCP_Gefaehrte.dll, interface version 6)."), 0
     # Making the sound takes a moment (seconds with XTTS), and the server has to keep answering the game meanwhile
-    is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder, is_loud)
+    is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder, is_loud, is_quiet)
     return ("" if is_ok else problem), line
 
 

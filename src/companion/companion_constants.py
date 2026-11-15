@@ -214,6 +214,9 @@ class companion_constants:
     # say: how long the sound of the sentence is in milliseconds. The game mod needs it when the sentence starts later,
     # because the companion first turns to or walks over to another character
     KEY_COMMAND_SAY_MS: str = "companion_say_ms"
+    # say: 1 = the companion says it in a low voice (the argument 'quiet' of COMMAND). The sound is quieter already,
+    # the game mod makes the look on the face weaker and answers "You say it quietly."
+    KEY_COMMAND_QUIET: str = "companion_quiet"
     # move_to, move, enter and follow: 1 = the companion runs instead of walking (the argument 'run' of COMMAND)
     KEY_COMMAND_RUN: str = "companion_run"
     FACE_NONE: int = -1

@@ -444,7 +444,7 @@ def test_heard_lines_are_kept_until_the_ai_asks_and_given_only_once():
         "5\tFF000A01\tbandit\tNever should have come here!\t", "broken", "x\t00000014\tKoi\tHello"]})
     assert state["heard"] == [{"seconds_ago": 5, "ref_id": "FF000A01", "name": "Bandit", "text": "Never should have come here!"}]
     assert game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0], game_state.KEY_HEARD: ["5\t00000014\tKoi\tHello"]}) == {
-        "time": "10:00", "weather": "clear", "quests": [], "protocol": 0, "around_companion": False, "visible_only": False, "hearing": False, "nearby": []}
+        "time": "10:00", "weather": "clear", "quests": [], "plugin_version": 2, "protocol": 0, "around_companion": False, "visible_only": False, "hearing": False, "nearby": []}
 
 
 def test_heard_lines_of_one_speaker_are_joined_and_old_ones_dropped():
@@ -1300,9 +1300,17 @@ def test_visible_only_lists_what_can_be_seen():
     start = seen.index("Things:")
     assert seen[start + 1:start + 4] == ["0005A400 Chest, container, 4 m ahead-right, from you 7 m left",
                                          "0005A410 Iron Dagger, item, 2 m ahead-right, from you 5 m left",
-                                         "Places: Pelagia Farm 000C0001 (farm) 120 m ahead-left, Whiterun Stables 000C0002 (stable) 260 m behind"]
+                                         "Places: Pelagia Farm 000C0001 (farm) 120 m ahead-left"]
     shown = "\n".join(seen)
     assert "Wooden Bench" not in shown and "Strongbox" not in shown and "Grindstone" not in shown
+    # The same goes for places and doors: the stables (behind) and the door to the right go, what lies in front stays.
+    # The plugin of the game mod leaves out what is behind a wall, if it is new enough, and the line says which it was
+    assert "Whiterun Stables" not in shown and "Warmaiden's" not in shown and "Dragonsreach" in shown
+    assert "doors and places in front (the plugin of the game mod is too old to check walls for them)" in shown
+    newer = build_state(is_visible_only=True)
+    newer[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_PLUGIN_VERSION] = game_state.PLUGIN_VERSION_WITH_SIGHT
+    assert "doors and places in front with no wall in between, things within" in "\n".join(text_for(newer, visible_wanted=True))
+    assert "Whiterun Stables" in "\n".join(text_for(build_state(), things_wanted=True))
     # Seen from the companion
     assert any(line.startswith("Only what you can see:") for line in
                text_for(build_state(is_around_companion=True, is_visible_only=True), visible_wanted=True, around_wanted=True))
@@ -1917,6 +1925,11 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
     assert read_sound(voice_folder / LINE_FILES[1])[0] == 4000
     quiet = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(piper)])
     assert quiet.speak("Halt!", "FemaleEvenToned", True)[0] is True and quiet.has_talk_gestures is False
+    # 'quiet' makes the sound quieter (1000 at 100 % times QUIET_FACTOR), and the sentence stays as written
+    from src.companion.loudness import QUIET_FACTOR
+    is_said, _, quiet_line = quiet.speak("Draugr ahead.", "FemaleEvenToned", False, True)
+    assert is_said and read_sound(voice_folder / LINE_FILES[quiet_line - 1])[0] == int(1000 * QUIET_FACTOR)
+    assert run_command(consts.ACTION_SAY, "", "", is_quiet=True) == (True, "You say it quietly.", "")
 
     # The game gets the animation event for the hands with say, and the AI can ask for a raised voice
     with TestClient(create_app(TOKEN, hold_seconds=5, voice=voice)) as client:
@@ -1937,6 +1950,16 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert {"sheathe", "draw", "open", "close"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
         assert tools[0]["inputSchema"]["properties"]["loud"]["type"] == "boolean"
+        assert tools[0]["inputSchema"]["properties"]["quiet"]["type"] == "boolean" and "'quiet': true" in tools[0]["description"]
+        # In a low voice: the game is told so, and the hands stay still unless a manner is named. Not together with 'loud'
+        both = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Hm.", "loud": True, "quiet": True}}))
+        assert both == {"status": consts.STATUS_FAILED, "message": "say takes 'loud' or 'quiet', not both."}
+        received_commands.clear()
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Draugr ahead.", "quiet": True}})
+        assert received_commands[0][consts.KEY_COMMAND_QUIET] == 1 and received_commands[0][consts.KEY_COMMAND_TALK] == ""
+        assert consts.KEY_COMMAND_QUIET not in sent
         assert "about 200 meters" in tools[1]["description"] and "lying asleep" in tools[1]["description"]
     # What Piper was given: the sentence that is called out ends with an exclamation mark, the others stay as written
     said_files = list(tmp_path.glob("**/said.txt")) + list(__import__("pathlib").Path(__import__("tempfile").gettempdir()).glob("companion_voice_*/said.txt"))

@@ -1,4 +1,4 @@
-"""Makes the sound of what the companion says louder or quieter, for the setting voice_volume and for say with 'loud'.
+"""Makes the sound of what the companion says louder or quieter, for the setting voice_volume and for say with 'loud' or 'quiet'.
 
 The sound files of the voices already use nearly the whole range a sound file has, so simply multiplying would cut
 the peaks off flat, which crackles. Above a threshold the sound is therefore pressed together softly instead: the quiet
@@ -17,6 +17,8 @@ LOWEST_FACTOR: float = 0.1
 HIGHEST_FACTOR: float = 4.0
 # What 'loud' multiplies the sound by, on top of the setting voice_volume
 LOUD_FACTOR: float = 2.5
+# What 'quiet' multiplies the sound by, on top of the setting voice_volume (a value to be tuned in the game)
+QUIET_FACTOR: float = 0.4
 
 
 def scale_sample(value: float, factor: float) -> float:

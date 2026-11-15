@@ -206,6 +206,8 @@ WORLD_PLACE_OF_VISIBLE: int = 6
 # What the viewer can see lies within this many degrees to the left and right of where it faces
 # (VisibleHalfAngleDegrees in KI_MCP_Gefaehrte_Loop.psc). The things are filtered by it here
 VISIBLE_HALF_ANGLE_DEGREES: int = 60
+# From this interface version on the SKSE plugin of the game mod leaves out the places and doors behind walls for 'visible'
+PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
 GAME_PROTOCOL: int = 10
@@ -340,6 +342,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         # so that 'no open quests' (an empty list) can be told apart from 'not known'
         if len(world_values) > WORLD_PLACE_OF_PLUGIN_VERSION and world_values[WORLD_PLACE_OF_PLUGIN_VERSION] > 0:
             state["quests"] = _read_quests(raw.get(KEY_QUESTS), raw.get(KEY_QUEST_TARGETS))
+            state["plugin_version"] = world_values[WORLD_PLACE_OF_PLUGIN_VERSION]
         # Same idea: 'hearing' is only in the result if the game mod knows about listening at all
         state["protocol"] = world_values[WORLD_PLACE_OF_PROTOCOL] if len(world_values) > WORLD_PLACE_OF_PROTOCOL else 0
         # From whom the lists below are seen: distances and directions are measured from the companion then

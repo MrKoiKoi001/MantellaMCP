@@ -14,7 +14,7 @@ Instead of Piper, an XTTS server can make the sound (see xtts.py, voice = xtts i
 languages too. If it does not answer, Piper makes the sentence, so that the companion never falls silent.
 
 The sound can be made louder or quieter (voice_volume in companion.ini), and louder still for a sentence that is
-called out (say with 'loud', see loudness.py).
+called out (say with 'loud', see loudness.py), and quieter for one that is said in a low voice (say with 'quiet').
 
 If the lip movement is switched on, a lip file made from the sound goes next to the sound file (see lips.py).
 """
@@ -31,7 +31,7 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from src.companion.lips import LIP_ENDING, PLACEHOLDER_FILE, SOUND_ENDING, LipSync
-from src.companion.loudness import LOUD_FACTOR, change_volume
+from src.companion.loudness import LOUD_FACTOR, QUIET_FACTOR, change_volume
 from src.companion.xtts import XttsVoice
 
 GAME_PLUGIN_NAME: str = "KI_MCP_Gefaehrte.esp"
@@ -256,12 +256,14 @@ class CompanionVoice:
                          "if a permission is missing, run build.py --install of the game mod again as administrator)")
         return ", ".join(parts)
 
-    def speak(self, text: str, voice_folder: str, is_loud: bool = False) -> tuple[bool, str, int]:
+    def speak(self, text: str, voice_folder: str, is_loud: bool = False, is_quiet: bool = False) -> tuple[bool, str, int]:
         """Turns the text into sound and puts it into the game folder. Takes about a second, so call it from a thread.
 
         Args:
             voice_folder: The voice of the companion as the game names it (eg FemaleEvenToned)
             is_loud: Whether the companion calls it out: the sound is made louder, and the sentence ends with an exclamation mark
+            is_quiet: Whether the companion says it in a low voice: the sound is made quieter. The voice itself stays
+                the same, neither Piper nor XTTS can whisper. 'loud' wins if both are asked for
 
         Returns:
             Whether it worked, the text for the AI if it did not, and the number of the line the game mod has to speak (1 or 2)
@@ -296,7 +298,8 @@ class CompanionVoice:
                 except (OSError, RuntimeError) as error:
                     self.__stop_piper()
                     return False, f"{before}Piper could not make the sound: {error}", 0
-            change_volume(sound_file, self.__volume * (LOUD_FACTOR if is_loud else 1.0))
+            manner_factor = LOUD_FACTOR if is_loud else (QUIET_FACTOR if is_quiet else 1.0)
+            change_volume(sound_file, self.__volume * manner_factor)
             self.spoken_seconds = measure_seconds(sound_file)
             # Without a lip file of its own, the sentence gets the placeholder: the lips of the sentence before would not fit
             lip_file = ""

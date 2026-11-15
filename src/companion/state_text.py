@@ -7,7 +7,7 @@ the AI needs to decide, instead of the whole state as JSON.
 from typing import Any
 
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import (GAME_PROTOCOL, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
+from src.companion.game_state import (GAME_PROTOCOL, PLUGIN_VERSION_WITH_SIGHT, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
                                       TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM,
                                       SPACE_SLOPE, SPACE_WALL)
@@ -127,9 +127,15 @@ def describe_state(state_result: dict[str, Any]) -> str:
     is_visible_only = bool(state_result.get("visible_wanted")) and bool(state.get("visible_only"))
     if is_visible_only:
         viewer = "you" if is_from_companion else "the player"
+        # Doors and places: the plugin of the game mod leaves out the ones behind walls, if it is new enough.
+        # The ones that do not lie in front are left out here in any case
+        has_sight = int(state.get("plugin_version") or 0) >= PLUGIN_VERSION_WITH_SIGHT
+        walls_note = "with no wall in between" if has_sight else "(the plugin of the game mod is too old to check walls for them)"
         lines.append(f"Only what {viewer} can see: characters in front of {viewer} with no wall in between, "
+                     f"doors and places in front {walls_note}, "
                      f"things within {VISIBLE_HALF_ANGLE_DEGREES} degrees left and right (for things walls are not checked).")
         things = [thing for thing in things if abs(thing.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
+        places = [place for place in places if abs(place.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
     elif state_result.get("visible_wanted"):
         lines.append("The game could not check what can be seen (inside a place it has not loaded, or an older game mod). "
                      "The lists below hold everything around.")
@@ -169,7 +175,7 @@ def describe_state(state_result: dict[str, Any]) -> str:
                 lines.append(_describe_thing(thing, is_from_companion))
     elif state_result.get("things_missed"):
         lines.append("The game did not send the things in time. Ask again.")
-    lines.extend(_describe_places(state.get("places"), is_from_companion))
+    lines.extend(_describe_places(places if is_visible_only else state.get("places"), is_from_companion))
     lines.extend(_describe_quests(state.get("quests"), is_from_companion))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
     wanted = state_result.get("inventory_wanted")

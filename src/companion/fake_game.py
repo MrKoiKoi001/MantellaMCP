@@ -351,12 +351,14 @@ def is_ride_locked_after(action: str, detail: str, is_ride_locked: bool) -> bool
     return is_ride_locked
 
 
-def run_command(action: str, target: str, target_ref_id: str, item_id: str = "", detail: str = "", horse_ref_id: str = "") -> tuple[bool, str, str]:
+def run_command(action: str, target: str, target_ref_id: str, item_id: str = "", detail: str = "", horse_ref_id: str = "",
+                is_quiet: bool = False) -> tuple[bool, str, str]:
     """Answers attack, move_to, loot, sit, look_at, gesture, flee and stand_down like the game mod does
 
     Args:
         item_id: For gesture: the ID of the animation the server picked, as eight hex digits (empty = end the gesture)
         detail: For gesture: the name of the gesture
+        is_quiet: For say: whether the companion says it in a low voice
 
     Returns:
         Whether it worked, the text for the AI, and whom the companion fights afterwards (ref_id or empty)
@@ -437,9 +439,10 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
             return True, f"You look at {name_of(target)} now. 'look_at' without a target lets you look around freely again.", target_ref_id
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_SAY:
+        said = "You say it quietly." if is_quiet else "You say it aloud."
         if target not in ("", PLAYER_REF_ID) and name_of(target) == "":
-            return True, f"You say it aloud. But '{target}' is not around here, so you do not look at them while you speak.", target_ref_id
-        return True, "You say it aloud.", target_ref_id
+            return True, f"{said} But '{target}' is not around here, so you do not look at them while you speak.", target_ref_id
+        return True, said, target_ref_id
     if action in (consts.ACTION_SAY_TALK, consts.ACTION_SAY_END):
         return True, "ok", target_ref_id
     if action == consts.ACTION_SHEATHE:
@@ -664,7 +667,8 @@ def main():
             # The ID of the item (loot) or of the animation (gesture) comes in two halves, like the game mod reads it
             item_number = (int(command.get(consts.KEY_COMMAND_ITEM_HIGH) or 0) << 16) | int(command.get(consts.KEY_COMMAND_ITEM_LOW) or 0)
             item_id = f"{item_number:08X}" if item_number != 0 else ""
-            is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""), horse_ref_id)
+            is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""), horse_ref_id,
+                                                        bool(command.get(consts.KEY_COMMAND_QUIET)))
             if is_ok:
                 called_horse_ref_id = called_horse_after(str(action), str(target or ""), horse_ref_id, called_horse_ref_id)
                 horse_ref_id = horse_after(str(action), str(target or ""), horse_ref_id)
