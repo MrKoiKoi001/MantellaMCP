@@ -315,6 +315,8 @@ def horse_after(action: str, target: str, horse_ref_id: str) -> str:
     """Like the game: claim_horse, and mount with a target, make that horse the companion's own"""
     if action in (consts.ACTION_CLAIM_HORSE, consts.ACTION_MOUNT) and target != "":
         return target
+    if action == consts.ACTION_RELEASE_HORSE and target in ("", horse_ref_id):
+        return ""
     return horse_ref_id
 
 
@@ -485,6 +487,10 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
             if item_id == target:
                 return True, f"Fake game did '{action}' with {name}.", target_ref_id
         return False, f"There is no item with the ID '{target}'. Take the ID from the inventory in STATE.", target_ref_id
+    if action == consts.ACTION_RELEASE_HORSE:
+        if horse_ref_id == "" or target not in ("", horse_ref_id):
+            return False, "You have no horse to give back.", target_ref_id
+        return True, "It is not your horse any more. It belongs to the player again.", target_ref_id
     if action == consts.ACTION_MOUNT and target == "" and horse_ref_id == "":
         return False, "You have no horse. Take one as yours first: claim_horse with the ref_id of a horse from 'Nearby' in STATE (ask the player which one).", target_ref_id
     if action == consts.ACTION_CALL_HORSE:

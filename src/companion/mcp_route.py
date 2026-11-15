@@ -17,7 +17,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.32"
+SERVER_VERSION: str = "0.34"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -144,7 +144,9 @@ TOOLS: list[dict[str, Any]] = [
             "With 'loud': true you call it out with a raised voice: for a warning, or when the player is far away. "
             "With 'quiet': true you say it in a low voice, with a calm face and still hands: while you sneak, or when "
             "nobody else is to listen. The player hears it less far, so stay close. Your voice only gets quieter, it "
-            "does not whisper. "
+            "does not whisper. Enemies can hear what you say: said normally it can give you and the player away, called "
+            "out it carries far, in a low voice nobody but the player notices it. So while the player sneaks, or when "
+            "enemies are near and have not noticed you, always speak with 'quiet'. "
             "target = whom you speak to; nothing = the player. You turn to them and look at them while you speak, and "
             "afterwards your eyes are free again (or back on what look_at holds; while look_at holds and you name no "
             "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
@@ -178,9 +180,12 @@ TOOLS: list[dict[str, Any]] = [
             "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
             "for a tome if you know none. The spell works at once and costs you no magicka. "
             "Riding: claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
-            "the player tells you which horse is yours). mount = get on your horse and ride after the player; if the horse is "
+            "the player tells you which horse is yours). The player can still ride it. A horse that belongs to someone "
+            "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
+            "release_horse = give your horse back (or, with a target, another horse you once took): it belongs to whom "
+            "it belonged before again. mount = get on your horse and ride after the player; if the horse is "
             "far away it is brought to your side. With a target you take that horse as yours first. dismount = get off, "
-            "the horse stays where it is. When the player mounts or dismounts, you do the same on your "
+            "the horse stays where it is; if the game does not let you off, STATE tells you so afterwards. When the player mounts or dismounts, you do the same on your "
             "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
             "does, until ride_lock 'off'. mount and dismount always work. In the saddle you can speak, look, cast and "
             "fight, and you can ride somewhere: move_to and move take you there on horseback and you wait there in the "
@@ -206,7 +211,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, release_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
                 "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, the seconds for pause."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
                 "quiet": {"type": "boolean", "description": "Only for say: true = say it in a low voice instead of speaking normally, eg while you sneak. Not together with 'loud'."},
@@ -581,6 +586,12 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
             animations = []
         face_name = consts.MANNERS[manner][1] if manner != "" else ""
         talk, idle = _split_animation(animations[0]) if len(animations) > 0 else ("", "")
+        # How loud it is for the game: enemies can hear what is said normally and, further away, what is called out
+        say_extra: dict[str, Any] = {}
+        if is_quiet:
+            say_extra[consts.KEY_COMMAND_QUIET] = 1
+        if is_loud:
+            say_extra[consts.KEY_COMMAND_LOUD] = 1
         global _say_number, _speech_task, _last_say_seconds
         _last_say_seconds = seconds
         _say_number += 1
@@ -591,7 +602,7 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
             _speech_task = None
         result = await queue.send_command(action, target=target, detail=clean_text(detail), count=line, talk=talk, item=idle,
                                           say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE),
-                                          say_ms=int(seconds * 1000), extra={consts.KEY_COMMAND_QUIET: 1} if is_quiet else None)
+                                          say_ms=int(seconds * 1000), extra=say_extra if len(say_extra) > 0 else None)
         is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
         state = await queue.peek_state()
         protocol = state.get("protocol") if isinstance(state, dict) else 0
@@ -789,11 +800,12 @@ async def _call_command(arguments: dict[str, Any], queue: CompanionCommandQueue,
     if len(steps) > 0:
         if is_error:
             # What failed is skipped, the rest goes on once the companion is done with what it was doing
-            chain.add(steps, fails_before=queue.fail_count)
+            chain.add(steps, fails_before=queue.fail_count, can_running_fail=False)
             notes.append(f"It was skipped, what you put behind it goes on. Queue: {chain.describe()}.")
         else:
             chain.add(steps, running_text=describe_step(first), fails_before=fails_before,
-                      first_wait_seconds=_last_say_seconds if action == consts.ACTION_SAY else 0.0)
+                      first_wait_seconds=_last_say_seconds if action == consts.ACTION_SAY else 0.0,
+                      can_running_fail=action not in consts.ACTIONS_KEEPING_QUEUE)
             notes.append(f"Queue: {chain.describe()}.")
     if len(notes) > 0:
         payload = dict(payload)

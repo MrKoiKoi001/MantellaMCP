@@ -1959,7 +1959,10 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
         time.sleep(0.3)
         rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Draugr ahead.", "quiet": True}})
         assert received_commands[0][consts.KEY_COMMAND_QUIET] == 1 and received_commands[0][consts.KEY_COMMAND_TALK] == ""
-        assert consts.KEY_COMMAND_QUIET not in sent
+        assert consts.KEY_COMMAND_LOUD not in received_commands[0]
+        # Called out: the game is told so, because enemies hear that further away
+        assert consts.KEY_COMMAND_QUIET not in sent and sent[consts.KEY_COMMAND_LOUD] == 1
+        assert "always speak with 'quiet'" in tools[0]["description"]
         assert "about 200 meters" in tools[1]["description"] and "lying asleep" in tools[1]["description"]
     # What Piper was given: the sentence that is called out ends with an exclamation mark, the others stay as written
     said_files = list(tmp_path.glob("**/said.txt")) + list(__import__("pathlib").Path(__import__("tempfile").gettempdir()).glob("companion_voice_*/said.txt"))
@@ -2455,6 +2458,14 @@ def test_commands_wait_for_each_other_in_a_chain():
             assert wait_for(lambda: "Queue: 'move_to 000A0001' did not work out, so it was skipped. The rest goes on: gesture wave." in state())
             assert wait_for(lambda: game["commands"] == [("move_to", "000A0001", ""), ("gesture", "", "wave")])
             assert wait_for(lambda: "Queue: finished. Done: gesture wave." in state())
+            # A gesture has started and cannot go wrong any more: a failure the game tells of meanwhile (the walk
+            # before it, told late) is not blamed on the gesture, and the chain goes on
+            game["commands"].clear()
+            assert wait_for(lambda: "Queue:" not in state())
+            command({"action": "gesture", "detail": "dance", "then": [{"action": "pause", "detail": "3"}, {"action": "follow"}]})
+            game["fails"] = 2
+            assert wait_for(lambda: game["commands"] == [("gesture", "", "dance"), ("follow", "", "")], 10.0)
+            assert wait_for(lambda: "Queue: all done (pause 3, then follow)." in state())
             # The same if the game refuses the command itself or a step in the middle (attack on someone who is dead already)
             game["commands"].clear()
             game["reject"] = [consts.ACTION_ATTACK]
@@ -2604,6 +2615,12 @@ def test_a_horse_is_renamed_and_called_to_its_owner():
         build_state(horse_ref_id=HORSE_REF_ID, player_horse_ref_id=PLAYER_HORSE_REF_ID, horse_names=names))})
     assert f"Your horse: Klumpatsch {HORSE_REF_ID}" in text and f"Player's horse: Poldi {PLAYER_HORSE_REF_ID}" in text
     assert run_command("rename_horse", "", "", detail="Poldi")[0] is False
+    # release_horse gives the horse back: the companion has none afterwards
+    from src.companion.fake_game import horse_after
+    assert run_command(consts.ACTION_RELEASE_HORSE, "", "")[0] is False
+    assert run_command(consts.ACTION_RELEASE_HORSE, "", "", horse_ref_id=HORSE_REF_ID)[0] is True
+    assert horse_after(consts.ACTION_RELEASE_HORSE, "", HORSE_REF_ID) == "" and horse_after(consts.ACTION_RELEASE_HORSE, PLAYER_HORSE_REF_ID, HORSE_REF_ID) == HORSE_REF_ID
+    assert consts.ACTION_RELEASE_HORSE in consts.PLAYER_ACTIONS and consts.ACTION_RELEASE_HORSE not in consts.ACTIONS_REQUIRING_TARGET
     # Every horse runs to its owner, unless the detail says otherwise
     assert run_command("call_horse", "", "", horse_ref_id=HORSE_REF_ID)[1] == "Horse runs to you and stays there."
     assert run_command("call_horse", PLAYER_HORSE_REF_ID, "", horse_ref_id=HORSE_REF_ID)[1] == "Shadowmere runs to the player and stays there."

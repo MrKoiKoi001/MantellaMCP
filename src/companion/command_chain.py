@@ -60,6 +60,9 @@ class CompanionChain:
         self.__current: str = ""
         self.__task: asyncio.Task | None = None
         self.__fails_before: int = 0
+        # Whether what the companion does now can still go wrong after it started (a walk, a ride, looting).
+        # A gesture or a sentence cannot: a failure the game tells of meanwhile belongs to something earlier
+        self.__can_current_fail: bool = True
 
     @property
     def is_active(self) -> bool:
@@ -89,19 +92,21 @@ class CompanionChain:
         return dropped
 
     def add(self, steps: list[dict[str, Any]], running_text: str = "", fails_before: int | None = None,
-            first_wait_seconds: float = 0.0) -> None:
+            first_wait_seconds: float = 0.0, can_running_fail: bool = True) -> None:
         """Puts steps at the end of the chain and starts the chain if it is not running.
 
         Args:
             running_text: What the companion is doing right now, which the first step waits for (only for a new chain)
             fails_before: The fail count of the game from before that was started (only for a new chain)
             first_wait_seconds: How long what the companion is doing goes on for sure (a sentence it speaks)
+            can_running_fail: Whether what the companion is doing right now can still go wrong (see __can_current_fail)
         """
         self.__waiting.extend(steps)
         if self.is_active:
             return
         self.__current = running_text if running_text != "" else UNKNOWN_STEP_TEXT
         self.__fails_before = fails_before if fails_before is not None else self.__queue.fail_count
+        self.__can_current_fail = can_running_fail
         self.__task = asyncio.create_task(self.__run(first_wait_seconds))
 
     async def __run(self, first_wait_seconds: float) -> None:
@@ -118,12 +123,15 @@ class CompanionChain:
                     await self.__give_up(f"'{self.__current}' took longer than {int(STEP_TIMEOUT_SECONDS)} seconds, or the game stopped answering")
                     return
                 if self.__queue.fail_count > self.__fails_before:
-                    # It had started, so it counted as done until now
-                    if len(done) > 0 and done[-1] == self.__current:
-                        done.pop()
-                    await self.__skip(f"'{self.__current}' did not work out")
+                    if self.__can_current_fail:
+                        # It had started, so it counted as done until now
+                        if len(done) > 0 and done[-1] == self.__current:
+                            done.pop()
+                        await self.__skip(f"'{self.__current}' did not work out")
+                        is_any_skipped = True
+                    # Otherwise the game told of a failure of something earlier, in its own words (see the reports
+                    # of the game under 'Since your last STATE'). What runs now has started and is fine
                     self.__fails_before = self.__queue.fail_count
-                    is_any_skipped = True
                 if len(self.__waiting) == 0:
                     break
                 step = self.__waiting.pop(0)
@@ -134,12 +142,14 @@ class CompanionChain:
                     done.append(self.__current)
                     continue
                 self.__fails_before = self.__queue.fail_count
+                self.__can_current_fail = str(step.get("action", "")).strip().lower() not in consts.ACTIONS_KEEPING_QUEUE
                 payload, is_error, wait_seconds = await self.__run_step(step)
                 if is_error:
                     await self.__skip(f"'{self.__current}' failed ({payload.get('message', '')})")
                     is_any_skipped = True
                     # Nothing new runs, so there is nothing to wait for but what the companion did before
                     self.__current = UNKNOWN_STEP_TEXT
+                    self.__can_current_fail = False
                     continue
                 done.append(self.__current)
             if len(done) > 0 and is_any_skipped:

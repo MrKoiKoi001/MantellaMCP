@@ -224,6 +224,9 @@ class companion_constants:
     # say: 1 = the companion says it in a low voice (the argument 'quiet' of COMMAND). The sound is quieter already,
     # the game mod makes the look on the face weaker and answers "You say it quietly."
     KEY_COMMAND_QUIET: str = "companion_quiet"
+    # say: 1 = the companion calls it out (the argument 'loud' of COMMAND). The sound is louder already, the game mod
+    # makes more noise with it for characters that listen for enemies. In a low voice it makes none
+    KEY_COMMAND_LOUD: str = "companion_loud"
     # move_to, move, enter and follow: 1 = the companion runs instead of walking (the argument 'run' of COMMAND)
     KEY_COMMAND_RUN: str = "companion_run"
     FACE_NONE: int = -1
@@ -246,6 +249,8 @@ class companion_constants:
     # Riding: take a horse as the companion's own, get on it, get off it, and whether the companion mounts and
     # dismounts together with the player (ride_lock on = it does not)
     ACTION_CLAIM_HORSE: str = "claim_horse"
+    # The companion gives a horse back that it took with claim_horse: it belongs to whom it belonged before again
+    ACTION_RELEASE_HORSE: str = "release_horse"
     ACTION_MOUNT: str = "mount"
     ACTION_DISMOUNT: str = "dismount"
     ACTION_RIDE_LOCK: str = "ride_lock"
@@ -293,6 +298,7 @@ class companion_constants:
         ACTION_TAKE,
         ACTION_CAST_SPELL,
         ACTION_CLAIM_HORSE,
+        ACTION_RELEASE_HORSE,
         ACTION_MOUNT,
         ACTION_DISMOUNT,
         ACTION_RIDE_LOCK,
@@ -304,6 +310,7 @@ class companion_constants:
     ACTIONS_KEEPING_QUEUE: list[str] = [
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
         ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
+        ACTION_RELEASE_HORSE,
         ACTION_CALL_HORSE, ACTION_RENAME_HORSE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
