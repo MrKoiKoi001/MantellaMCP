@@ -78,6 +78,13 @@ class companion_constants:
     KEY_COMMAND_ITEM_HIGH: str = PREFIX + "item_high"
     KEY_COMMAND_ITEM_LOW: str = PREFIX + "item_low"
     INVENTORY_CHOICES: list[str] = [INVENTORY_OWN, INVENTORY_PLAYER, INVENTORY_BOTH]
+    # STATE with an inventory: only a part of it, as a short list (the argument 'filter'). The game mod gets the word
+    # with report_state and only collects that part where it can, a game mod that does not know it sends everything
+    KEY_COMMAND_INVENTORY_FILTER: str = "companion_inventory_filter"
+    FILTER_ALL: str = "all"
+    FILTER_FAVORITES: str = "favorites"
+    FILTER_EQUIPPED: str = "equipped"
+    INVENTORY_FILTERS: list[str] = [FILTER_FAVORITES, FILTER_EQUIPPED, FILTER_ALL]
     COUNT_ALL_TEXT: str = "all"
     COUNT_ALL: int = 0
     # SKSE_HTTP sends every reply to all listening scripts. If Mantella is installed next to the companion mod,
@@ -228,6 +235,11 @@ class companion_constants:
     ACTION_CLOSE: str = "close"
     ACTION_EQUIP: str = "equip"
     ACTION_UNEQUIP: str = "unequip"
+    # The companion marks a weapon, a shield or a piece of armor of its own as a favorite ('detail' on) or takes the
+    # mark off again (off). Of its own accord it only switches between its favorites then. For the game: 'count' 1 = on, 0 = off
+    ACTION_FAVORITE: str = "favorite"
+    FAVORITE_ON: str = "on"
+    FAVORITE_OFF: str = "off"
     ACTION_GIVE: str = "give"
     ACTION_TAKE: str = "take"
     ACTION_CAST_SPELL: str = "cast_spell"
@@ -276,6 +288,7 @@ class companion_constants:
         ACTION_DRAW,
         ACTION_EQUIP,
         ACTION_UNEQUIP,
+        ACTION_FAVORITE,
         ACTION_GIVE,
         ACTION_TAKE,
         ACTION_CAST_SPELL,
@@ -290,11 +303,11 @@ class companion_constants:
     # These run at once and leave the commands alone that wait in a chain. Every other command throws them away
     ACTIONS_KEEPING_QUEUE: list[str] = [
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
-        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
+        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_CALL_HORSE, ACTION_RENAME_HORSE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
-    ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
+    ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE]
     # 'detail' says how many
     ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
     # These take 'run': the companion runs instead of walking

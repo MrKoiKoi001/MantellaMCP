@@ -1921,8 +1921,8 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
     assert voice.speak("Follow me.", "FemaleEvenToned") == (True, "", 1)
     assert read_sound(voice_folder / LINE_FILES[0])[0] == 2000
     assert voice.speak("Watch out, a trap.", "FemaleEvenToned", True) == (True, "", 2)
-    # 200 % times what 'loud' adds would be five times as loud, and four times is the most there is
-    assert read_sound(voice_folder / LINE_FILES[1])[0] == 4000
+    # 200 % times what 'loud' adds (half as much again) is three times as loud
+    assert read_sound(voice_folder / LINE_FILES[1])[0] == 3000
     quiet = CompanionVoice(str(game_folder), str(tmp_path / "piper"), piper_command=[sys.executable, str(piper)])
     assert quiet.speak("Halt!", "FemaleEvenToned", True)[0] is True and quiet.has_talk_gestures is False
     # 'quiet' makes the sound quieter (1000 at 100 % times QUIET_FACTOR), and the sentence stays as written
@@ -2385,6 +2385,10 @@ def start_busy_game(client: TestClient, game: dict) -> None:
                 game["commands"].append((command[consts.KEY_COMMAND_ACTION], command[consts.KEY_COMMAND_TARGET], command[consts.KEY_COMMAND_DETAIL]))
                 if command[consts.KEY_COMMAND_ACTION] == consts.ACTION_MOVE_TO:
                     game["busy"] = 1
+                # game["reject"]: the actions this game refuses
+                if command[consts.KEY_COMMAND_ACTION] in game.get("reject", ()):
+                    results.append({consts.KEY_COMMAND_ID: command[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: False, consts.KEY_RESULT_MESSAGE: "It is dead already."})
+                    continue
                 results.append({consts.KEY_COMMAND_ID: command[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Started."})
 
     threading.Thread(target=run, daemon=True).start()
@@ -2443,13 +2447,23 @@ def test_commands_wait_for_each_other_in_a_chain():
             assert wait_for(lambda: "Queue: all done (gesture Wave, then pause 1, then follow)." in state())
             assert "Queue:" not in state()
 
-            # A step that fails takes the ones behind it along
+            # A step that fails is skipped, the ones behind it go on
             game["commands"].clear()
             command({**walk, "then": [{"action": "gesture", "detail": "wave"}]})
             game["fails"] = 1
             game["busy"] = 0
-            assert wait_for(lambda: "Queue: 'move_to 000A0001' did not work out. So what waited behind it was dropped: gesture wave." in state())
-            assert game["commands"] == [("move_to", "000A0001", "")]
+            assert wait_for(lambda: "Queue: 'move_to 000A0001' did not work out, so it was skipped. The rest goes on: gesture wave." in state())
+            assert wait_for(lambda: game["commands"] == [("move_to", "000A0001", ""), ("gesture", "", "wave")])
+            assert wait_for(lambda: "Queue: finished. Done: gesture wave." in state())
+            # The same if the game refuses the command itself or a step in the middle (attack on someone who is dead already)
+            game["commands"].clear()
+            game["reject"] = [consts.ACTION_ATTACK]
+            answer = command({"action": "attack", "target": "FF000A03", "then": [{"action": "attack", "target": "FF000A03"}, {"action": "follow"}]})
+            assert answer["status"] == consts.STATUS_FAILED and "It was skipped, what you put behind it goes on. Queue:" in answer["message"]
+            assert wait_for(lambda: game["commands"] == [("attack", "FF000A03", ""), ("attack", "FF000A03", ""), ("follow", "", "")])
+            assert wait_for(lambda: "Queue: 'attack FF000A03' failed (It is dead already.), so it was skipped. The rest goes on: follow." in state())
+            game["reject"] = []
+            assert wait_for(lambda: "Queue:" not in state())
 
             # A command that moves the companion throws away what waits
             game["commands"].clear()
@@ -2540,20 +2554,21 @@ def test_gestures_are_found_in_the_game_file_and_play_sitting_or_by_event(tmp_pa
         def command(arguments: dict) -> dict:
             return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
 
-        # find_gesture answers without the game: short names first, then what the game has
+        # find_gesture answers without the game, and only with the gestures that have a short name: the other
+        # animations of the game mostly did nothing when they were played
         text = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"find_gesture": "Drink"}}))
-        lines = text.split("\n")
-        assert lines[0] == "Gestures with a short name for 'Drink': drink, drink_at_table, drinkpotion"
-        assert lines[2:] == ["- IdleDrink 000FD68B", "- IdleMQ201Drink 00103656", "- ChairDrinkingStart 00065D07, only while sitting"]
-        assert "no animation with 'moonwalk'" in tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"find_gesture": "moonwalk"}}))
-        assert "STATE with 'find_gesture'" in command({"action": "gesture", "detail": "moonwalk"})["message"]
+        assert text == "Gestures for 'Drink': drink, drink_at_table, drinkpotion. Play one with the command gesture and its name in 'detail'."
+        assert tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"find_gesture": "moonwalk"}})).startswith("No gesture has 'moonwalk' in its name. The gestures: ")
+        for unknown in ("moonwalk", "idlemq201drink", "00103656"):
+            refused = command({"action": "gesture", "detail": unknown})
+            assert refused["status"] == consts.STATUS_FAILED and refused["message"].startswith(f"There is no gesture '{unknown}'. The gestures: ")
 
         game = {"busy": 0, "fails": 0, "commands": [], "stop": False}
         received: list[dict] = []
 
         def game_loop():
             results: list[dict] = []
-            for _ in range(3):
+            for _ in range(5):
                 reply = client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results}).json()
                 received.extend(reply.get(consts.KEY_COMMANDS, []))
                 results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}
@@ -2567,12 +2582,13 @@ def test_gestures_are_found_in_the_game_file_and_play_sitting_or_by_event(tmp_pa
         assert (sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == split_form_id(parse_ref_id("000FD68B"))
         assert (sent[consts.KEY_COMMAND_SIT_ITEM_HIGH], sent[consts.KEY_COMMAND_SIT_ITEM_LOW]) == split_form_id(parse_ref_id("00065D07"))
         assert (sent[consts.KEY_COMMAND_TALK], sent[consts.KEY_COMMAND_SIT_EVENT], sent[consts.KEY_COMMAND_GESTURE_STATE]) == ("IdleDrink", "ChairDrinkingStart", 0)
-        # An animation of the game by its name: only its ID goes along, no event to fall back on
-        assert command({"action": "gesture", "detail": "idlemq201drink"})["status"] == consts.STATUS_DONE
-        sent = received[1]
-        assert (sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TALK]) == ("IdleMQ201Drink", "")
-        assert (sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == split_form_id(parse_ref_id("00103656"))
-        assert consts.KEY_COMMAND_SIT_EVENT not in sent
+        # The companion marks a weapon of its own as a favorite: the game gets 1 for on and 0 for off
+        assert command({"action": "favorite", "target": "0001397E"})["status"] == consts.STATUS_DONE
+        assert (received[1][consts.KEY_COMMAND_ACTION], received[1][consts.KEY_COMMAND_COUNT]) == ("favorite", 1)
+        assert command({"action": "favorite", "target": "0001397E", "detail": "Off"})["status"] == consts.STATUS_DONE
+        assert received[2][consts.KEY_COMMAND_COUNT] == 0
+        assert "'detail' is 'on'" in command({"action": "favorite", "target": "0001397E", "detail": "maybe"})["message"]
+        assert "needs a target" in command({"action": "favorite"})["message"]
 
 
 def test_a_horse_is_renamed_and_called_to_its_owner():
@@ -2637,3 +2653,85 @@ def test_favorites_of_the_player_are_marked_in_the_inventory():
     # Without the flag nothing changes
     plain = describe_state({"connected": True, "fresh": True, "state": game_state.read_game_state(build_state(inventory="player")), "inventory_wanted": "player"})
     assert "Iron Sword 00012E49 (equipped)" in plain and "favorite" not in plain
+
+
+def test_empty_containers_and_bodies_show_at_once():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    # A newer plugin of the game mod counts what an open container holds: 2 = empty, 8 = three different items.
+    # 1 stays 'locked', 0 means that it does not tell. For the dead the count plus 1 comes where 'hostile' is for the living
+    raw = build_state(has_things=True)
+    things = [line.split("\t") for line in raw[game_state.KEY_THINGS]]
+    chest = next(parts for parts in things if parts[5] == "Chest")
+    chest[4] = "8"
+    raw[game_state.KEY_THINGS] = ["\t".join(parts) for parts in things] + ["1\t0005A4FF\t3\t0\t2\tBarrel"]
+    values = raw[game_state.KEY_NEARBY_VALUES]
+    dead_place = next(place for place in range(0, len(values), game_state.VALUES_PER_NEARBY_CHARACTER) if values[place + 4] == 1)
+    state = game_state.read_game_state(raw)
+    by_name = {thing["name"]: thing for thing in state["things"]}
+    assert by_name["Chest"]["item_count"] == 3 and by_name["Barrel"]["item_count"] == 0
+    assert by_name["Strongbox"]["locked"] is True and "item_count" not in by_name["Strongbox"]
+    assert all("item_count" not in character for character in state["nearby"])
+    text = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state, "things_wanted": True})
+    assert "Chest, container, 3 different items, " in text and "Barrel, container, empty, " in text and "Strongbox, container, locked, " in text
+    assert "Bandit Outlaw, dead, 5 m" in text
+    for sent, shown in ((1, "dead, empty, "), (2, "dead, 1 item, "), (5, "dead, 4 different items, ")):
+        values[dead_place + 3] = sent
+        counted = game_state.read_game_state(raw)
+        body = next(character for character in counted["nearby"] if character["dead"])
+        assert body["item_count"] == sent - 1 and body["hostile"] is False
+        assert f"Bandit Outlaw, {shown}" in describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": counted})
+
+
+def test_inventory_filter_gives_a_short_list():
+    import asyncio
+
+    from src.companion import game_state
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    # The fourth number of an item: 1 = equipped, 2 = favorite, and in steps of 16 what kind of weapon or armor it is
+    # (8 = bow, 2 = sword, 20 = shield). A game mod that does not tell the kind leaves it at the flags
+    raw = build_state(inventory=consts.INVENTORY_BOTH)
+    own = raw[game_state.KEY_INVENTORY_OWN]
+    own[4], own[8], own[12] = 1 + 2 + 16 * 2, 1 + 16 * 20, 2 + 16 * 8
+    player = raw[game_state.KEY_INVENTORY_PLAYER]
+    player[4], player[8] = 1, 2
+    state = game_state.read_game_state(raw)
+    assert [item["kind"] for item in state[game_state.KEY_INVENTORY_OWN]["items"][:4]] == ["sword", "shield", "bow", ""]
+
+    def text_for(inventory: str, item_filter: str) -> str:
+        return describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": state,
+                               "inventory_wanted": inventory, "inventory_filter": item_filter})
+
+    favorites = text_for(consts.INVENTORY_OWN, consts.FILTER_FAVORITES)
+    assert "Your favorites: Steel Sword 00013989 (sword, equipped), Hunting Bow 00013985 (bow)" in favorites
+    assert "Your inventory" not in favorites and "Iron Arrow" not in favorites
+    assert "You wear and hold: Steel Sword 00013989 (sword), Iron Shield 00012EB6 (shield)" in text_for(consts.INVENTORY_OWN, consts.FILTER_EQUIPPED)
+    both = text_for(consts.INVENTORY_BOTH, consts.FILTER_FAVORITES)
+    assert "The player's favorites: Potion of Minor Healing 0003EADD (potion or food) x5" in both and "Your favorites: Steel Sword" in both
+    assert "The player wears and holds: Iron Sword 00012E49 (weapon)" in text_for(consts.INVENTORY_PLAYER, consts.FILTER_EQUIPPED)
+    assert "Your inventory:" in text_for(consts.INVENTORY_OWN, "")
+    plain = game_state.read_game_state(build_state(inventory=consts.INVENTORY_OWN))
+    none = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": plain,
+                           "inventory_wanted": consts.INVENTORY_OWN, "inventory_filter": consts.FILTER_FAVORITES})
+    assert "Your favorites: none. Mark a weapon" in none
+
+    # The game is told the filter, so that it only collects that part
+    async def request(**wanted: str) -> dict:
+        queue = CompanionCommandQueue(hold_seconds=5)
+        game = asyncio.create_task(queue.poll(None, []))
+        await asyncio.sleep(0.05)
+        asyncio.create_task(queue.get_state(refresh_timeout_seconds=0.1, **wanted))
+        return (await game)[0]
+
+    sent = asyncio.run(request(inventory=consts.INVENTORY_OWN, inventory_filter=consts.FILTER_EQUIPPED))
+    assert (sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_INVENTORY_FILTER]) == (consts.INVENTORY_OWN, consts.FILTER_EQUIPPED)
+    assert consts.KEY_COMMAND_INVENTORY_FILTER not in asyncio.run(request(inventory=consts.INVENTORY_OWN))
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[1]["inputSchema"]["properties"]["filter"]["enum"] == ["favorites", "equipped", "all"]
+        assert "favorite" in tools[0]["inputSchema"]["properties"]["action"]["enum"]

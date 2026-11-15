@@ -7,7 +7,7 @@ the AI needs to decide, instead of the whole state as JSON.
 from typing import Any
 
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import (GAME_PROTOCOL, PLUGIN_VERSION_WITH_SIGHT, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
+from src.companion.game_state import (ITEM_KINDS_BY_GROUP, GAME_PROTOCOL, PLUGIN_VERSION_WITH_SIGHT, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
                                       TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM,
                                       SPACE_SLOPE, SPACE_WALL)
@@ -179,11 +179,19 @@ def describe_state(state_result: dict[str, Any]) -> str:
     lines.extend(_describe_quests(state.get("quests"), is_from_companion))
     lines.extend(_describe_heard(state_result.get("heard"), state.get("companion")))
     wanted = state_result.get("inventory_wanted")
-    if wanted in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
-        lines.extend(_describe_inventory("Your inventory", state.get(KEY_INVENTORY_OWN)))
-        lines.extend(_describe_spells(state.get("spells")))
-    if wanted in (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH):
-        lines.extend(_describe_inventory("The player's inventory", state.get(KEY_INVENTORY_PLAYER)))
+    item_filter = state_result.get("inventory_filter")
+    if item_filter in (consts.FILTER_FAVORITES, consts.FILTER_EQUIPPED):
+        # A short list, eg to switch weapons in a fight without reading the whole inventory
+        if wanted in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
+            lines.append(_describe_filtered_items("You", state.get(KEY_INVENTORY_OWN), item_filter))
+        if wanted in (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH):
+            lines.append(_describe_filtered_items("The player", state.get(KEY_INVENTORY_PLAYER), item_filter))
+    else:
+        if wanted in (consts.INVENTORY_OWN, consts.INVENTORY_BOTH):
+            lines.extend(_describe_inventory("Your inventory", state.get(KEY_INVENTORY_OWN)))
+            lines.extend(_describe_spells(state.get("spells")))
+        if wanted in (consts.INVENTORY_PLAYER, consts.INVENTORY_BOTH):
+            lines.extend(_describe_inventory("The player's inventory", state.get(KEY_INVENTORY_PLAYER)))
     corpse_wanted = state_result.get("corpse_wanted")
     if isinstance(corpse_wanted, str) and corpse_wanted != "":
         lines.extend(_describe_corpse(corpse_wanted, state.get("corpse"), state.get(KEY_INVENTORY_CORPSE)))
@@ -301,6 +309,40 @@ def _describe_spells(spells: Any) -> list[str]:
     if len(spells) == 0:
         return ["Spells you know: none. Read a spell tome to learn one (equip on the tome)."]
     return ["Spells you know (cast_spell): " + ", ".join(f"{spell.get('name')} {spell.get('id')}" for spell in spells)]
+
+
+def _describe_filtered_items(owner: str, inventory: Any, item_filter: str) -> str:
+    """One line with the favorites of a character, or with what it wears and holds: name, ID and kind of each item.
+
+    Args:
+        owner: 'You' or 'The player'
+        item_filter: FILTER_FAVORITES or FILTER_EQUIPPED. The game mod may have sent the whole inventory all the same
+    """
+    is_own = owner == "You"
+    if item_filter == consts.FILTER_FAVORITES:
+        title = "Your favorites" if is_own else "The player's favorites"
+        flag = "favorite"
+    else:
+        title = "You wear and hold" if is_own else "The player wears and holds"
+        flag = "equipped"
+    if not isinstance(inventory, dict):
+        return f"{title}: the game did not send it."
+    texts: list[str] = []
+    for item in inventory.get("items", []):
+        if not item.get(flag):
+            continue
+        kind = item.get("kind") or ITEM_KINDS_BY_GROUP.get(str(item.get("group")), "other")
+        if item_filter == consts.FILTER_FAVORITES and item.get("equipped"):
+            kind += ", equipped"
+        text = f"{item.get('name')} {item.get('id')} ({kind})"
+        if item.get("count", 1) != 1:
+            text += f" x{item['count']}"
+        texts.append(text)
+    if len(texts) == 0:
+        if item_filter == consts.FILTER_FAVORITES and is_own:
+            return f"{title}: none. Mark a weapon, a shield or a piece of armor of yours with the command favorite."
+        return f"{title}: nothing."
+    return f"{title}: {', '.join(texts)}"
 
 
 def _describe_inventory(title: str, inventory: Any) -> list[str]:
@@ -628,7 +670,7 @@ def _describe_space(space: Any, look: Any = None, wanted_direction: str = "", wa
 def _describe_nearby_character(character: dict[str, Any], is_from_companion: bool = False) -> str:
     line = f"{character.get('ref_id')} {character.get('name')}, "
     if character.get("dead"):
-        line += "dead, "
+        line += "dead" + _describe_item_count(character) + ", "
     line += _describe_position(character, is_from_companion)
     if character.get("hostile"):
         line += ", hostile"
@@ -641,10 +683,20 @@ def _describe_thing(thing: dict[str, Any], is_from_companion: bool = False) -> s
     if kind == THING_FURNITURE:
         label = "seat" if thing.get("seat") else "furniture"
     elif kind == THING_CONTAINER:
-        label = "container, locked" if thing.get("locked") else "container"
+        label = "container, locked" if thing.get("locked") else "container" + _describe_item_count(thing)
     else:
         label = "item"
     return f"{thing.get('ref_id')} {thing.get('name')}, {label}, {_describe_position(thing, is_from_companion)}"
+
+
+def _describe_item_count(holder: dict[str, Any]) -> str:
+    """What a container or a dead character holds, as far as the game told: ', empty' or ', 3 different items'"""
+    count = holder.get("item_count")
+    if not isinstance(count, int):
+        return ""
+    if count <= 0:
+        return ", empty"
+    return ", 1 item" if count == 1 else f", {count} different items"
 
 
 def _describe_position(character: dict[str, Any], is_from_companion: bool) -> str:

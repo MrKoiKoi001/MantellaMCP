@@ -12,13 +12,12 @@ from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.command_chain import MAX_WAITING_STEPS, CompanionChain, describe_step, read_pause_seconds
 from src.companion.gestures import GESTURE_NAMES as ALL_GESTURE_NAMES, pick_gesture
-from src.companion.idle_search import IdleLibrary
 from src.companion.ref_ids import format_ref_id, parse_ref_id, split_form_id
 from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.31"
+SERVER_VERSION: str = "0.32"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -36,6 +35,7 @@ SAY_LANGUAGE_NOTE: str = "Write it in English: the voice cannot pronounce other 
 TOOL_STATE: str = "STATE"
 ARGUMENT_DEBUG: str = "debug"
 ARGUMENT_INVENTORY: str = "inventory"
+ARGUMENT_FILTER: str = "filter"
 ARGUMENT_CORPSE: str = "corpse"
 ARGUMENT_THINGS: str = "things"
 ARGUMENT_MAX: str = "max"
@@ -56,8 +56,6 @@ ARGUMENT_AFTER_PREVIOUS: str = "after_previous"
 STEP_FIELDS: list[str] = ["action", "target", "detail", "loud", "quiet", "run", "manner"]
 # How long the sentence of the say that was sent last takes, for a chain that waits until it is spoken
 _last_say_seconds: float = 0.0
-# The animations of the game, per folder of the game (see idle_search.py)
-_idle_libraries: dict[str, IdleLibrary] = {}
 MAX_FIND_LENGTH: int = 60
 COMPASS_NAMES: str = ", ".join(consts.COMPASS_NAMES)
 RELATIVE_NAMES: str = ", ".join(consts.RELATIVE_NAMES)
@@ -138,8 +136,7 @@ TOOLS: list[dict[str, Any]] = [
             "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
             "drink, eat, read_book and write_down also work while you sit on a chair, drink_at_table and pass_out only there. "
             "drunk makes you sway and stagger, also while you walk, until gesture with 'stop'. "
-            "STATE with 'find_gesture' finds more animations of the game by a word; play one with its name or its ID in "
-            "'detail' (those are untried: some do nothing). "
+            "STATE with 'find_gesture' finds the gestures that fit a word (eg drink). "
             "expression = put a look on your face, named in 'detail': " + EXPRESSION_NAMES + ". A number behind it "
             "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
@@ -167,6 +164,11 @@ TOOLS: list[dict[str, Any]] = [
             "animation with it while you stand around or sit). equip on a spell tome reads it: "
             "you know its spell from then on and the tome is used up, "
             "unequip = put the item away, "
+            "favorite = mark a weapon, a shield or a piece of armor of yours as a favorite ('detail' on, the default) or "
+            "take the mark off (off). The game hands you the strongest thing you carry on its own. Once you have favorites "
+            "you switch back to them by yourself: a favorite weapon instead of another weapon (one for close combat, one "
+            "for range if you mark both), a favorite shield, a favorite piece of armor per part of the body. So mark "
+            "what you want to fight in, and what you only carry for the player stays baggage. "
             "give = hand the item to the player, take = take the item out of the player's inventory "
             "(only when the player wants it). In the player's inventory 'favorite' marks what the player keeps among the "
             "favorites: ask before you take a weapon or a piece of armor that is one, for potions and food it does not matter. "
@@ -197,8 +199,8 @@ TOOLS: list[dict[str, Any]] = [
             "bard and then gesture dance, sit and then say, say and then mount. 'after_previous': true puts a single command "
             "behind what you are doing and what waits already. pause = wait the seconds in 'detail' (1 to 60), for such a list. "
             "A new command that moves you (follow, wait, flee, attack, move_to ...) throws away what waits. say, look_at, "
-            "gesture, expression and what you do with your things run at once and leave it alone. If a step fails, the ones "
-            "behind it are dropped. STATE shows what waits ('Queue') and tells afterwards what became of it."
+            "gesture, expression and what you do with your things run at once and leave it alone. If a step fails, it is "
+            "skipped and the rest goes on. STATE shows what waits ('Queue') and tells afterwards what became of it."
         ),
         "inputSchema": {
             "type": "object",
@@ -264,7 +266,7 @@ TOOLS: list[dict[str, Any]] = [
             "Outdoors the game only knows about 120 meters around the player, further out a ray finds nothing. "
             "'Things' only comes when you ask for it with 'things': what stands and lies within about 10 meters of the player, "
             "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; tables are just called 'Table'), containers such as "
-            "chests and barrels (see the command loot; 'locked' if you cannot open it) and items that lie around "
+            "chests and barrels (see the command loot; 'locked' if you cannot open it, 'empty' or how many different items are in it if the game tells) and items that lie around "
             "(see the command pick_up; arrows that were shot are among them). "
             "Ask for it when you look for a seat or a chest or the player asks what is around, not every time. "
             "Directions are relative to where the player (after 'from you': your character) faces: "
@@ -295,10 +297,12 @@ TOOLS: list[dict[str, Any]] = [
             "'Gear': what you hold in your hands, your gold and the player's gold. "
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
-            "'equipped' marks what is worn or held, 'favorite' what the player has among the favorites (only in the player's inventory). "
+            "With 'filter' you get a short list instead, which is quick: 'favorites' or 'equipped', each item with its ID and "
+            "what it is (bow, sword, shield, helmet ...). Use that to switch weapons in a fight, eg equip your bow. "
+            "'equipped' marks what is worn or held, 'favorite' what the player has among the favorites and, in your own inventory, what you marked with the command favorite. "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
             "'Queue' comes while commands wait for each other (see 'then' of COMMAND): what you do now and what follows. "
-            "With 'find_gesture' you get no state at all, only the animations of the game whose name has that word, for gesture. "
+            "With 'find_gesture' you get no state at all, only the gestures whose name has that word, for the command gesture. "
             "'Since your last STATE': what became of a loot, pick_up, move_to, move, enter, make_room or sit you started (what you took, or that you did not get there). "
             "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
             "characters in front with no wall in between, living first, then the dead, then the things in front, and only the "
@@ -311,6 +315,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 ARGUMENT_INVENTORY: {"type": "string", "enum": consts.INVENTORY_CHOICES, "description": "Also list an inventory: own = yours, player = the player's, both. Only when you need it."},
+                ARGUMENT_FILTER: {"type": "string", "enum": consts.INVENTORY_FILTERS, "description": "Only a part of the inventory, as one short line (name, ID and kind of each item): favorites = what is marked as a favorite, equipped = what is worn and held, all = everything (the default). Without 'inventory' it is your own. Use it to switch weapons in a fight."},
                 ARGUMENT_CORPSE: {"type": "string", "description": "ref_id of a dead character or of a container from 'Nearby': also list what is in it. Replaces 'inventory' for this call."},
                 ARGUMENT_THINGS: {"type": "boolean", "description": "true = also list the furniture, containers and loose items within about 10 meters of the player. Only when you need them."},
                 ARGUMENT_AROUND: {"type": "string", "enum": consts.AROUND_CHOICES, "description": "Whose surroundings the lists show: player (the default) or you = your own character."},
@@ -424,9 +429,17 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
     if name == TOOL_STATE:
         find_gesture = " ".join(str(arguments.get(ARGUMENT_FIND_GESTURE, "") or "").split())[:MAX_FIND_LENGTH]
         if find_gesture != "":
-            # The server knows the animations itself, the game is not asked
-            return _tool_text(_describe_found_gestures(find_gesture, _idle_library(queue)), False)
+            # The server knows the gestures itself, the game is not asked
+            return _tool_text(_describe_found_gestures(find_gesture), False)
         inventory = str(arguments.get(ARGUMENT_INVENTORY, "") or "").strip().lower()
+        inventory_filter = str(arguments.get(ARGUMENT_FILTER, "") or "").strip().lower()
+        if inventory_filter not in consts.INVENTORY_FILTERS:
+            inventory_filter = ""
+        if inventory_filter == consts.FILTER_ALL:
+            inventory_filter = ""
+        # A filter without an inventory means the own one
+        if inventory_filter != "" and inventory == "":
+            inventory = consts.INVENTORY_OWN
         if inventory not in consts.INVENTORY_CHOICES:
             inventory = ""
         corpse = str(arguments.get(ARGUMENT_CORPSE, "") or "").strip()
@@ -479,7 +492,8 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                                              visible=arguments.get(ARGUMENT_VISIBLE) is True,
                                              space=is_space_wanted, find=find, space_meters=space_meters,
                                              space_degrees=space_degrees, space_from_facing=is_space_from_facing,
-                                             space_angle=space_angle, space_direction=space_direction)
+                                             space_angle=space_angle, space_direction=space_direction,
+                                             inventory_filter=inventory_filter)
         if queue.chain is not None:
             state_result["queue"] = queue.chain.describe()
         if arguments.get(ARGUMENT_DEBUG) is True:
@@ -525,6 +539,11 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
                 return {"status": consts.STATUS_FAILED, "message": f"For move_to 'detail' is how many meters in front of the target you stop: a number from 0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, or nothing."}, True
             count = int(number)
             detail = number
+    if action == consts.ACTION_FAVORITE:
+        detail = detail.lower()
+        if detail not in ("", consts.FAVORITE_ON, consts.FAVORITE_OFF):
+            return {"status": consts.STATUS_FAILED, "message": f"For favorite 'detail' is '{consts.FAVORITE_ON}' (the default) or '{consts.FAVORITE_OFF}'."}, True
+        count = 0 if detail == consts.FAVORITE_OFF else 1
     if action in consts.ACTIONS_WITH_COUNT and detail != "":
         if detail.lower() == consts.COUNT_ALL_TEXT:
             count = consts.COUNT_ALL
@@ -668,13 +687,9 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
                          consts.KEY_COMMAND_SIT_STOP_EVENT: gesture["sit_stop_event"],
                          consts.KEY_COMMAND_GESTURE_STATE: 1 if gesture["state"] != "" else 0}
             else:
-                # An animation of the game by its own name or its ID (see find_gesture of STATE). These are untried,
-                # so the game only plays them the usual way
-                entry = _idle_library(queue).get(detail)
-                if entry is None:
-                    return {"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}. STATE with 'find_gesture' finds more animations of the game by a word."}, True
-                item = entry.ref_id
-                detail = entry.name
+                # Only the gestures with a short name are played: the other animations of the game mostly did nothing
+                # when they were tried, and the game said that it played them all the same
+                return {"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}."}, True
     if action == consts.ACTION_CAST_SPELL:
         if detail == "":
             return {"status": consts.STATUS_FAILED, "message": "cast_spell needs the ID or the name of the spell in 'detail'. STATE with inventory 'own' lists the spells you know."}, True
@@ -773,7 +788,9 @@ async def _call_command(arguments: dict[str, Any], queue: CompanionCommandQueue,
     payload, is_error = await _run_command(first, queue, voice)
     if len(steps) > 0:
         if is_error:
-            notes.append("So what you put behind it was not started.")
+            # What failed is skipped, the rest goes on once the companion is done with what it was doing
+            chain.add(steps, fails_before=queue.fail_count)
+            notes.append(f"It was skipped, what you put behind it goes on. Queue: {chain.describe()}.")
         else:
             chain.add(steps, running_text=describe_step(first), fails_before=fails_before,
                       first_wait_seconds=_last_say_seconds if action == consts.ACTION_SAY else 0.0)
@@ -784,35 +801,13 @@ async def _call_command(arguments: dict[str, Any], queue: CompanionCommandQueue,
     return _tool_json(payload, is_error)
 
 
-def _idle_library(queue: CompanionCommandQueue) -> IdleLibrary:
-    """The animations of the game in the folder the server was started with"""
-    if queue.game_folder not in _idle_libraries:
-        _idle_libraries[queue.game_folder] = IdleLibrary(queue.game_folder)
-    return _idle_libraries[queue.game_folder]
-
-
-def _describe_found_gestures(word: str, library: IdleLibrary) -> str:
-    """The answer to find_gesture: the gestures with a short name that fit, and the animations of the game that do"""
-    lines: list[str] = []
-    short_names = [name for name in ALL_GESTURE_NAMES if word.lower().replace(" ", "_") in name]
-    if len(short_names) > 0:
-        lines.append(f"Gestures with a short name for '{word}': {', '.join(short_names)}")
-    matches, total = library.find(word)
-    if library.problem != "":
-        lines.append(library.problem)
-    elif total == 0:
-        lines.append(f"The game has no animation with '{word}' in its name. Try another word, in English: the names are those of the game (eg drink, dance, lean, sit, read).")
-    else:
-        more = "" if total <= len(matches) else f", the first {len(matches)} of {total}"
-        lines.append(f"Animations of the game for '{word}'{more}. Play one with gesture and its name or ID in 'detail'. They are untried: some do nothing, 'gesture' with 'stop' ends one that goes on.")
-        for entry in matches:
-            note = ""
-            if entry.needs_sitting:
-                note = ", only while sitting"
-            elif entry.has_conditions:
-                note = ", has conditions (may not play)"
-            lines.append(f"- {entry.name} {entry.ref_id}{note}")
-    return "\n".join(lines)
+def _describe_found_gestures(word: str) -> str:
+    """The answer to find_gesture: the gestures whose name has the word. Only these can be played (see gestures.py)"""
+    wanted = word.lower().replace(" ", "_")
+    names = [name for name in ALL_GESTURE_NAMES if wanted in name]
+    if len(names) == 0:
+        return f"No gesture has '{word}' in its name. The gestures: {GESTURE_NAMES}"
+    return f"Gestures for '{word}': {', '.join(names)}. Play one with the command gesture and its name in 'detail'."
 
 
 def _direction_word(words: list[str]) -> str:

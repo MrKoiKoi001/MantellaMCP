@@ -206,6 +206,8 @@ WORLD_PLACE_OF_VISIBLE: int = 6
 # What the viewer can see lies within this many degrees to the left and right of where it faces
 # (VisibleHalfAngleDegrees in KI_MCP_Gefaehrte_Loop.psc). The things are filtered by it here
 VISIBLE_HALF_ANGLE_DEGREES: int = 60
+# The flag of a container in 'things' counts its items in steps of this (see _read_things)
+CONTAINER_COUNT_STEP: int = 2
 # From this interface version on the SKSE plugin of the game mod leaves out the places and doors behind walls for 'visible'
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
@@ -658,7 +660,11 @@ def _read_things(raw_things: Any) -> list[dict[str, Any]]:
         if thing["kind"] == THING_FURNITURE:
             thing["seat"] = flag != 0
         elif thing["kind"] == THING_CONTAINER:
-            thing["locked"] = flag != 0
+            # 1 = locked. A newer plugin of the game mod also tells how many different items an open one holds:
+            # 2 x (that number + 1), so 2 = empty. 0 = it does not tell
+            thing["locked"] = flag % 2 == 1
+            if flag >= CONTAINER_COUNT_STEP and not thing["locked"]:
+                thing["item_count"] = flag // CONTAINER_COUNT_STEP - 1
         things.append(thing)
     return things
 
@@ -836,6 +842,19 @@ def _hand_name(hand: Any) -> str:
 # The fourth number of an item is put together from these: the owner wears or holds it, the player has it among the favorites
 ITEM_FLAG_EQUIPPED: int = 1
 ITEM_FLAG_FAVORITE: int = 2
+# Above the flags the fourth number of an item carries what kind of weapon or armor it is, in steps of this
+# (0 = the game mod does not tell, or it is neither)
+ITEM_KIND_STEP: int = 16
+ITEM_KINDS: dict[int, str] = {
+    1: "fists", 2: "sword", 3: "dagger", 4: "war axe", 5: "mace", 6: "greatsword", 7: "battleaxe or warhammer", 8: "bow",
+    9: "staff", 10: "crossbow", 20: "shield", 21: "body armor", 22: "helmet", 23: "gauntlets", 24: "boots", 25: "amulet",
+    26: "ring", 27: "armor",
+}
+# What an item is called in a short list if the game mod did not tell its kind
+ITEM_KINDS_BY_GROUP: dict[str, str] = {
+    "Weapons": "weapon", "Ammunition": "ammunition", "Armor and clothing": "armor", "Potions and food": "potion or food",
+    "Ingredients": "ingredient", "Books": "book", "Scrolls": "scroll", "Soul gems": "soul gem", "Keys": "key",
+}
 
 
 def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False) -> dict[str, Any] | None:
@@ -862,6 +881,7 @@ def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False)
             "group": ITEM_GROUPS.get(form_type, OTHER_ITEM_GROUP),
             "equipped": flags & ITEM_FLAG_EQUIPPED != 0,
             "favorite": flags & ITEM_FLAG_FAVORITE != 0,
+            "kind": ITEM_KINDS.get(flags // ITEM_KIND_STEP, ""),
         })
     return {"total": values[0], "items": items}
 
@@ -950,14 +970,19 @@ def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
     for place in range(len(values) // VALUES_PER_NEARBY_CHARACTER):
         start = place * VALUES_PER_NEARBY_CHARACTER
         form_id, distance, angle, hostile, dead = values[start:start + VALUES_PER_NEARBY_CHARACTER]
-        nearby.append({
+        character: dict[str, Any] = {
             "name": names.get(place, UNKNOWN_NAME),
             "ref_id": _ref_id(form_id),
             "distance_meters": distance,
             "angle_degrees": angle,
-            "hostile": hostile != 0,
+            "hostile": hostile != 0 and dead == 0,
             "dead": dead != 0,
-        })
+        }
+        # The dead are never hostile. In that place a newer game mod tells how many different items a dead one
+        # carries, plus 1 (0 = it does not tell)
+        if dead != 0 and hostile > 0:
+            character["item_count"] = hostile - 1
+        nearby.append(character)
     # The living first and among them the hostile ones, then the dead, each nearest first
     nearby.sort(key=lambda character: (character["dead"], not character["hostile"], character["distance_meters"]))
     return nearby

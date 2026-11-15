@@ -2,7 +2,8 @@
 
 The game runs every command at once and only says that it started. So the chain lives here in the server:
 it sends a step, waits until the game says that the companion is not busy any more (see CompanionCommandQueue.poll),
-and then sends the next one. If a step fails or takes too long, the steps behind it are dropped.
+and then sends the next one. A step that fails is skipped and the chain goes on with the next one.
+Only if a step takes too long or the game stops answering, the steps behind it are dropped.
 """
 import asyncio
 from typing import Any, Awaitable, Callable
@@ -106,6 +107,7 @@ class CompanionChain:
     async def __run(self, first_wait_seconds: float) -> None:
         own_task = asyncio.current_task()
         done: list[str] = []
+        is_any_skipped = False
         try:
             await self.__queue.set_quick_polls(True)
             wait_seconds = first_wait_seconds
@@ -116,8 +118,12 @@ class CompanionChain:
                     await self.__give_up(f"'{self.__current}' took longer than {int(STEP_TIMEOUT_SECONDS)} seconds, or the game stopped answering")
                     return
                 if self.__queue.fail_count > self.__fails_before:
-                    await self.__give_up(f"'{self.__current}' did not work out")
-                    return
+                    # It had started, so it counted as done until now
+                    if len(done) > 0 and done[-1] == self.__current:
+                        done.pop()
+                    await self.__skip(f"'{self.__current}' did not work out")
+                    self.__fails_before = self.__queue.fail_count
+                    is_any_skipped = True
                 if len(self.__waiting) == 0:
                     break
                 step = self.__waiting.pop(0)
@@ -130,10 +136,15 @@ class CompanionChain:
                 self.__fails_before = self.__queue.fail_count
                 payload, is_error, wait_seconds = await self.__run_step(step)
                 if is_error:
-                    await self.__give_up(f"'{self.__current}' failed ({payload.get('message', '')})")
-                    return
+                    await self.__skip(f"'{self.__current}' failed ({payload.get('message', '')})")
+                    is_any_skipped = True
+                    # Nothing new runs, so there is nothing to wait for but what the companion did before
+                    self.__current = UNKNOWN_STEP_TEXT
+                    continue
                 done.append(self.__current)
-            if len(done) > 0:
+            if len(done) > 0 and is_any_skipped:
+                await self.__queue.add_report("Queue: finished. Done: " + ", then ".join(done) + ".")
+            elif len(done) > 0:
                 await self.__queue.add_report("Queue: all done (" + ", then ".join(done) + ").")
         finally:
             # A chain that was cleared has handed everything over already (see clear)
@@ -141,6 +152,13 @@ class CompanionChain:
                 self.__task = None
                 self.__current = ""
                 await self.__queue.set_quick_polls(False)
+
+    async def __skip(self, reason: str) -> None:
+        """A step failed: the AI is told, and the chain goes on with what waits behind it"""
+        report = f"Queue: {reason}, so it was skipped."
+        if len(self.__waiting) > 0:
+            report += " The rest goes on: " + ", ".join(describe_step(step) for step in self.__waiting) + "."
+        await self.__queue.add_report(report)
 
     async def __give_up(self, reason: str) -> None:
         dropped = [describe_step(step) for step in self.__waiting]

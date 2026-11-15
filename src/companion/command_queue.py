@@ -233,11 +233,13 @@ class CompanionCommandQueue:
                         around_companion: bool = False, stats: bool = False, visible: bool = False,
                         space: bool = False, find: str = "", space_meters: int = 0,
                         space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
-                        space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "") -> dict[str, Any]:
+                        space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "",
+                        inventory_filter: str = "") -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
             inventory: Whose inventory the fresh state should carry (companion_constants.INVENTORY_...), or empty for none
+            inventory_filter: Only a part of that inventory (companion_constants.FILTER_FAVORITES or FILTER_EQUIPPED), or empty for all of it
             corpse: ref_id of a dead character or a container. The fresh state then carries what is in it, instead of 'inventory'
             things: Whether the fresh state should carry the things close to the player (furniture, containers, loose items)
             max_lines: How many characters, and how many things, the fresh state should list at most
@@ -271,7 +273,8 @@ class CompanionCommandQueue:
             request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse, detail=inventory, count=max_lines, things=things,
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
                                               find=find, space_meters=space_meters, space_degrees=space_degrees,
-                                              space_from_facing=space_from_facing, space_angle=space_angle)
+                                              space_from_facing=space_from_facing, space_angle=space_angle,
+                                              extra={consts.KEY_COMMAND_INVENTORY_FILTER: inventory_filter} if inventory_filter != "" else None)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -288,6 +291,7 @@ class CompanionCommandQueue:
                 "state": self.__state,
                 # The kept state may still carry an inventory from an earlier question. Only a fresh one is worth showing
                 "inventory_wanted": inventory if is_fresh else "",
+                "inventory_filter": inventory_filter,
                 "inventory_missed": inventory != "" and not is_fresh,
                 "corpse_wanted": corpse if is_fresh else "",
                 # The kept state may still carry things from an earlier question

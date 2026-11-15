@@ -16,7 +16,7 @@ SOFT_LIMIT_START: float = 0.6
 LOWEST_FACTOR: float = 0.1
 HIGHEST_FACTOR: float = 4.0
 # What 'loud' multiplies the sound by, on top of the setting voice_volume
-LOUD_FACTOR: float = 2.5
+LOUD_FACTOR: float = 1.5
 # What 'quiet' multiplies the sound by, on top of the setting voice_volume (a value to be tuned in the game)
 QUIET_FACTOR: float = 0.4
 
