@@ -10,13 +10,15 @@ from fastapi.responses import JSONResponse, Response
 
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.gestures import GESTURES, pick_animation
-from src.companion.ref_ids import format_ref_id, parse_ref_id
+from src.companion.command_chain import MAX_WAITING_STEPS, CompanionChain, describe_step, read_pause_seconds
+from src.companion.gestures import GESTURE_NAMES as ALL_GESTURE_NAMES, pick_gesture
+from src.companion.idle_search import IdleLibrary
+from src.companion.ref_ids import format_ref_id, parse_ref_id, split_form_id
 from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.27"
+SERVER_VERSION: str = "0.29"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -47,6 +49,15 @@ ARGUMENT_SPACE_DIRECTION: str = "space_direction"
 ARGUMENT_SPACE_METERS: str = "space_meters"
 ARGUMENT_SPACE_ANGLE: str = "space_angle"
 ARGUMENT_FIND: str = "find"
+ARGUMENT_FIND_GESTURE: str = "find_gesture"
+ARGUMENT_THEN: str = "then"
+ARGUMENT_AFTER_PREVIOUS: str = "after_previous"
+# What a step of 'then' can carry: the same as a command, without a chain of its own
+STEP_FIELDS: list[str] = ["action", "target", "detail", "loud", "run", "manner"]
+# How long the sentence of the say that was sent last takes, for a chain that waits until it is spoken
+_last_say_seconds: float = 0.0
+# The animations of the game, per folder of the game (see idle_search.py)
+_idle_libraries: dict[str, IdleLibrary] = {}
 MAX_FIND_LENGTH: int = 60
 COMPASS_NAMES: str = ", ".join(consts.COMPASS_NAMES)
 RELATIVE_NAMES: str = ", ".join(consts.RELATIVE_NAMES)
@@ -54,7 +65,7 @@ EXPRESSION_NAMES: str = ", ".join(consts.EXPRESSIONS)
 ROOM_DIRECTION_NAMES: str = ", ".join(consts.ROOM_DIRECTIONS)
 # What the AI may also write for 'around' if it means its own character
 AROUND_COMPANION_WORDS: list[str] = [consts.AROUND_COMPANION, "me", "companion", "self"]
-GESTURE_NAMES: str = ", ".join(sorted(GESTURES))
+GESTURE_NAMES: str = ", ".join(ALL_GESTURE_NAMES)
 
 SERVER_INSTRUCTIONS: str = (
     "You are playing a companion character inside the game Skyrim, fighting and travelling alongside the player. "
@@ -125,6 +136,10 @@ TOOLS: list[dict[str, Any]] = [
             "It holds until look_at without a target, which lets you look around freely again. "
             "gesture = play the gesture named in 'detail': " + GESTURE_NAMES + ". "
             "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
+            "drink, eat, read_book and write_down also work while you sit on a chair, drink_at_table and pass_out only there. "
+            "drunk makes you sway and stagger, also while you walk, until gesture with 'stop'. "
+            "STATE with 'find_gesture' finds more animations of the game by a word; play one with its name or its ID in "
+            "'detail' (those are untried: some do nothing). "
             "expression = put a look on your face, named in 'detail': " + EXPRESSION_NAMES + ". A number behind it "
             "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
             "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
@@ -145,11 +160,14 @@ TOOLS: list[dict[str, Any]] = [
             "ref_id, without a target it is the door nearest to you. You have to stand within about 5 meters of it; if not, "
             "the answer names its ref_id for move_to. The doors from 'Doors' lead into another place, those are for 'enter'. "
             "With your things (the target is the ID of an item from an inventory in STATE): "
-            "equip = hold or wear the item, or drink or eat it if it is a potion or food. equip on a spell tome reads it: "
+            "equip = hold or wear the item, or drink or eat it if it is a potion or food (you play the drinking or eating "
+            "animation with it while you stand around or sit). equip on a spell tome reads it: "
             "you know its spell from then on and the tome is used up, "
             "unequip = put the item away, "
             "give = hand the item to the player, take = take the item out of the player's inventory "
-            "(only when the player wants it). For give and take 'detail' says how many: a number or 'all', nothing = 1. "
+            "(only when the player wants it). In the player's inventory 'favorite' marks what the player keeps among the "
+            "favorites: ask before you take a weapon or a piece of armor that is one, for potions and food it does not matter. "
+            "For give and take 'detail' says how many: a number or 'all', nothing = 1. "
             "cast_spell = cast a spell you know: its ID or its exact name in 'detail', and whom you cast it on as the target "
             "(the player's ref_id to heal the player; no target for a spell on yourself). STATE with inventory 'own' lists "
             "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
@@ -157,26 +175,44 @@ TOOLS: list[dict[str, Any]] = [
             "Riding: claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
             "the player tells you which horse is yours). mount = get on your horse and ride after the player; if the horse is "
             "far away it is brought to your side. With a target you take that horse as yours first. dismount = get off, "
-            "the horse stays where it is. wait also gets you off. When the player mounts or dismounts, you do the same on your "
+            "the horse stays where it is. When the player mounts or dismounts, you do the same on your "
             "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
             "does, until ride_lock 'off'. mount and dismount always work. In the saddle you can speak, look, cast and "
-            "fight, but what is done on foot (move_to, move, enter, loot, pick_up, sit, open, close, make_room, following "
-            "someone other than the player) needs dismount first. You cannot ride indoors. "
-            "call_horse = a horse runs to the player and stays there: your horse, or the horse of the player (the target is "
-            "its ref_id from 'Your horse' or 'Player's horse' in STATE; no target = your horse, or the player's if you have "
-            "none). Use it when the player calls a horse by its name or asks for it. A horse too far away to run is brought "
-            "to the player's side. The horse of the player is known once the player has ridden it. Both horses stay where "
-            "they are left."
+            "fight, and you can ride somewhere: move_to and move take you there on horseback and you wait there in the "
+            "saddle (run: true = gallop), follow with a target makes you ride after that character, wait makes you stop "
+            "where you are, still in the saddle. What is done on foot (enter, loot, pick_up, sit, open, close, make_room) "
+            "needs dismount first. You cannot ride indoors. "
+            "call_horse = a horse runs to its owner and stays there: your horse comes to you, the horse of the player to the "
+            "player (the target is its ref_id from 'Your horse' or 'Player's horse' in STATE; no target = your horse, or the "
+            "player's if you have none). 'detail' 'player' or 'you' sends it to that one instead. Use it when the player "
+            "calls a horse by its name or asks for it. A horse too far away to run is brought to the side of whom it comes to. "
+            "The horse of the player is known once the player has ridden it. Both horses stay where they are left. "
+            "rename_horse = give a horse a new name, the one in 'detail' (the target is the horse, no target = your horse). "
+            "Use it when the player says what a horse is called from now on. "
+            "Commands one after the other: 'then' is a list of up to " + str(MAX_WAITING_STEPS) + " more commands (each with "
+            "action, target, detail and so on) that start one by one, each when you are done with the one before: move_to a "
+            "bard and then gesture dance, sit and then say, say and then mount. 'after_previous': true puts a single command "
+            "behind what you are doing and what waits already. pause = wait the seconds in 'detail' (1 to 60), for such a list. "
+            "A new command that moves you (follow, wait, flee, attack, move_to ...) throws away what waits. say, look_at, "
+            "gesture, expression and what you do with your things run at once and leave it alone. If a step fails, the ones "
+            "behind it are dropped. STATE shows what waits ('Queue') and tells afterwards what became of it."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, mount, call_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take). Required for these actions, except sit and look_at."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, the seconds for pause."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
                 "run": {"type": "boolean", "description": "Only for move_to, move, enter and follow: true = run instead of walk."},
                 "manner": {"type": "string", "enum": list(consts.MANNERS), "description": "Only for say: how you speak. It picks how your hands move and the look on your face while you speak. Nothing = neutral."},
+                ARGUMENT_THEN: {"type": "array", "maxItems": MAX_WAITING_STEPS, "description": "More commands that start one after the other, each when you are done with the one before.",
+                                "items": {"type": "object", "properties": {
+                                    "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
+                                    "target": {"type": "string"}, "detail": {"type": "string"}, "loud": {"type": "boolean"},
+                                    "run": {"type": "boolean"}, "manner": {"type": "string", "enum": list(consts.MANNERS)}},
+                                    "required": ["action"]}},
+                ARGUMENT_AFTER_PREVIOUS: {"type": "boolean", "description": "true = do not start this command at once: put it behind what you are doing and what waits already."},
             },
             "required": ["action"],
         },
@@ -254,7 +290,10 @@ TOOLS: list[dict[str, Any]] = [
             "'Gear': what you hold in your hands, your gold and the player's gold. "
             "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
             "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
+            "'equipped' marks what is worn or held, 'favorite' what the player has among the favorites (only in the player's inventory). "
             "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
+            "'Queue' comes while commands wait for each other (see 'then' of COMMAND): what you do now and what follows. "
+            "With 'find_gesture' you get no state at all, only the animations of the game whose name has that word, for gesture. "
             "'Since your last STATE': what became of a loot, pick_up, move_to, move, enter, make_room or sit you started (what you took, or that you did not get there). "
             "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
             "characters in front with no wall in between, living first, then the dead, then the things in front. "
@@ -277,6 +316,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_SPACE_ANGLE: {"type": "integer", "description": f"With a direction: over how many degrees the rays fan out around it (0 = one ray, nothing = {consts.SPACE_DEFAULT_LOOK_DEGREES}, 360 = all around). Without a direction it looks straight ahead."},
                 ARGUMENT_VISIBLE: {"type": "boolean", "description": "true = only what can be seen: in front of the viewer and not behind a wall. The viewer is the one 'around' names."},
                 ARGUMENT_MAX: {"type": "integer", "description": f"How many characters 'Nearby' lists at most, and how many 'Things'. Nothing = {CompanionCommandQueue.DEFAULT_MAX_LINES}, at most {CompanionCommandQueue.HIGHEST_MAX_LINES}. More makes the answer longer and slower, so only for an overview."},
+                ARGUMENT_FIND_GESTURE: {"type": "string", "description": "A word like drink, dance or lean: list the animations of the game with that word in their name, for the command gesture. The answer is only that list, no state."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
             },
         },
@@ -376,6 +416,10 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
         arguments = {}
 
     if name == TOOL_STATE:
+        find_gesture = " ".join(str(arguments.get(ARGUMENT_FIND_GESTURE, "") or "").split())[:MAX_FIND_LENGTH]
+        if find_gesture != "":
+            # The server knows the animations itself, the game is not asked
+            return _tool_text(_describe_found_gestures(find_gesture, _idle_library(queue)), False)
         inventory = str(arguments.get(ARGUMENT_INVENTORY, "") or "").strip().lower()
         if inventory not in consts.INVENTORY_CHOICES:
             inventory = ""
@@ -430,186 +474,333 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
                                              space=is_space_wanted, find=find, space_meters=space_meters,
                                              space_degrees=space_degrees, space_from_facing=is_space_from_facing,
                                              space_angle=space_angle, space_direction=space_direction)
+        if queue.chain is not None:
+            state_result["queue"] = queue.chain.describe()
         if arguments.get(ARGUMENT_DEBUG) is True:
             return _tool_json(state_result, False)
         return _tool_text(describe_state(state_result), False)
 
     if name == TOOL_COMMAND:
-        action = str(arguments.get("action", "")).strip().lower()
-        target = str(arguments.get("target", "") or "").strip()
-        detail = str(arguments.get("detail", "") or "").strip()
-        if action not in consts.PLAYER_ACTIONS:
-            return _tool_json({"status": consts.STATUS_FAILED, "message": f"Unknown action '{action}'. Allowed: {', '.join(consts.PLAYER_ACTIONS)}"}, True)
-        if action in consts.ACTIONS_REQUIRING_TARGET and target == "":
-            return _tool_json({"status": consts.STATUS_FAILED, "message": f"Action '{action}' needs a target (ref_id from STATE)."}, True)
-        if action == consts.ACTION_SIT and target == "":
-            target = await _find_nearest_seat(queue)
-            if target == "":
-                return _tool_json({"status": consts.STATUS_FAILED, "message": "The game shows no seat within about 10 meters of you. Go closer to one, or name a seat from 'Things' in STATE as the target."}, True)
-        if target != "":
-            target_form_id = parse_ref_id(target)
-            if target_form_id is None:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"'{target}' is not a ref_id or item ID. Use one from STATE, eg 000A2C94."}, True)
-            target = format_ref_id(target_form_id)
-        count = 1
-        if action == consts.ACTION_MOVE_TO:
-            # How far in front of the target to stop. Without a number the game mod decides
-            count = consts.MOVE_TO_USUAL_DISTANCE
-            words = detail.lower().split()
-            if len(words) > 1 and words[-1] in ("m", "meter", "meters"):
-                words.pop()
-            if len(words) > 0:
-                number = words[0].removesuffix("m")
-                if len(words) != 1 or not number.isdecimal() or int(number) > consts.MOVE_TO_HIGHEST_KEEP_METERS:
-                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"For move_to 'detail' is how many meters in front of the target you stop: a number from 0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, or nothing."}, True)
-                count = int(number)
-                detail = number
-        if action in consts.ACTIONS_WITH_COUNT and detail != "":
-            if detail.lower() == consts.COUNT_ALL_TEXT:
-                count = consts.COUNT_ALL
-            elif detail.isdecimal() and int(detail) > 0:
-                count = int(detail)
-            else:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is how many: a number or 'all'."}, True)
-        item = ""
-        if action == consts.ACTION_LOOT and detail != "" and detail.lower() != consts.COUNT_ALL_TEXT:
-            item_form_id = parse_ref_id(detail)
-            if item_form_id is None or item_form_id == 0:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True)
-            item = format_ref_id(item_form_id)
-        if action == consts.ACTION_SAY:
-            is_loud = arguments.get("loud") is True
-            manner = str(arguments.get("manner", "") or "").strip().lower()
-            if manner != "" and manner not in consts.MANNERS:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no manner '{manner}'. The manners: {MANNER_NAMES}. Nothing = neutral."}, True)
-            problem, line = await _prepare_speech(detail, queue, voice, is_loud)
-            if problem != "":
-                return _tool_json({"status": consts.STATUS_FAILED, "message": problem}, True)
-            # The game gets the number of the line to speak, the sound is in its folder already.
-            # The text goes along for the subtitle, which would only show the "..." of the line otherwise
-            # The target is whom the companion speaks to: the game mod makes it look there while it speaks.
-            # Hands that move while talking: the game mod plays the animations the server picks, the first one with say
-            seconds = voice.spoken_seconds if voice is not None else 0.0
-            animations = _pick_talk_animations(manner, seconds) if voice is not None and voice.has_talk_gestures else []
-            face_name = consts.MANNERS[manner][1] if manner != "" else ""
-            talk, idle = _split_animation(animations[0]) if len(animations) > 0 else ("", "")
-            global _say_number, _speech_task
-            _say_number += 1
-            number = _say_number
-            # The sentence before this one is cut off by the new one, so nothing of it is to follow any more
-            if _speech_task is not None:
-                _speech_task.cancel()
-                _speech_task = None
-            result = await queue.send_command(action, target=target, detail=clean_text(detail), count=line, talk=talk, item=idle,
-                                              say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE),
-                                              say_ms=int(seconds * 1000))
-            is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
-            state = await queue.peek_state()
-            protocol = state.get("protocol") if isinstance(state, dict) else 0
-            if is_said and isinstance(protocol, int) and protocol >= consts.SAY_END_PROTOCOL:
-                _speech_task = asyncio.create_task(_finish_speech(queue, number, seconds, animations[1:]))
-            return _tool_json(result, not is_said)
-        if action == consts.ACTION_EXPRESSION:
-            # The game gets the number of the look and how strong it is, the name only goes along for its answer
-            target = ""
-            words = detail.lower().split()
-            if len(words) == 0:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"expression needs the look in 'detail' ('{consts.EXPRESSION_NONE_TEXTS[0]}' gives you your own face back). The looks: {EXPRESSION_NAMES}"}, True)
-            detail = words[0]
-            if detail in consts.EXPRESSION_NONE_TEXTS:
-                count = consts.EXPRESSION_NONE
-            elif detail in consts.EXPRESSIONS:
-                count = consts.EXPRESSIONS[detail]
-                strength = consts.EXPRESSION_FULL_STRENGTH
-                if len(words) > 1:
-                    if not words[1].isdecimal() or not 1 <= int(words[1]) <= consts.EXPRESSION_FULL_STRENGTH:
-                        return _tool_json({"status": consts.STATUS_FAILED, "message": "What stands behind the look is how strong it is: a number from 1 to 100."}, True)
-                    strength = int(words[1])
-                item = format_ref_id(strength)
-            else:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no look '{detail}'. The looks: {EXPRESSION_NAMES}"}, True)
-        if action == consts.ACTION_FACE:
-            # With a target the game works out the direction. Without one it gets the point of the compass in degrees
-            count = consts.FACE_NO_DIRECTION
-            if target == "":
-                word = _direction_word(detail.split())
-                word = consts.COMPASS_OTHER_WORDS.get(word, word)
-                if word not in consts.COMPASS_NAMES:
-                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"face needs a target (a ref_id from STATE) or a point of the compass in 'detail': {COMPASS_NAMES}"}, True)
-                count = consts.COMPASS_NAMES.index(word) * consts.DEGREES_PER_DIRECTION
-                detail = word
-            else:
-                detail = ""
-        if action == consts.ACTION_MOVE:
-            # The game gets the direction in degrees, whether it counts from where the companion faces, and how far
-            target = ""
-            words = detail.split()
-            meters = consts.MOVE_DEFAULT_METERS
-            # "10", "10m" and "10 m" all mean ten meters
-            if len(words) > 1 and words[-1].lower() in ("m", "meter", "meters"):
-                words.pop()
-            if len(words) > 0 and words[-1].lower().removesuffix("m").isdecimal():
-                meters = int(words.pop().lower().removesuffix("m"))
-                if not 1 <= meters <= consts.MOVE_HIGHEST_METERS:
-                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"What stands behind the direction is how far in meters: a number from 1 to {consts.MOVE_HIGHEST_METERS}."}, True)
-            word = _direction_word(words)
-            compass_word = consts.COMPASS_OTHER_WORDS.get(word, word)
-            relative_word = consts.RELATIVE_OTHER_WORDS.get(word, word)
-            if compass_word in consts.COMPASS_NAMES:
-                count = consts.COMPASS_NAMES.index(compass_word) * consts.DEGREES_PER_DIRECTION
-                detail = "to the " + compass_word
-                item = format_ref_id(meters)
-            elif relative_word in consts.RELATIVE_NAMES:
-                count = consts.RELATIVE_NAMES.index(relative_word) * consts.DEGREES_PER_DIRECTION
-                detail = consts.RELATIVE_PHRASES[consts.RELATIVE_NAMES.index(relative_word)]
-                item = format_ref_id((1 << 16) | meters)
-            else:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"move needs a direction in 'detail', and behind it the meters if you like: a point of the compass ({COMPASS_NAMES}) or seen from where you face ({RELATIVE_NAMES})."}, True)
-        if action == consts.ACTION_MAKE_ROOM:
-            # The game gets the number of the direction and how far, the name only goes along for its answer
-            target = ""
-            words = detail.lower().split()
-            detail = words[0] if len(words) > 0 else consts.ROOM_DIRECTION_BACK
-            if detail not in consts.ROOM_DIRECTIONS:
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no direction '{detail}' to make room in. The directions: {ROOM_DIRECTION_NAMES}"}, True)
-            count = consts.ROOM_DIRECTIONS[detail]
-            meters = consts.ROOM_DEFAULT_METERS
-            if len(words) > 1:
-                if not words[1].isdecimal() or not 1 <= int(words[1]) <= consts.ROOM_HIGHEST_METERS:
-                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"What stands behind the direction is how far in meters: a number from 1 to {consts.ROOM_HIGHEST_METERS}."}, True)
-                meters = int(words[1])
-            item = format_ref_id(meters)
-        if action == consts.ACTION_GESTURE:
-            # The game gets the ID of the animation, the name only goes along for its answer
-            target = ""
-            detail = detail.lower().replace(" ", "_")
-            if detail == "":
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"gesture needs the name of the gesture in 'detail' ('{consts.GESTURE_STOP_TEXT}' ends one). The gestures: {GESTURE_NAMES}"}, True)
-            if detail != consts.GESTURE_STOP_TEXT:
-                item = pick_animation(detail)
-                if item == "":
-                    return _tool_json({"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}"}, True)
-        if action == consts.ACTION_CAST_SPELL:
-            if detail == "":
-                return _tool_json({"status": consts.STATUS_FAILED, "message": "cast_spell needs the ID or the name of the spell in 'detail'. STATE with inventory 'own' lists the spells you know."}, True)
-            # Eight hex digits are the ID of the spell from STATE, anything else is its name
-            spell_form_id = parse_ref_id(detail) if len(detail) == SPELL_ID_LENGTH else None
-            if spell_form_id is not None and spell_form_id != 0:
-                item = format_ref_id(spell_form_id)
-        if action == consts.ACTION_RIDE_LOCK:
-            target = ""
-            detail = detail.lower()
-            if detail not in (consts.RIDE_LOCK_ON, consts.RIDE_LOCK_OFF):
-                return _tool_json({"status": consts.STATUS_FAILED, "message": f"ride_lock needs '{consts.RIDE_LOCK_ON}' or '{consts.RIDE_LOCK_OFF}' in 'detail': "
-                                   f"'{consts.RIDE_LOCK_ON}' = you no longer mount and dismount when the player does, '{consts.RIDE_LOCK_OFF}' = you do again."}, True)
-        if action == consts.ACTION_DISMOUNT:
-            target = ""
-        is_run = arguments.get("run") is True and action in consts.ACTIONS_WITH_RUN
-        result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run)
-        is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
-        return _tool_json(result, is_error)
+        return await _call_command(arguments, queue, voice)
 
     return _tool_json({"status": consts.STATUS_FAILED, "message": f"Unknown tool '{name}'."}, True)
+
+
+async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> tuple[dict[str, Any], bool]:
+    """Checks one command of the AI, sends it to the game and returns what the game answered and whether that is an error"""
+    action = str(arguments.get("action", "")).strip().lower()
+    target = str(arguments.get("target", "") or "").strip()
+    detail = str(arguments.get("detail", "") or "").strip()
+    if action not in consts.PLAYER_ACTIONS:
+        return {"status": consts.STATUS_FAILED, "message": f"Unknown action '{action}'. Allowed: {', '.join(consts.PLAYER_ACTIONS)}"}, True
+    if action == consts.ACTION_PAUSE:
+        return {"status": consts.STATUS_FAILED, "message": "pause only waits between commands that follow each other (see 'then' and 'after_previous')."}, True
+    if action in consts.ACTIONS_REQUIRING_TARGET and target == "":
+        return {"status": consts.STATUS_FAILED, "message": f"Action '{action}' needs a target (ref_id from STATE)."}, True
+    if action == consts.ACTION_SIT and target == "":
+        target = await _find_nearest_seat(queue)
+        if target == "":
+            return {"status": consts.STATUS_FAILED, "message": "The game shows no seat within about 10 meters of you. Go closer to one, or name a seat from 'Things' in STATE as the target."}, True
+    if target != "":
+        target_form_id = parse_ref_id(target)
+        if target_form_id is None:
+            return {"status": consts.STATUS_FAILED, "message": f"'{target}' is not a ref_id or item ID. Use one from STATE, eg 000A2C94."}, True
+        target = format_ref_id(target_form_id)
+    count = 1
+    if action == consts.ACTION_MOVE_TO:
+        # How far in front of the target to stop. Without a number the game mod decides
+        count = consts.MOVE_TO_USUAL_DISTANCE
+        words = detail.lower().split()
+        if len(words) > 1 and words[-1] in ("m", "meter", "meters"):
+            words.pop()
+        if len(words) > 0:
+            number = words[0].removesuffix("m")
+            if len(words) != 1 or not number.isdecimal() or int(number) > consts.MOVE_TO_HIGHEST_KEEP_METERS:
+                return {"status": consts.STATUS_FAILED, "message": f"For move_to 'detail' is how many meters in front of the target you stop: a number from 0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, or nothing."}, True
+            count = int(number)
+            detail = number
+    if action in consts.ACTIONS_WITH_COUNT and detail != "":
+        if detail.lower() == consts.COUNT_ALL_TEXT:
+            count = consts.COUNT_ALL
+        elif detail.isdecimal() and int(detail) > 0:
+            count = int(detail)
+        else:
+            return {"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is how many: a number or 'all'."}, True
+    item = ""
+    gesture_event = ""
+    extra: dict[str, Any] = {}
+    if action == consts.ACTION_LOOT and detail != "" and detail.lower() != consts.COUNT_ALL_TEXT:
+        item_form_id = parse_ref_id(detail)
+        if item_form_id is None or item_form_id == 0:
+            return {"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True
+        item = format_ref_id(item_form_id)
+    if action == consts.ACTION_SAY:
+        is_loud = arguments.get("loud") is True
+        manner = str(arguments.get("manner", "") or "").strip().lower()
+        if manner != "" and manner not in consts.MANNERS:
+            return {"status": consts.STATUS_FAILED, "message": f"There is no manner '{manner}'. The manners: {MANNER_NAMES}. Nothing = neutral."}, True
+        problem, line = await _prepare_speech(detail, queue, voice, is_loud)
+        if problem != "":
+            return {"status": consts.STATUS_FAILED, "message": problem}, True
+        # The game gets the number of the line to speak, the sound is in its folder already.
+        # The text goes along for the subtitle, which would only show the "..." of the line otherwise
+        # The target is whom the companion speaks to: the game mod makes it look there while it speaks.
+        # Hands that move while talking: the game mod plays the animations the server picks, the first one with say
+        seconds = voice.spoken_seconds if voice is not None else 0.0
+        animations = _pick_talk_animations(manner, seconds) if voice is not None and voice.has_talk_gestures else []
+        face_name = consts.MANNERS[manner][1] if manner != "" else ""
+        talk, idle = _split_animation(animations[0]) if len(animations) > 0 else ("", "")
+        global _say_number, _speech_task, _last_say_seconds
+        _last_say_seconds = seconds
+        _say_number += 1
+        number = _say_number
+        # The sentence before this one is cut off by the new one, so nothing of it is to follow any more
+        if _speech_task is not None:
+            _speech_task.cancel()
+            _speech_task = None
+        result = await queue.send_command(action, target=target, detail=clean_text(detail), count=line, talk=talk, item=idle,
+                                          say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE),
+                                          say_ms=int(seconds * 1000))
+        is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+        state = await queue.peek_state()
+        protocol = state.get("protocol") if isinstance(state, dict) else 0
+        if is_said and isinstance(protocol, int) and protocol >= consts.SAY_END_PROTOCOL:
+            _speech_task = asyncio.create_task(_finish_speech(queue, number, seconds, animations[1:]))
+        return result, not is_said
+    if action == consts.ACTION_EXPRESSION:
+        # The game gets the number of the look and how strong it is, the name only goes along for its answer
+        target = ""
+        words = detail.lower().split()
+        if len(words) == 0:
+            return {"status": consts.STATUS_FAILED, "message": f"expression needs the look in 'detail' ('{consts.EXPRESSION_NONE_TEXTS[0]}' gives you your own face back). The looks: {EXPRESSION_NAMES}"}, True
+        detail = words[0]
+        if detail in consts.EXPRESSION_NONE_TEXTS:
+            count = consts.EXPRESSION_NONE
+        elif detail in consts.EXPRESSIONS:
+            count = consts.EXPRESSIONS[detail]
+            strength = consts.EXPRESSION_FULL_STRENGTH
+            if len(words) > 1:
+                if not words[1].isdecimal() or not 1 <= int(words[1]) <= consts.EXPRESSION_FULL_STRENGTH:
+                    return {"status": consts.STATUS_FAILED, "message": "What stands behind the look is how strong it is: a number from 1 to 100."}, True
+                strength = int(words[1])
+            item = format_ref_id(strength)
+        else:
+            return {"status": consts.STATUS_FAILED, "message": f"There is no look '{detail}'. The looks: {EXPRESSION_NAMES}"}, True
+    if action == consts.ACTION_FACE:
+        # With a target the game works out the direction. Without one it gets the point of the compass in degrees
+        count = consts.FACE_NO_DIRECTION
+        if target == "":
+            word = _direction_word(detail.split())
+            word = consts.COMPASS_OTHER_WORDS.get(word, word)
+            if word not in consts.COMPASS_NAMES:
+                return {"status": consts.STATUS_FAILED, "message": f"face needs a target (a ref_id from STATE) or a point of the compass in 'detail': {COMPASS_NAMES}"}, True
+            count = consts.COMPASS_NAMES.index(word) * consts.DEGREES_PER_DIRECTION
+            detail = word
+        else:
+            detail = ""
+    if action == consts.ACTION_MOVE:
+        # The game gets the direction in degrees, whether it counts from where the companion faces, and how far
+        target = ""
+        words = detail.split()
+        meters = consts.MOVE_DEFAULT_METERS
+        # "10", "10m" and "10 m" all mean ten meters
+        if len(words) > 1 and words[-1].lower() in ("m", "meter", "meters"):
+            words.pop()
+        if len(words) > 0 and words[-1].lower().removesuffix("m").isdecimal():
+            meters = int(words.pop().lower().removesuffix("m"))
+            if not 1 <= meters <= consts.MOVE_HIGHEST_METERS:
+                return {"status": consts.STATUS_FAILED, "message": f"What stands behind the direction is how far in meters: a number from 1 to {consts.MOVE_HIGHEST_METERS}."}, True
+        word = _direction_word(words)
+        compass_word = consts.COMPASS_OTHER_WORDS.get(word, word)
+        relative_word = consts.RELATIVE_OTHER_WORDS.get(word, word)
+        if compass_word in consts.COMPASS_NAMES:
+            count = consts.COMPASS_NAMES.index(compass_word) * consts.DEGREES_PER_DIRECTION
+            detail = "to the " + compass_word
+            item = format_ref_id(meters)
+        elif relative_word in consts.RELATIVE_NAMES:
+            count = consts.RELATIVE_NAMES.index(relative_word) * consts.DEGREES_PER_DIRECTION
+            detail = consts.RELATIVE_PHRASES[consts.RELATIVE_NAMES.index(relative_word)]
+            item = format_ref_id((1 << 16) | meters)
+        else:
+            return {"status": consts.STATUS_FAILED, "message": f"move needs a direction in 'detail', and behind it the meters if you like: a point of the compass ({COMPASS_NAMES}) or seen from where you face ({RELATIVE_NAMES})."}, True
+    if action == consts.ACTION_MAKE_ROOM:
+        # The game gets the number of the direction and how far, the name only goes along for its answer
+        target = ""
+        words = detail.lower().split()
+        detail = words[0] if len(words) > 0 else consts.ROOM_DIRECTION_BACK
+        if detail not in consts.ROOM_DIRECTIONS:
+            return {"status": consts.STATUS_FAILED, "message": f"There is no direction '{detail}' to make room in. The directions: {ROOM_DIRECTION_NAMES}"}, True
+        count = consts.ROOM_DIRECTIONS[detail]
+        meters = consts.ROOM_DEFAULT_METERS
+        if len(words) > 1:
+            if not words[1].isdecimal() or not 1 <= int(words[1]) <= consts.ROOM_HIGHEST_METERS:
+                return {"status": consts.STATUS_FAILED, "message": f"What stands behind the direction is how far in meters: a number from 1 to {consts.ROOM_HIGHEST_METERS}."}, True
+            meters = int(words[1])
+        item = format_ref_id(meters)
+    if action == consts.ACTION_GESTURE:
+        # The game gets the ID of the animation, the name only goes along for its answer
+        target = ""
+        detail = detail.lower().replace(" ", "_")
+        if detail == "":
+            return {"status": consts.STATUS_FAILED, "message": f"gesture needs the name of the gesture in 'detail' ('{consts.GESTURE_STOP_TEXT}' ends one). The gestures: {GESTURE_NAMES}"}, True
+        if detail != consts.GESTURE_STOP_TEXT:
+            gesture = pick_gesture(detail)
+            if gesture is not None:
+                # A gesture with a short name: the game mod picks the animation for sitting if the companion sits, and
+                # if the game refuses to play the animation by its ID, the game mod sends the event of the animation instead
+                item = gesture["id"]
+                gesture_event = gesture["event"]
+                sit_high, sit_low = split_form_id(parse_ref_id(gesture["sit_id"]) or 0)
+                extra = {consts.KEY_COMMAND_STOP_EVENT: gesture["stop_event"], consts.KEY_COMMAND_SIT_ITEM_HIGH: sit_high,
+                         consts.KEY_COMMAND_SIT_ITEM_LOW: sit_low, consts.KEY_COMMAND_SIT_EVENT: gesture["sit_event"],
+                         consts.KEY_COMMAND_SIT_STOP_EVENT: gesture["sit_stop_event"],
+                         consts.KEY_COMMAND_GESTURE_STATE: 1 if gesture["state"] != "" else 0}
+            else:
+                # An animation of the game by its own name or its ID (see find_gesture of STATE). These are untried,
+                # so the game only plays them the usual way
+                entry = _idle_library(queue).get(detail)
+                if entry is None:
+                    return {"status": consts.STATUS_FAILED, "message": f"There is no gesture '{detail}'. The gestures: {GESTURE_NAMES}. STATE with 'find_gesture' finds more animations of the game by a word."}, True
+                item = entry.ref_id
+                detail = entry.name
+    if action == consts.ACTION_CAST_SPELL:
+        if detail == "":
+            return {"status": consts.STATUS_FAILED, "message": "cast_spell needs the ID or the name of the spell in 'detail'. STATE with inventory 'own' lists the spells you know."}, True
+        # Eight hex digits are the ID of the spell from STATE, anything else is its name
+        spell_form_id = parse_ref_id(detail) if len(detail) == SPELL_ID_LENGTH else None
+        if spell_form_id is not None and spell_form_id != 0:
+            item = format_ref_id(spell_form_id)
+    if action == consts.ACTION_RIDE_LOCK:
+        target = ""
+        detail = detail.lower()
+        if detail not in (consts.RIDE_LOCK_ON, consts.RIDE_LOCK_OFF):
+            return {"status": consts.STATUS_FAILED, "message": f"ride_lock needs '{consts.RIDE_LOCK_ON}' or '{consts.RIDE_LOCK_OFF}' in 'detail': "
+                               f"'{consts.RIDE_LOCK_ON}' = you no longer mount and dismount when the player does, '{consts.RIDE_LOCK_OFF}' = you do again."}, True
+    if action == consts.ACTION_DISMOUNT:
+        target = ""
+    if action == consts.ACTION_RENAME_HORSE:
+        # One line without the breaks and double blanks a name does not have
+        detail = " ".join(detail.split())
+        if detail == "" or len(detail) > consts.HORSE_NAME_MAX_LENGTH:
+            return {"status": consts.STATUS_FAILED, "message": f"rename_horse needs the new name in 'detail', at most {consts.HORSE_NAME_MAX_LENGTH} characters."}, True
+    if action == consts.ACTION_CALL_HORSE:
+        detail = detail.lower()
+        if detail not in ("", consts.CALL_TO_PLAYER, consts.CALL_TO_COMPANION):
+            return {"status": consts.STATUS_FAILED, "message": f"For call_horse 'detail' is whom the horse runs to: '{consts.CALL_TO_PLAYER}' or '{consts.CALL_TO_COMPANION}'. Nothing = to its owner."}, True
+    is_run = arguments.get("run") is True and action in consts.ACTIONS_WITH_RUN
+    result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run, talk=gesture_event, extra=extra)
+    is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+    return result, is_error
+
+
+def _chain_of(queue: CompanionCommandQueue, voice: CompanionVoice | None) -> CompanionChain:
+    """The chain of commands that wait for each other, made when it is needed for the first time"""
+    if queue.chain is None:
+        async def run_step(step: dict[str, Any]) -> tuple[dict[str, Any], bool, float]:
+            global _last_say_seconds
+            _last_say_seconds = 0.0
+            payload, is_error = await _run_command(step, queue, voice)
+            is_spoken = str(step.get("action", "")).strip().lower() == consts.ACTION_SAY and not is_error
+            return payload, is_error, _last_say_seconds if is_spoken else 0.0
+        queue.chain = CompanionChain(queue, run_step)
+    return queue.chain
+
+
+def _check_step(step: Any) -> str:
+    """What is wrong with a command that is to wait in the chain, as far as that shows without the game. Empty = nothing"""
+    if not isinstance(step, dict):
+        return "is not a command with an 'action'"
+    action = str(step.get("action", "")).strip().lower()
+    if action not in consts.PLAYER_ACTIONS:
+        return f"has the unknown action '{action}'"
+    if action in consts.ACTIONS_REQUIRING_TARGET and str(step.get("target", "") or "").strip() == "":
+        return f"needs a target for '{action}' (ref_id from STATE)"
+    if action == consts.ACTION_PAUSE and read_pause_seconds(step) is None:
+        return "needs the seconds of the pause in 'detail': a number from 1 to 60"
+    return ""
+
+
+async def _call_command(arguments: dict[str, Any], queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
+    """One call of COMMAND: the command itself, and with 'then' and 'after_previous' the commands that wait for each other"""
+    global _last_say_seconds
+    chain = _chain_of(queue, voice)
+    then = arguments.get(ARGUMENT_THEN)
+    steps: list[dict[str, Any]] = []
+    if then is not None:
+        if not isinstance(then, list) or len(then) > MAX_WAITING_STEPS:
+            return _tool_json({"status": consts.STATUS_FAILED, "message": f"'then' is a list of at most {MAX_WAITING_STEPS} commands, each with an 'action'."}, True)
+        for number, step in enumerate(then, start=1):
+            problem = _check_step(step)
+            if problem != "":
+                return _tool_json({"status": consts.STATUS_FAILED, "message": f"Step {number} of 'then' {problem}. Nothing was started."}, True)
+            steps.append({key: step[key] for key in STEP_FIELDS if key in step})
+    first = {key: value for key, value in arguments.items() if key not in (ARGUMENT_THEN, ARGUMENT_AFTER_PREVIOUS)}
+    action = str(first.get("action", "")).strip().lower()
+    # A pause as the command itself can only mean: behind what runs now
+    is_after_previous = arguments.get(ARGUMENT_AFTER_PREVIOUS) is True or action == consts.ACTION_PAUSE
+    if is_after_previous or len(steps) > 0:
+        problem = _check_step(first)
+        if problem != "":
+            return _tool_json({"status": consts.STATUS_FAILED, "message": f"The command {problem}. Nothing was started."}, True)
+        if not queue.is_busy_known:
+            return _tool_json({"status": consts.STATUS_FAILED, "message": "Commands can only wait for each other with a game mod that tells when your character is done with something. The game is not connected, or its mod is older than that: build and install the mod again."}, True)
+        waiting_count = chain.waiting_count if chain.is_active else 0
+        if waiting_count + len(steps) + (1 if is_after_previous else 0) > MAX_WAITING_STEPS:
+            return _tool_json({"status": consts.STATUS_FAILED, "message": f"At most {MAX_WAITING_STEPS} commands can wait. Waiting already: {chain.describe()}. Nothing was added."}, True)
+    if is_after_previous:
+        chain.add([first] + steps)
+        return _tool_json({"status": consts.STATUS_QUEUED, "message": f"It waits its turn. Queue: {chain.describe()}."}, False)
+
+    notes: list[str] = []
+    if action in consts.PLAYER_ACTIONS and action not in consts.ACTIONS_KEEPING_QUEUE:
+        dropped = await chain.clear()
+        if len(dropped) > 0:
+            notes.append("This threw away what waited in the queue: " + ", ".join(dropped) + ".")
+    fails_before = queue.fail_count
+    _last_say_seconds = 0.0
+    payload, is_error = await _run_command(first, queue, voice)
+    if len(steps) > 0:
+        if is_error:
+            notes.append("So what you put behind it was not started.")
+        else:
+            chain.add(steps, running_text=describe_step(first), fails_before=fails_before,
+                      first_wait_seconds=_last_say_seconds if action == consts.ACTION_SAY else 0.0)
+            notes.append(f"Queue: {chain.describe()}.")
+    if len(notes) > 0:
+        payload = dict(payload)
+        payload["message"] = " ".join([str(payload.get("message", ""))] + notes).strip()
+    return _tool_json(payload, is_error)
+
+
+def _idle_library(queue: CompanionCommandQueue) -> IdleLibrary:
+    """The animations of the game in the folder the server was started with"""
+    if queue.game_folder not in _idle_libraries:
+        _idle_libraries[queue.game_folder] = IdleLibrary(queue.game_folder)
+    return _idle_libraries[queue.game_folder]
+
+
+def _describe_found_gestures(word: str, library: IdleLibrary) -> str:
+    """The answer to find_gesture: the gestures with a short name that fit, and the animations of the game that do"""
+    lines: list[str] = []
+    short_names = [name for name in ALL_GESTURE_NAMES if word.lower().replace(" ", "_") in name]
+    if len(short_names) > 0:
+        lines.append(f"Gestures with a short name for '{word}': {', '.join(short_names)}")
+    matches, total = library.find(word)
+    if library.problem != "":
+        lines.append(library.problem)
+    elif total == 0:
+        lines.append(f"The game has no animation with '{word}' in its name. Try another word, in English: the names are those of the game (eg drink, dance, lean, sit, read).")
+    else:
+        more = "" if total <= len(matches) else f", the first {len(matches)} of {total}"
+        lines.append(f"Animations of the game for '{word}'{more}. Play one with gesture and its name or ID in 'detail'. They are untried: some do nothing, 'gesture' with 'stop' ends one that goes on.")
+        for entry in matches:
+            note = ""
+            if entry.needs_sitting:
+                note = ", only while sitting"
+            elif entry.has_conditions:
+                note = ", has conditions (may not play)"
+            lines.append(f"- {entry.name} {entry.ref_id}{note}")
+    return "\n".join(lines)
 
 
 def _direction_word(words: list[str]) -> str:

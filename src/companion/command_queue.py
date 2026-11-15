@@ -33,6 +33,11 @@ class CompanionCommandQueue:
     INVENTORY_TIMEOUT_SECONDS: float = 15.0
     # What became of commands that take time (loot, move_to, sit) is kept here until the AI asks for the state the next time
     MAX_REPORTS: int = 5
+    # While commands wait in a chain (see command_chain.py) the request of the game is only held open this long,
+    # so that the game asks again every second and tells whether the companion is still busy
+    QUICK_HOLD_SECONDS: float = 1.0
+    # What the game said about being busy counts as fresh for this long
+    BUSY_FRESH_SECONDS: float = 1.5
 
     def __init__(self, hold_seconds: float = 25.0, connection_grace_seconds: float = 3.0) -> None:
         self.__hold_seconds: float = hold_seconds
@@ -52,15 +57,30 @@ class CompanionCommandQueue:
         self.__poll_generation: int = 0
         self.__is_poll_open: bool = False
         self.__last_poll_time: float | None = None
+        # Whether the companion is in the middle of something that takes time (a walk, sitting down, mounting), as the
+        # game told with its last request. None = the game mod does not tell (it is older than the chains of commands)
+        self.__busy: bool | None = None
+        self.__busy_time: float = 0.0
+        # How many things the companion started have failed so far, as the game counts them
+        self.__fail_count: int = 0
+        self.__has_quick_polls: bool = False
+        self.__releases_open_poll: bool = False
+        # The folder of the game, for reading its animations (see idle_search.py). Empty = not known
+        self.game_folder: str = ""
+        # The chain of commands that wait for each other (command_chain.CompanionChain), made by the MCP side when needed
+        self.chain: Any = None
 
     # ------------------------------------------------------------------ game side
 
-    async def poll(self, state: dict[str, Any] | None, results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    async def poll(self, state: dict[str, Any] | None, results: list[dict[str, Any]] | None,
+                   busy: Any = None, fails: Any = None) -> list[dict[str, Any]]:
         """Called for every long polling request of the game.
 
         Args:
             state: The current game state (see game_state.read_game_state), or None if this request carries none
             results: Results of commands the game has executed since its last request
+            busy: 1 if the companion is in the middle of something that takes time, 0 if not, None if the game mod does not tell
+            fails: How many things the companion started have failed so far, None if the game mod does not tell
 
         Returns:
             The commands the game should execute now. Empty if nothing came up within hold_seconds.
@@ -81,12 +101,18 @@ class CompanionCommandQueue:
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
             self.__store_results(results)
+            if isinstance(busy, int):
+                self.__busy = busy != 0
+                self.__busy_time = time.monotonic()
+            if isinstance(fails, int) and not isinstance(fails, bool):
+                self.__fail_count = fails
+            self.__releases_open_poll = False
             self.__changed.notify_all()
 
             try:
                 await self.__wait_until(
-                    lambda: len(self.__pending_commands) > 0 or self.__poll_generation != own_generation,
-                    self.__hold_seconds)
+                    lambda: len(self.__pending_commands) > 0 or self.__poll_generation != own_generation or self.__releases_open_poll,
+                    self.QUICK_HOLD_SECONDS if self.__has_quick_polls else self.__hold_seconds)
                 if self.__poll_generation != own_generation:
                     # A newer request arrived (eg after loading a save). The newer one gets the commands.
                     return []
@@ -109,7 +135,8 @@ class CompanionCommandQueue:
                            talk: str = "", say_number: int = 0, face: int = consts.FACE_NONE,
                            run: bool = False, say_ms: int = 0, space_meters: int = 0,
                            space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
-                           space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES) -> dict[str, Any]:
+                           space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES,
+                           extra: dict[str, Any] | None = None) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -133,6 +160,7 @@ class CompanionCommandQueue:
             say_number: For say, say_talk and say_end: the number of the sentence
             face: For say: the number of the look on the companion's face while it speaks, FACE_NONE = none
             run: For move_to, move, enter and follow: whether the companion runs instead of walking
+            extra: More entries for the command as the game reads them (key -> value), for what only one action needs
             say_ms: For say: how long the sound of the sentence is in milliseconds
             things: For report_state: whether the state should carry the things close to the player.
                 'count' is then how many characters (and things of each kind) the state should list at most
@@ -176,6 +204,8 @@ class CompanionCommandQueue:
                 consts.KEY_COMMAND_SAY_MS: say_ms,
                 consts.KEY_COMMAND_MUTE: int(self.mutes_game_lines),
             }
+            if extra is not None:
+                command.update(extra)
             self.__pending_commands.append(command)
             self.__changed.notify_all()
 
@@ -283,6 +313,42 @@ class CompanionCommandQueue:
                 "heard": self.__take_heard() if is_for_the_ai else [],
                 "reports": self.__take_reports() if is_for_the_ai else [],
             }
+
+    @property
+    def is_busy_known(self) -> bool:
+        """Whether the game mod tells if the companion is busy (older ones do not, so chains of commands cannot work)"""
+        return self.__busy is not None
+
+    @property
+    def fail_count(self) -> int:
+        """How many things the companion started have failed so far, as the game counted them with its last request"""
+        return self.__fail_count
+
+    async def set_quick_polls(self, is_wanted: bool) -> None:
+        """Makes the game ask every second instead of waiting for a command, so that it tells soon when the companion
+        is done with something. A request that is open at the moment is answered at once"""
+        async with self.__changed:
+            self.__has_quick_polls = is_wanted
+            if is_wanted:
+                self.__releases_open_poll = True
+            self.__changed.notify_all()
+
+    async def wait_until_idle(self, timeout_seconds: float) -> bool:
+        """Waits until the game says that the companion is not busy any more. What the game said counts only if it
+        said so just now, so the next request of the game is waited for otherwise
+
+        Returns:
+            False if the companion was still busy (or the game did not tell) when the time was up
+        """
+        async with self.__changed:
+            return await self.__wait_until(
+                lambda: self.__busy is False and time.monotonic() - self.__busy_time <= self.BUSY_FRESH_SECONDS,
+                timeout_seconds)
+
+    async def add_report(self, report: str) -> None:
+        """Keeps a sentence for the AI until it asks for the state the next time (under 'Since your last STATE')"""
+        async with self.__changed:
+            self.__reports = (self.__reports + [report])[-self.MAX_REPORTS:]
 
     async def peek_state(self) -> dict[str, Any] | None:
         """Returns the state the game sent last, without asking the game for a fresh one (None = it sent none yet)"""

@@ -830,6 +830,11 @@ def _hand_name(hand: Any) -> str:
     return hand.partition(HAND_SEPARATOR)[2].strip()
 
 
+# The fourth number of an item is put together from these: the owner wears or holds it, the player has it among the favorites
+ITEM_FLAG_EQUIPPED: int = 1
+ITEM_FLAG_FAVORITE: int = 2
+
+
 def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False) -> dict[str, Any] | None:
     """Returns 'total' (kinds of items the character has) and 'items' (the ones the game listed), or None
 
@@ -843,7 +848,7 @@ def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False)
     items: list[dict[str, Any]] = []
     for place in range((len(values) - 1) // VALUES_PER_ITEM):
         start = 1 + place * VALUES_PER_ITEM
-        form_id, count, form_type, equipped = values[start:start + VALUES_PER_ITEM]
+        form_id, count, form_type, flags = values[start:start + VALUES_PER_ITEM]
         item_id = _ref_id(form_id)
         if form_id == 0 or place not in names or (item_id == GOLD_ITEM_ID and not is_gold_listed):
             continue
@@ -852,7 +857,8 @@ def _read_inventory(raw: dict[str, Any], key: str, is_gold_listed: bool = False)
             "name": names[place],
             "count": count,
             "group": ITEM_GROUPS.get(form_type, OTHER_ITEM_GROUP),
-            "equipped": equipped != 0,
+            "equipped": flags & ITEM_FLAG_EQUIPPED != 0,
+            "favorite": flags & ITEM_FLAG_FAVORITE != 0,
         })
     return {"total": values[0], "items": items}
 

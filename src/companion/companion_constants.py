@@ -15,6 +15,10 @@ class companion_constants:
     # Only in requests that answer a report_state command, and in the first one after the game loaded
     KEY_STATE: str = PREFIX + "state"
     KEY_RESULTS: str = PREFIX + "results"
+    # With every request, from a game mod that knows chains of commands: 1 while the companion is in the middle of
+    # something that takes time (a walk, sitting down, getting on a horse), and how many things it started have failed so far
+    KEY_BUSY: str = PREFIX + "busy"
+    KEY_FAILS: str = PREFIX + "fails"
     KEY_RESULT_OK: str = PREFIX + "ok"
     KEY_RESULT_MESSAGE: str = PREFIX + "message"
 
@@ -158,6 +162,15 @@ class companion_constants:
     # say: the animation event of the game that moves the hands of the companion while it talks ("" = none).
     # The server picks one of TALK_EVENTS for every sentence if the setting talk_gestures is on
     KEY_COMMAND_TALK: str = "companion_talk"
+    # For gesture: the event that ends the animation, the animation for sitting (ID in two halves, its event and the
+    # event that ends it), and 1 if the gesture is a state that stays on until it is ended (being drunk).
+    # KEY_COMMAND_TALK carries the event of the animation for standing, for the case that the game refuses to play it by its ID
+    KEY_COMMAND_STOP_EVENT: str = "companion_stop_event"
+    KEY_COMMAND_SIT_ITEM_HIGH: str = "companion_sit_item_high"
+    KEY_COMMAND_SIT_ITEM_LOW: str = "companion_sit_item_low"
+    KEY_COMMAND_SIT_EVENT: str = "companion_sit_event"
+    KEY_COMMAND_SIT_STOP_EVENT: str = "companion_sit_stop_event"
+    KEY_COMMAND_GESTURE_STATE: str = "companion_gesture_state"
     # report_state: 1 = the game mod is to cut off the sentences the game lets the companion say on its own
     # (the setting mute_game_lines)
     KEY_COMMAND_MUTE: str = "companion_mute"
@@ -223,6 +236,14 @@ class companion_constants:
     ACTION_RIDE_LOCK: str = "ride_lock"
     # The horse of the companion or the horse of the player runs to the player and stays there
     ACTION_CALL_HORSE: str = "call_horse"
+    # The horse gets a new name, the one in 'detail'
+    ACTION_RENAME_HORSE: str = "rename_horse"
+    HORSE_NAME_MAX_LENGTH: int = 40
+    # call_horse: whom the horse runs to, if not to its owner
+    CALL_TO_PLAYER: str = "player"
+    CALL_TO_COMPANION: str = "you"
+    # Only for chains of commands (see command_chain.py), the game never gets it: wait the seconds in 'detail'
+    ACTION_PAUSE: str = "pause"
     RIDE_LOCK_ON: str = "on"
     RIDE_LOCK_OFF: str = "off"
     # Internal: makes the game collect its state and send it with its next request
@@ -260,6 +281,14 @@ class companion_constants:
         ACTION_DISMOUNT,
         ACTION_RIDE_LOCK,
         ACTION_CALL_HORSE,
+        ACTION_RENAME_HORSE,
+        ACTION_PAUSE,
+    ]
+    # These run at once and leave the commands alone that wait in a chain. Every other command throws them away
+    ACTIONS_KEEPING_QUEUE: list[str] = [
+        ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
+        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
+        ACTION_CALL_HORSE, ACTION_RENAME_HORSE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_GIVE, ACTION_TAKE]
@@ -271,6 +300,8 @@ class companion_constants:
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"
+    # The command waits in the chain until the companion is done with what it is doing
+    STATUS_QUEUED: str = "queued"
     STATUS_FAILED: str = "failed"
     STATUS_DELIVERED: str = "delivered_no_result_yet"
     STATUS_NOT_DELIVERED: str = "not_delivered"

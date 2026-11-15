@@ -87,6 +87,8 @@ HORSE_REF_ID: str = "0010982B"
 HORSE_NAME: str = "Horse"
 PLAYER_HORSE_REF_ID: str = "0010982C"
 PLAYER_HORSE_NAME: str = "Shadowmere"
+# How many requests of the simulator a walk of its companion takes
+WALK_POLLS: int = 4
 CHEST_REF_ID: str = "0005A400"
 LOCKED_CHEST_REF_ID: str = "0005A401"
 # What the chest among the THINGS holds
@@ -158,7 +160,8 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
                 is_player_sitting: bool = False, is_weapon_kept_away: bool = False,
                 is_running: bool = False, space_info: list[int] | None = None,
                 horse_ref_id: str = "", is_riding: bool = False, is_ride_locked: bool = False, is_player_riding: bool = False,
-                seat_name: str = "", player_horse_ref_id: str = "", called_horse_ref_id: str = "") -> dict:
+                seat_name: str = "", player_horse_ref_id: str = "", called_horse_ref_id: str = "",
+                horse_names: dict[str, str] | None = None) -> dict:
     """Same short form as BuildState in KI_MCP_Gefaehrte_Loop.psc sends. What the numbers mean: game_state.py
 
     Args:
@@ -226,11 +229,11 @@ def build_state(is_waiting: bool = False, target_ref_id: str = "", is_fleeing: b
         state[game_state.KEY_COMPANION_SEAT] = seat_name
     if horse_ref_id != "":
         state[game_state.KEY_HORSE] = [to_papyrus_number(horse_ref_id), 0 if is_riding else 6, 0 if is_riding else -90, int(is_riding), int(is_ride_locked)]
-        state[game_state.KEY_HORSE_NAME] = HORSE_NAME
+        state[game_state.KEY_HORSE_NAME] = (horse_names or {}).get(horse_ref_id, HORSE_NAME)
     # The horse the player rode last stands 14 m behind the player until it is ridden
     if player_horse_ref_id != "":
         state[game_state.KEY_PLAYER_HORSE] = [to_papyrus_number(player_horse_ref_id), 0 if is_player_riding else 14, 0 if is_player_riding else 180]
-        state[game_state.KEY_PLAYER_HORSE_NAME] = PLAYER_HORSE_NAME
+        state[game_state.KEY_PLAYER_HORSE_NAME] = (horse_names or {}).get(player_horse_ref_id, PLAYER_HORSE_NAME)
     if called_horse_ref_id != "":
         state[game_state.KEY_HORSE_CALLED] = to_papyrus_number(called_horse_ref_id)
     wanted_inventories = [
@@ -317,12 +320,19 @@ def horse_after(action: str, target: str, horse_ref_id: str) -> str:
 
 def is_riding_after(action: str, is_riding: bool) -> bool:
     """Like the game: mount puts the companion in the saddle (the simulator's companion is up at once),
-    dismount and wait take it down"""
+    dismount takes it down. wait leaves it in the saddle"""
     if action == consts.ACTION_MOUNT:
         return True
-    if action in (consts.ACTION_DISMOUNT, consts.ACTION_WAIT):
+    if action == consts.ACTION_DISMOUNT:
         return False
     return is_riding
+
+
+def horse_names_after(action: str, target: str, detail: str, horse_ref_id: str, horse_names: dict[str, str]) -> dict[str, str]:
+    """Like the game: rename_horse gives the horse that is the target (without one the companion's own) a new name"""
+    if action != consts.ACTION_RENAME_HORSE or (target or horse_ref_id) == "":
+        return horse_names
+    return {**horse_names, (target or horse_ref_id): detail}
 
 
 def called_horse_after(action: str, target: str, horse_ref_id: str, called_horse_ref_id: str) -> str:
@@ -477,7 +487,14 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     if action == consts.ACTION_CALL_HORSE:
         if target not in ("", horse_ref_id, PLAYER_HORSE_REF_ID):
             return False, "That is neither your horse nor the horse of the player, so it does not come when called. claim_horse makes a horse yours.", target_ref_id
-        return True, f"{PLAYER_HORSE_NAME if (target or horse_ref_id) == PLAYER_HORSE_REF_ID or (target == '' and horse_ref_id == '') else HORSE_NAME} runs to the player and stays there.", target_ref_id
+        is_players_horse = (target or horse_ref_id) == PLAYER_HORSE_REF_ID or (target == "" and horse_ref_id == "")
+        # Every horse runs to its owner, unless the detail names the other one
+        is_to_player = detail == consts.CALL_TO_PLAYER or (is_players_horse and detail != consts.CALL_TO_COMPANION)
+        return True, f"{PLAYER_HORSE_NAME if is_players_horse else HORSE_NAME} runs to {'the player' if is_to_player else 'you'} and stays there.", target_ref_id
+    if action == consts.ACTION_RENAME_HORSE:
+        if target == "" and horse_ref_id == "":
+            return False, "You have no horse to rename. Name a horse as the target, or take one as yours first with claim_horse.", target_ref_id
+        return True, f"The horse is called {detail} now.", target_ref_id
     if action == consts.ACTION_FLEE:
         return True, "You retreat: you do not fight and you run from enemies. This holds until your next command.", ""
     if action == consts.ACTION_STAND_DOWN:
@@ -562,6 +579,9 @@ def main():
     is_riding = False
     is_ride_locked = False
     called_horse_ref_id = ""
+    horse_names: dict[str, str] = {}
+    # The simulator's companion arrives where it walks to after a few requests, and nothing it starts fails
+    walk_polls_left = 0
     is_around_companion = False
     are_stats_wanted = False
     is_visible_wanted = False
@@ -577,7 +597,12 @@ def main():
     print(f"Fake game polling {url} (Ctrl+C to stop)")
     while True:
         poll_id += 1
-        request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results}
+        if walk_target_ref_id != "":
+            walk_polls_left -= 1
+            if walk_polls_left <= 0:
+                walk_target_ref_id = ""
+        request_body: dict = {consts.KEY_POLL_ID: poll_id, consts.KEY_RESULTS: results,
+                              consts.KEY_BUSY: int(walk_target_ref_id != ""), consts.KEY_FAILS: 0}
         if is_state_wanted:
             # Only the first state has something that was said
             request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
@@ -586,7 +611,7 @@ def main():
                                                          has_traps=True, has_space=is_space_wanted, find=wanted_find,
                                                          space_info=space_info, horse_ref_id=horse_ref_id, is_riding=is_riding,
                                                          is_ride_locked=is_ride_locked, player_horse_ref_id=PLAYER_HORSE_REF_ID,
-                                                         called_horse_ref_id=called_horse_ref_id)
+                                                         called_horse_ref_id=called_horse_ref_id, horse_names=horse_names)
             wanted_find = ""
             are_things_wanted = False
             is_space_wanted = False
@@ -651,6 +676,8 @@ def main():
                     is_fleeing = is_fleeing_after(str(action))
                 is_sitting = is_sitting_after(str(action), is_sitting)
                 walk_target_ref_id = walk_target_after(str(action), str(target or ""), walk_target_ref_id)
+                walk_polls_left = WALK_POLLS
+                horse_names = horse_names_after(str(action), str(target or ""), str(detail or ""), horse_ref_id, horse_names)
                 look_target_ref_id = look_target_after(str(action), str(target or ""), look_target_ref_id)
                 leader_ref_id = leader_after(str(action), str(target or ""), leader_ref_id)
                 expression = expression_after(str(action), str(detail or ""), expression)

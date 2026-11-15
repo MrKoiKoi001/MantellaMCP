@@ -36,7 +36,8 @@ def add_game_route(app: FastAPI, queue: CompanionCommandQueue):
         if not isinstance(body, dict):
             body = {}
 
-        commands = await queue.poll(read_game_state(body.get(consts.KEY_STATE)), body.get(consts.KEY_RESULTS))
+        commands = await queue.poll(read_game_state(body.get(consts.KEY_STATE)), body.get(consts.KEY_RESULTS),
+                                    body.get(consts.KEY_BUSY), body.get(consts.KEY_FAILS))
 
         reply: dict[str, Any] = {consts.KEY_MANTELLA_REPLY_TYPE: consts.MANTELLA_REPLY_TYPE_IGNORED}
         poll_id = body.get(consts.KEY_POLL_ID)

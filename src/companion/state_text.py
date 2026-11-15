@@ -97,6 +97,10 @@ def describe_state(state_result: dict[str, Any]) -> str:
     horse_line = _describe_horse(state.get("horse"), state.get("companion"))
     if horse_line != "":
         lines.append(horse_line)
+    # The commands that wait for each other (see command_chain.py)
+    queue_text = str(state_result.get("queue") or "")
+    if queue_text != "":
+        lines.append(f"Queue: {queue_text}")
     gear_line = _describe_gear(state.get("player"), state.get("companion"))
     if gear_line != "":
         lines.append(gear_line)
@@ -309,8 +313,9 @@ def _describe_inventory(title: str, inventory: Any) -> list[str]:
             text = f"{item.get('name')} {item.get('id')}"
             if item.get("count", 1) != 1:
                 text += f" x{item['count']}"
-            if item.get("equipped"):
-                text += " (equipped)"
+            marks = [mark for mark, is_set in (("equipped", item.get("equipped")), ("favorite", item.get("favorite"))) if is_set]
+            if len(marks) > 0:
+                text += f" ({', '.join(marks)})"
             texts.append(text)
         if len(texts) > 0:
             lines.append(f"- {group}: {', '.join(texts)}")
@@ -469,7 +474,9 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append(_describe_riding(companion))
     walk_target_ref_id = companion.get("walk_target_ref_id")
     if walk_target_ref_id is not None:
-        parts.append(" ".join(text for text in ["walking to", _name_of(walk_target_ref_id, nearby), walk_target_ref_id] if text != ""))
+        # In the saddle the same number says what the companion rides to
+        way = "riding to" if companion.get("riding") else "walking to"
+        parts.append(" ".join(text for text in [way, _name_of(walk_target_ref_id, nearby), walk_target_ref_id] if text != ""))
     elif companion.get("sitting") and not companion.get("riding"):
         parts.append(_describe_sitting(companion))
     elif companion.get("leader_ref_id") is not None:

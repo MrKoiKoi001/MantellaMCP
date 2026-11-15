@@ -44,15 +44,17 @@ def load_or_create_token(token_file: str) -> str:
 
 
 def create_app(token: str, hold_seconds: float = DEFAULT_HOLD_SECONDS, voice: CompanionVoice | None = None,
-               mutes_game_lines: bool = False) -> FastAPI:
+               mutes_game_lines: bool = False, game_folder: str = "") -> FastAPI:
     """
     Args:
+        game_folder: The folder of the game, for finding its animations by a word (find_gesture). Empty = not known
         voice: Makes the sound for the command say (see src/companion/voice.py). Without it the companion cannot speak
         mutes_game_lines: Whether the game mod is to cut off the sentences the game lets the companion say on its own
     """
     app = FastAPI()
     queue = CompanionCommandQueue(hold_seconds=hold_seconds)
     queue.mutes_game_lines = mutes_game_lines
+    queue.game_folder = game_folder
     add_game_route(app, queue)
     add_mcp_route(app, queue, token, voice)
     return app
@@ -76,7 +78,7 @@ def main():
     voice = CompanionVoice(game_folder, args.piper_folder or settings.piper_folder, lips=lips, xtts=xtts,
                            volume_percent=settings.voice_volume, talk_gestures=settings.talk_gestures, piper_voice=settings.piper_voice)
     lip_files_change = voice.prepare_lip_files()
-    app = create_app(token, args.hold_seconds, voice, settings.mute_game_lines)
+    app = create_app(token, args.hold_seconds, voice, settings.mute_game_lines, game_folder)
 
     print("")
     print("AI companion server")

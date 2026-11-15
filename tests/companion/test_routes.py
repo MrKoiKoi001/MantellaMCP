@@ -2241,6 +2241,9 @@ def test_riding_shows_on_what_one_sits_and_the_horse_and_its_commands_reach_the_
     riding = text_for(build_state(horse_ref_id=HORSE_REF_ID, is_riding=True, is_player_riding=True, is_ride_locked=True))
     assert "riding Shadowmere" in riding and "riding Horse, following" in riding
     assert f"Your horse: Horse {HORSE_REF_ID}, you ride it, ride_lock on" in riding
+    # Riding somewhere: the target the companion walks to on foot is what it rides to in the saddle
+    assert "riding Horse, riding to Whiterun Guard 000F6845" in text_for(build_state(horse_ref_id=HORSE_REF_ID, is_riding=True, walk_target_ref_id="000F6845"))
+    assert "walking to Whiterun Guard 000F6845" in text_for(build_state(walk_target_ref_id="000F6845"))
     # A plugin too old to tell which horse it is: 'riding' without a name
     old = build_state(horse_ref_id=HORSE_REF_ID, is_riding=True)
     old[KEY_COMPANION_MOUNT] = UNKNOWN_MOUNT_NAME
@@ -2250,7 +2253,7 @@ def test_riding_shows_on_what_one_sits_and_the_horse_and_its_commands_reach_the_
     assert run_command("mount", "", "")[0] is False
     assert run_command("mount", "", "", horse_ref_id=HORSE_REF_ID)[0] is True
     assert horse_after("claim_horse", HORSE_REF_ID, "") == HORSE_REF_ID and horse_after("follow", "", HORSE_REF_ID) == HORSE_REF_ID
-    assert is_riding_after("mount", False) and not is_riding_after("wait", True) and is_riding_after("say", True)
+    assert is_riding_after("mount", False) and is_riding_after("wait", True) and not is_riding_after("dismount", True)
     assert is_ride_locked_after("ride_lock", "on", False) and not is_ride_locked_after("ride_lock", "off", True)
 
     with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
@@ -2331,3 +2334,283 @@ def test_a_horse_is_called_and_the_players_horse_shows_in_state():
         for arguments in ({"action": "call_horse"}, {"action": "call_horse", "target": PLAYER_HORSE_REF_ID.lower()}):
             assert tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))["status"] == consts.STATUS_DONE
         assert [(one[consts.KEY_COMMAND_ACTION], one[consts.KEY_COMMAND_TARGET]) for one in received_commands] == [("call_horse", ""), ("call_horse", PLAYER_HORSE_REF_ID)]
+
+
+def start_busy_game(client: TestClient, game: dict) -> None:
+    """A game for the tests of the chain: it asks again and again, tells whether its companion is busy (game["busy"])
+    and how often something failed (game["fails"]), keeps the commands it gets in game["commands"], and is busy
+    from a move_to on until the test says otherwise. game["stop"] ends it"""
+    from src.companion.fake_game import build_state
+
+    def run():
+        results: list[dict] = []
+        is_state_wanted = False
+        while not game.get("stop"):
+            body = {consts.KEY_RESULTS: results, consts.KEY_BUSY: game["busy"], consts.KEY_FAILS: game["fails"]}
+            if is_state_wanted:
+                body[consts.KEY_STATE] = build_state()
+            try:
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+            except Exception:
+                return
+            results = []
+            is_state_wanted = False
+            for command in reply.get(consts.KEY_COMMANDS, []):
+                if command[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE:
+                    is_state_wanted = True
+                    continue
+                game["commands"].append((command[consts.KEY_COMMAND_ACTION], command[consts.KEY_COMMAND_TARGET], command[consts.KEY_COMMAND_DETAIL]))
+                if command[consts.KEY_COMMAND_ACTION] == consts.ACTION_MOVE_TO:
+                    game["busy"] = 1
+                results.append({consts.KEY_COMMAND_ID: command[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Started."})
+
+    threading.Thread(target=run, daemon=True).start()
+    time.sleep(0.3)
+
+
+def wait_for(check, seconds: float = 6.0) -> bool:
+    """Waits until check() is true, at most this long"""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if check():
+            return True
+        time.sleep(0.05)
+    return check()
+
+
+def test_commands_wait_for_each_other_in_a_chain():
+    walk = {"action": "move_to", "target": "000A0001"}
+
+    # Without a game mod that tells whether the companion is busy nothing can wait. What is wrong shows before anything starts
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "tells when your character is done" in command({**walk, "then": [{"action": "gesture", "detail": "wave"}]})["message"]
+        assert "Step 2 of 'then' has the unknown action 'fly'" in command({**walk, "then": [{"action": "wait"}, {"action": "fly"}]})["message"]
+        assert "needs a target for 'loot'" in command({**walk, "then": [{"action": "loot"}]})["message"]
+        assert "seconds of the pause" in command({**walk, "then": [{"action": "pause", "detail": "long"}]})["message"]
+        assert "at most 5 commands" in command({**walk, "then": [{"action": "wait"}] * 6})["message"]
+        assert "pause only waits" not in command({"action": "pause", "detail": "5"})["message"]
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {"then", "after_previous"} <= set(tools[0]["inputSchema"]["properties"])
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        def state() -> str:
+            return tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {}}))
+
+        game = {"busy": 0, "fails": 0, "commands": [], "stop": False}
+        start_busy_game(client, game)
+        try:
+            # The walk starts at once, the rest waits until the companion has arrived
+            answer = command({**walk, "then": [{"action": "gesture", "detail": "Wave"}, {"action": "pause", "detail": "1"}, {"action": "follow"}]})
+            assert answer["status"] == consts.STATUS_DONE
+            assert answer["message"].endswith("Queue: now move_to 000A0001; then gesture Wave; then pause 1; then follow.")
+            time.sleep(1.5)
+            assert game["commands"] == [("move_to", "000A0001", "")]
+            assert "Queue: now move_to 000A0001; then gesture Wave; then pause 1; then follow" in state()
+            # What runs at once leaves the chain alone
+            assert command({"action": "look_at", "target": "00000014"})["status"] == consts.STATUS_DONE
+            game["busy"] = 0
+            assert wait_for(lambda: len(game["commands"]) == 4)
+            assert game["commands"][1:] == [("look_at", "00000014", ""), ("gesture", "", "wave"), ("follow", "", "")]
+            assert wait_for(lambda: "Queue: all done (gesture Wave, then pause 1, then follow)." in state())
+            assert "Queue:" not in state()
+
+            # A step that fails takes the ones behind it along
+            game["commands"].clear()
+            command({**walk, "then": [{"action": "gesture", "detail": "wave"}]})
+            game["fails"] = 1
+            game["busy"] = 0
+            assert wait_for(lambda: "Queue: 'move_to 000A0001' did not work out. So what waited behind it was dropped: gesture wave." in state())
+            assert game["commands"] == [("move_to", "000A0001", "")]
+
+            # A command that moves the companion throws away what waits
+            game["commands"].clear()
+            command({**walk, "then": [{"action": "gesture", "detail": "wave"}]})
+            answer = command({"action": "follow"})
+            assert "This threw away what waited in the queue: gesture wave." in answer["message"]
+            game["busy"] = 0
+            time.sleep(1.5)
+            assert game["commands"] == [("move_to", "000A0001", ""), ("follow", "", "")]
+
+            # after_previous: behind a walk that was started without a chain
+            game["commands"].clear()
+            command(walk)
+            answer = command({"action": "gesture", "detail": "wave", "after_previous": True})
+            assert answer["status"] == consts.STATUS_QUEUED and "then gesture wave" in answer["message"]
+            time.sleep(1.5)
+            assert game["commands"] == [("move_to", "000A0001", "")]
+            game["busy"] = 0
+            assert wait_for(lambda: game["commands"] == [("move_to", "000A0001", ""), ("gesture", "", "wave")])
+        finally:
+            game["stop"] = True
+
+
+def write_master_file(folder, idles: list[tuple]) -> None:
+    """Writes a small master file like Skyrim.esm with these animations: (form ID, name, event, parent, sitting condition)"""
+    import os
+    import struct
+
+    def field(name: str, data: bytes) -> bytes:
+        return name.encode("ascii") + struct.pack("<H", len(data)) + data
+
+    def record(kind: bytes, form_id: int, body: bytes) -> bytes:
+        return kind + struct.pack("<III", len(body), 0, form_id) + bytes(8) + body
+
+    records = b""
+    for form_id, name, event, parent, needs_sitting in idles:
+        body = field("EDID", name.encode("ascii") + b"\0")
+        if needs_sitting:
+            # A condition: GetSitting (function 159) equals 3
+            body += field("CTDA", bytes(4) + struct.pack("<f", 3.0) + struct.pack("<H", 159) + bytes(22))
+        if event != "":
+            body += field("ENAM", event.encode("ascii") + b"\0")
+        body += field("ANAM", struct.pack("<II", parent, 0))
+        records += record(b"IDLE", form_id, body)
+    group = b"GRUP" + struct.pack("<I", 24 + len(records)) + b"IDLE" + bytes(12) + records
+    other_group = b"GRUP" + struct.pack("<I", 24 + 5) + b"KYWD" + bytes(12) + b"12345"
+    os.makedirs(os.path.join(folder, "Data"))
+    with open(os.path.join(folder, "Data", "Skyrim.esm"), "wb") as opened:
+        opened.write(record(b"TES4", 0, b"header") + other_group + group)
+
+
+def test_gestures_are_found_in_the_game_file_and_play_sitting_or_by_event(tmp_path):
+    from src.companion.gestures import GESTURE_NAMES, pick_gesture
+    from src.companion.idle_search import IdleLibrary, split_name
+    from src.companion.ref_ids import parse_ref_id, split_form_id
+
+    # The companion's own table: events for the gestures of Mantella's table, animations for sitting, and being drunk
+    drink = pick_gesture(" Drink ")
+    assert (drink["id"], drink["event"], drink["sit_id"], drink["sit_event"]) == ("000FD68B", "IdleDrink", "00065D07", "ChairDrinkingStart")
+    assert pick_gesture("eat")["sit_stop_event"] == "ChairEatingStop"
+    assert pick_gesture("pass out")["id"] == "" and pick_gesture("pass_out")["sit_id"] == "00106274"
+    drunk = pick_gesture("drunk")
+    assert (drunk["event"], drunk["stop_event"], drunk["state"]) == ("DrunkStart", "DrunkStop", "1")
+    assert pick_gesture("cross_arms")["event"] == "OffsetArmsCrossedStart" and pick_gesture("moonwalk") is None
+    assert {"drunk", "sway", "drink_at_table", "pass_out", "wave"} <= set(GESTURE_NAMES)
+
+    # The animations of the game: groups have no event, conditions of the entry above count, parts of names are compared
+    assert split_name("ChairEatingStart") == ["chair", "eating", "start"] and split_name("idle_A_sway_fastTrans") == ["idle", "a", "sway", "fast", "trans"]
+    write_master_file(tmp_path, [
+        (0x000640FB, "DrinkingRoot", "", 0, False),
+        (0x00065D07, "ChairDrinkingStart", "ChairDrinkingStart", 0x000640FB, True),
+        (0x000FD68B, "IdleDrink", "IdleDrink", 0, False),
+        (0x00103656, "IdleMQ201Drink", "IdleMQ201Drink", 0, False),
+        (0x00105D46, "IdlePrisonerBeat", "IdlePrisonerBeat", 0, False),
+        (0x00102EC1, "IdleEatSoup", "IdleEatSoup", 0, False),
+        (0x0010A2A3, "DeerDeathDrink", "DeathAnimation", 0, False),
+    ])
+    library = IdleLibrary(str(tmp_path))
+    found, total = library.find("drink")
+    assert [entry.name for entry in found] == ["IdleDrink", "IdleMQ201Drink", "ChairDrinkingStart"] and total == 3
+    assert found[2].needs_sitting and found[2].has_conditions and not found[0].has_conditions
+    assert [entry.name for entry in library.find("eat")[0]] == ["IdleEatSoup"]
+    assert library.get("idlemq201drink").ref_id == "00103656" and library.get("000fd68b").name == "IdleDrink" and library.get("DrinkingRoot") is None
+    missing = IdleLibrary(str(tmp_path / "nowhere"))
+    assert missing.find("drink") == ([], 0) and "could not read the animations" in missing.problem
+
+    with TestClient(create_app(TOKEN, hold_seconds=5, game_folder=str(tmp_path))) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        # find_gesture answers without the game: short names first, then what the game has
+        text = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"find_gesture": "Drink"}}))
+        lines = text.split("\n")
+        assert lines[0] == "Gestures with a short name for 'Drink': drink, drink_at_table, drinkpotion"
+        assert lines[2:] == ["- IdleDrink 000FD68B", "- IdleMQ201Drink 00103656", "- ChairDrinkingStart 00065D07, only while sitting"]
+        assert "no animation with 'moonwalk'" in tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"find_gesture": "moonwalk"}}))
+        assert "STATE with 'find_gesture'" in command({"action": "gesture", "detail": "moonwalk"})["message"]
+
+        game = {"busy": 0, "fails": 0, "commands": [], "stop": False}
+        received: list[dict] = []
+
+        def game_loop():
+            results: list[dict] = []
+            for _ in range(3):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results}).json()
+                received.extend(reply.get(consts.KEY_COMMANDS, []))
+                results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}
+                           for sent in reply.get(consts.KEY_COMMANDS, [])]
+
+        threading.Thread(target=game_loop, daemon=True).start()
+        time.sleep(0.3)
+        # A gesture with a short name carries its event and what it plays while sitting
+        assert command({"action": "gesture", "detail": "drink"})["status"] == consts.STATUS_DONE
+        sent = received[0]
+        assert (sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == split_form_id(parse_ref_id("000FD68B"))
+        assert (sent[consts.KEY_COMMAND_SIT_ITEM_HIGH], sent[consts.KEY_COMMAND_SIT_ITEM_LOW]) == split_form_id(parse_ref_id("00065D07"))
+        assert (sent[consts.KEY_COMMAND_TALK], sent[consts.KEY_COMMAND_SIT_EVENT], sent[consts.KEY_COMMAND_GESTURE_STATE]) == ("IdleDrink", "ChairDrinkingStart", 0)
+        # An animation of the game by its name: only its ID goes along, no event to fall back on
+        assert command({"action": "gesture", "detail": "idlemq201drink"})["status"] == consts.STATUS_DONE
+        sent = received[1]
+        assert (sent[consts.KEY_COMMAND_DETAIL], sent[consts.KEY_COMMAND_TALK]) == ("IdleMQ201Drink", "")
+        assert (sent[consts.KEY_COMMAND_ITEM_HIGH], sent[consts.KEY_COMMAND_ITEM_LOW]) == split_form_id(parse_ref_id("00103656"))
+        assert consts.KEY_COMMAND_SIT_EVENT not in sent
+
+
+def test_a_horse_is_renamed_and_called_to_its_owner():
+    from src.companion.fake_game import HORSE_REF_ID, PLAYER_HORSE_REF_ID, build_state, horse_names_after, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    # The simulator: the new name shows wherever the horse is named
+    names = horse_names_after("rename_horse", "", "Klumpatsch", HORSE_REF_ID, {})
+    names = horse_names_after("rename_horse", PLAYER_HORSE_REF_ID, "Poldi", HORSE_REF_ID, names)
+    assert names == {HORSE_REF_ID: "Klumpatsch", PLAYER_HORSE_REF_ID: "Poldi"} and horse_names_after("follow", "", "x", HORSE_REF_ID, names) == names
+    text = describe_state({"connected": True, "fresh": True, "state": read_game_state(
+        build_state(horse_ref_id=HORSE_REF_ID, player_horse_ref_id=PLAYER_HORSE_REF_ID, horse_names=names))})
+    assert f"Your horse: Klumpatsch {HORSE_REF_ID}" in text and f"Player's horse: Poldi {PLAYER_HORSE_REF_ID}" in text
+    assert run_command("rename_horse", "", "", detail="Poldi")[0] is False
+    # Every horse runs to its owner, unless the detail says otherwise
+    assert run_command("call_horse", "", "", horse_ref_id=HORSE_REF_ID)[1] == "Horse runs to you and stays there."
+    assert run_command("call_horse", PLAYER_HORSE_REF_ID, "", horse_ref_id=HORSE_REF_ID)[1] == "Shadowmere runs to the player and stays there."
+    assert run_command("call_horse", "", "", detail="player", horse_ref_id=HORSE_REF_ID)[1] == "Horse runs to the player and stays there."
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        received: list[dict] = []
+
+        def game_loop():
+            results: list[dict] = []
+            for _ in range(4):
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results}).json()
+                received.extend(reply.get(consts.KEY_COMMANDS, []))
+                results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}
+                           for sent in reply.get(consts.KEY_COMMANDS, [])]
+
+        threading.Thread(target=game_loop, daemon=True).start()
+        time.sleep(0.3)
+        assert "needs the new name" in command({"action": "rename_horse"})["message"]
+        assert "at most 40 characters" in command({"action": "rename_horse", "detail": "x" * 41})["message"]
+        assert "whom the horse runs to" in command({"action": "call_horse", "detail": "home"})["message"]
+        assert command({"action": "rename_horse", "detail": "  Klumpatsch   der Zweite "})["status"] == consts.STATUS_DONE
+        assert command({"action": "rename_horse", "target": PLAYER_HORSE_REF_ID.lower(), "detail": "Poldi"})["status"] == consts.STATUS_DONE
+        assert command({"action": "call_horse", "detail": "Player"})["status"] == consts.STATUS_DONE
+        sent = [(one[consts.KEY_COMMAND_ACTION], one[consts.KEY_COMMAND_TARGET], one[consts.KEY_COMMAND_DETAIL]) for one in received]
+        assert sent == [("rename_horse", "", "Klumpatsch der Zweite"), ("rename_horse", PLAYER_HORSE_REF_ID, "Poldi"), ("call_horse", "", "player")]
+
+
+def test_favorites_of_the_player_are_marked_in_the_inventory():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+
+    raw = build_state(inventory="player")
+    key = game_state.KEY_INVENTORY_PLAYER
+    # The fourth number of an item: 1 = equipped, 2 = a favorite of the player, 3 = both. The simulator's sword is equipped
+    assert raw[key][4] == 1
+    raw[key][4] = 3
+    raw[key][8] = 2
+    text = describe_state({"connected": True, "fresh": True, "state": game_state.read_game_state(raw), "inventory_wanted": "player"})
+    assert "Iron Sword 00012E49 (equipped, favorite)" in text
+    assert "Potion of Minor Healing 0003EADD x5 (favorite)" in text
+    assert "Lockpick 0000000A x12," not in text and "Lockpick 0000000A x12 (" not in text
+    # Without the flag nothing changes
+    plain = describe_state({"connected": True, "fresh": True, "state": game_state.read_game_state(build_state(inventory="player")), "inventory_wanted": "player"})
+    assert "Iron Sword 00012E49 (equipped)" in plain and "favorite" not in plain
