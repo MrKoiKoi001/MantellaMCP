@@ -49,7 +49,13 @@ class CompanionCommandQueue:
     DEFAULT_MAX_LINES: int = 10
     HIGHEST_MAX_LINES: int = 30
     # Collecting a whole inventory takes the game several seconds
-    INVENTORY_TIMEOUT_SECONDS: float = 15.0
+    INVENTORY_TIMEOUT_SECONDS: float = 20.0
+    # How long the server waits for the fresh state it asked the game for. The script of the game mod waits for the
+    # next picture of the game with nearly every question it asks, so a state took it up to six and a half seconds
+    STATE_TIMEOUT_SECONDS: float = 12.0
+    # A game that picked up commands with its last request and has not asked again is at work on them (collecting a
+    # state, carrying out a command). For this long it counts as there, not as gone
+    WORK_SECONDS: float = 20.0
     # What became of commands that take time (loot, move_to, sit) is kept here until the AI asks for the state the next time
     MAX_REPORTS: int = 5
     # What happened in the game is kept here until the AI asks for the state the next time: the newest events, none
@@ -103,6 +109,8 @@ class CompanionCommandQueue:
         self.__fail_count: int = 0
         self.__has_quick_polls: bool = False
         self.__releases_open_poll: bool = False
+        # The merchant the AI looked at or traded with last (its ref_id), for buy and sell that name no merchant
+        self.last_merchant: str = ""
         # The folder of the game, for reading its animations (see idle_search.py). Empty = not known
         self.game_folder: str = ""
         # The chain of commands that wait for each other (command_chain.CompanionChain), made by the MCP side when needed
@@ -149,7 +157,9 @@ class CompanionCommandQueue:
                 self.__state = state
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
-                log.info("GAME sent its state (number %d).", self.__state_version)
+                # The game mod measures itself how long collecting took, and how long of that the characters around took
+                log.info("GAME sent its state (number %d). Collecting it took the script %s ms, of that the characters around %s ms.",
+                         self.__state_version, state.get("build_ms", "?"), state.get("scan_ms", "?"))
             self.__keep_events(events)
             if isinstance(events, list) and len(events) > 0:
                 log.info("GAME sent %d urgent events: %s", len(events), shorten(" | ".join(str(event.get("text", "")) for event in events if isinstance(event, dict))))
@@ -200,7 +210,8 @@ class CompanionCommandQueue:
                            run: bool = False, say_ms: int = 0, space_meters: int = 0,
                            space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
                            space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES,
-                           extra: dict[str, Any] | None = None, waits_for_pause: bool = True) -> dict[str, Any]:
+                           extra: dict[str, Any] | None = None, waits_for_pause: bool = True,
+                           pickup_seconds: float = 0.0) -> dict[str, Any]:
         """Queues a command for the game and waits until the game has picked it up and reported a result
 
         Args:
@@ -284,8 +295,9 @@ class CompanionCommandQueue:
             self.__pending_commands.append(command)
             self.__changed.notify_all()
 
-            # A game that stands still (a menu, a loading screen) is waited for
-            pickup_seconds = self.__connection_grace_seconds + 2.0
+            # A game that stands still (a menu, a loading screen) is waited for. pickup_seconds: the caller's own wait,
+            # for a game that is still at work on what it was handed before
+            pickup_seconds = max(pickup_seconds, self.__connection_grace_seconds + 2.0)
             if waits_for_pause:
                 pickup_seconds = max(pickup_seconds, self.__pause_wait_seconds)
             is_delivered = await self.__wait_until(lambda: command_id in self.__delivered_command_ids, pickup_seconds)
@@ -295,6 +307,11 @@ class CompanionCommandQueue:
                          self.__silent_seconds() or 0.0)
                 if not waits_for_pause:
                     return self.__status(consts.STATUS_NOT_DELIVERED, "The game did not pick up the command in time.")
+                if self.__last_handed != "":
+                    # It took something before and has not come back: it is at work, not in a menu
+                    return self.__status(consts.STATUS_NOT_DELIVERED, f"The game has been busy for {max(int(self.__silent_seconds() or 0.0), 1)} seconds with "
+                                         "what it was told before and did not take this command. It was NOT carried out and will not be made up for. "
+                                         "Try again in a moment.")
                 return self.__status(consts.STATUS_NOT_DELIVERED, describe_silence(self.__silent_seconds() or 0.0)
                                      + " The command was NOT carried out and will not be made up for. Try again when the game goes on.")
             self.__delivered_command_ids.discard(command_id)
@@ -318,7 +335,7 @@ class CompanionCommandQueue:
             log.info("COMMAND %s: result after %.1f s.", label, time.monotonic() - started)
             return self.__status(consts.STATUS_DONE if is_ok else consts.STATUS_FAILED, message)
 
-    async def get_state(self, refresh_timeout_seconds: float = 6.0, inventory: str = "", corpse: str = "",
+    async def get_state(self, refresh_timeout_seconds: float = STATE_TIMEOUT_SECONDS, inventory: str = "", corpse: str = "",
                         is_for_the_ai: bool = True, things: bool = False, max_lines: int = DEFAULT_MAX_LINES,
                         around_companion: bool = False, stats: bool = False, visible: bool = False,
                         space: bool = False, find: str = "", space_meters: int = 0,
@@ -376,7 +393,8 @@ class CompanionCommandQueue:
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
                                               find=find, space_meters=space_meters, space_degrees=space_degrees,
                                               space_from_facing=space_from_facing, space_angle=space_angle,
-                                              extra=extra if len(extra) > 0 else None, waits_for_pause=False)
+                                              extra=extra if len(extra) > 0 else None, waits_for_pause=False,
+                                              pickup_seconds=refresh_timeout_seconds)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:
                 async with self.__changed:
@@ -488,7 +506,11 @@ class CompanionCommandQueue:
             return True
         if self.__last_poll_time is None:
             return False
-        return time.monotonic() - self.__last_poll_time <= self.__connection_grace_seconds
+        silent_seconds = time.monotonic() - self.__last_poll_time
+        if silent_seconds <= self.__connection_grace_seconds:
+            return True
+        # At work on what it picked up with its last request (see WORK_SECONDS)
+        return self.__last_handed != "" and silent_seconds <= self.WORK_SECONDS
 
     @staticmethod
     def __describe_command(command: dict[str, Any]) -> str:

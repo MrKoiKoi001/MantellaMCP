@@ -875,7 +875,7 @@ def test_sitting_and_looting_a_container():
     async def nearest_seat(state: dict | None) -> tuple[str, list[dict]]:
         queue = CompanionCommandQueue(hold_seconds=0.05, connection_grace_seconds=0.0)
         await queue.poll(state, [])
-        return await _find_nearest_seat(queue), (await queue.get_state())["heard"]
+        return (await _find_nearest_seat(queue))[0], (await queue.get_state())["heard"]
 
     seat, heard = asyncio.run(nearest_seat(read_game_state(build_state(has_heard_lines=True))))
     assert seat == SEAT_REF_ID and len(heard) == 3
@@ -3103,8 +3103,8 @@ def test_lead_auto_heal_and_trading_with_a_merchant():
         # What the server turns down itself never reaches the game
         assert "needs a target" in command({"action": "lead"})["message"]
         assert "needs a target" in command({"action": "buy", "detail": "00013989"})["message"]
-        assert "ID of the item" in command({"action": "buy", "target": MERCHANT_REF_ID})["message"]
-        assert "ID of the item" in command({"action": "sell", "target": MERCHANT_REF_ID, "detail": "two swords"})["message"]
+        assert "buy needs the items" in command({"action": "buy", "target": MERCHANT_REF_ID})["message"]
+        assert "neither IDs of items nor how many" in command({"action": "sell", "target": MERCHANT_REF_ID, "detail": "two swords"})["message"]
         assert "how many" in command({"action": "buy", "target": MERCHANT_REF_ID, "detail": "00013989 0"})["message"]
         assert "auto_heal needs" in command({"action": "auto_heal", "detail": "sometimes"})["message"]
         assert "auto_heal needs" in command({"action": "auto_heal", "detail": "95"})["message"]
@@ -3208,3 +3208,117 @@ def test_the_log_tells_silence_and_what_became_of_commands():
         log.removeHandler(keeper)
     assert 'AI -> COMMAND {"action": "dance"}' in lines[0]
     assert "AI <- COMMAND after" in lines[-1] and "(ERROR)" in lines[-1] and "Unknown action" in lines[-1]
+
+
+def test_a_game_at_work_counts_as_there_and_a_seat_is_not_picked_from_an_old_state():
+    import asyncio
+
+    from src.companion.command_queue import CompanionCommandQueue
+    from src.companion.fake_game import SEAT_REF_ID, build_state
+    from src.companion.game_state import read_game_state
+    from src.companion.mcp_route import _find_nearest_seat
+    from src.companion.state_text import describe_state
+
+    async def scenario() -> dict:
+        answers: dict = {}
+        # Without a grace period the game counts as silent right after its request
+        queue = CompanionCommandQueue(hold_seconds=1.0, connection_grace_seconds=0.0, pause_wait_seconds=0.5)
+
+        async def slow_game(seconds: float, with_state: bool) -> None:
+            # Asks, picks up what comes, then is at work for a while before it asks again
+            await queue.poll(read_game_state(build_state()), [])
+            await asyncio.sleep(seconds)
+            await queue.poll(read_game_state(build_state(inventory=consts.INVENTORY_OWN)) if with_state else None, [])
+
+        # The game takes the request for its state and needs longer than the grace period: the state is still fresh
+        game = asyncio.create_task(slow_game(0.6, True))
+        await asyncio.sleep(0.1)
+        answers["slow"] = await queue.get_state(refresh_timeout_seconds=3.0)
+        await game
+        # It needs longer than the server waits: it counts as there and at work, not as paused or gone
+        game = asyncio.create_task(slow_game(1.2, False))
+        await asyncio.sleep(0.1)
+        answers["too_slow"] = await queue.get_state(refresh_timeout_seconds=0.4)
+        # No seat is picked from the state the server still has, and a command is told that the game is at work
+        answers["seat"] = await _find_nearest_seat(queue)
+        answers["command"] = await queue.send_command(consts.ACTION_FOLLOW)
+        await game
+        return answers
+
+    answers = asyncio.run(scenario())
+    assert answers["slow"]["fresh"] is True and answers["slow"]["connected"] is True
+    assert answers["too_slow"]["fresh"] is False and answers["too_slow"]["connected"] is True
+    assert describe_state(answers["too_slow"]).splitlines()[0].startswith("The game did not answer in time. What follows is")
+    assert answers["seat"][0] == "" and "did not send the things around you in time" in answers["seat"][1]
+    assert answers["command"]["status"] == consts.STATUS_NOT_DELIVERED and "has been busy for" in answers["command"]["message"]
+    assert "paused" not in answers["command"]["message"]
+    assert CompanionCommandQueue.STATE_TIMEOUT_SECONDS == 12.0 and SEAT_REF_ID != ""
+
+
+def test_buy_and_sell_take_several_items_and_sell_junk():
+    from src.companion import game_state
+    from src.companion.fake_game import MERCHANT_REF_ID, build_state
+    from src.companion.ref_ids import parse_ref_id, split_form_id
+
+    def halves(item_id: str) -> list[int]:
+        return list(split_form_id(parse_ref_id(item_id)))
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        received_commands: list[dict] = []
+        old_state = build_state()
+        old_state[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_PROTOCOL] = consts.TRADE_LIST_PROTOCOL - 1
+        states: list[dict] = [old_state]
+
+        def game():
+            results: list[dict] = []
+            for _ in range(12):
+                body = {consts.KEY_RESULTS: results, consts.KEY_BUSY: 0, consts.KEY_FAILS: 0}
+                if len(states) > 0:
+                    body[consts.KEY_STATE] = states.pop(0)
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                results = []
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    if sent[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE:
+                        states.append(build_state(inventory=str(sent.get(consts.KEY_COMMAND_DETAIL) or ""),
+                                                  corpse_ref_id=str(sent.get(consts.KEY_COMMAND_TARGET) or "")))
+                    else:
+                        received_commands.append(sent)
+                        results.append({consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # What the server turns down itself never reaches the game
+        assert "is not made of IDs" in command({"action": "sell", "target": "the bow, 00013985"})["message"]
+        # The items alone, as for give and take, are not enough before a merchant is known
+        no_merchant = command({"action": "sell", "target": "00013985,0001397D"})
+        assert "sell needs the merchant" in no_merchant["message"] and "'detail' the IDs of the items" in no_merchant["message"]
+        assert "Only sell knows 'junk'" in command({"action": "buy", "target": MERCHANT_REF_ID, "detail": "junk"})["message"]
+        # A game mod from before would only trade the first item, so the server does not send it the list
+        too_old = command({"action": "sell", "target": "00013985,0001397D", "detail": MERCHANT_REF_ID})
+        assert too_old["status"] == consts.STATUS_FAILED and "newer game mod" in too_old["message"]
+        assert not received_commands
+        # Looking at a merchant makes it the one that is meant when no merchant is named. Its state is from a newer game mod
+        assert "Steel Sword" in tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"merchant": MERCHANT_REF_ID}}))
+        # The usual form: the merchant as the target, the items in 'detail', each with how many behind it if not one
+        assert command({"action": "buy", "target": MERCHANT_REF_ID, "detail": "00013989 2, 0003eadd"})["status"] == consts.STATUS_DONE
+        bought = received_commands[0]
+        assert bought[consts.KEY_COMMAND_TARGET] == MERCHANT_REF_ID
+        assert bought[consts.KEY_COMMAND_ITEMS] == halves("00013989") + [2] + halves("0003EADD") + [1]
+        # The items in 'target' as for give and take: the merchant is the one looked at last, 'detail' is how many
+        command({"action": "sell", "target": "00013985,0001397D", "detail": "1,all"})
+        sold = received_commands[1]
+        assert (sold[consts.KEY_COMMAND_ACTION], sold[consts.KEY_COMMAND_TARGET]) == ("sell", MERCHANT_REF_ID)
+        assert sold[consts.KEY_COMMAND_ITEMS] == halves("00013985") + [1] + halves("0001397D") + [0]
+        # One item in 'target' and the merchant in 'detail' is read the right way round, and goes the way one item always went
+        command({"action": "sell", "target": "00013985", "detail": MERCHANT_REF_ID})
+        swapped = received_commands[2]
+        assert consts.KEY_COMMAND_ITEMS not in swapped and swapped[consts.KEY_COMMAND_TARGET] == MERCHANT_REF_ID
+        assert (swapped[consts.KEY_COMMAND_ITEM_LOW], swapped[consts.KEY_COMMAND_COUNT]) == (0x3985, 1)
+        # junk: what the merchant buys and the companion neither wears, holds nor has as a favorite. In the simulator
+        # that is the bow, all of it
+        junk = command({"action": "sell", "target": MERCHANT_REF_ID, "detail": "JUNK"})
+        assert junk["status"] == consts.STATUS_DONE
+        assert (received_commands[3][consts.KEY_COMMAND_ITEM_LOW], received_commands[3][consts.KEY_COMMAND_COUNT]) == (0x3985, consts.COUNT_ALL)

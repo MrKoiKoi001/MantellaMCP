@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
 from src.companion.command_chain import MAX_WAITING_STEPS, CompanionChain, describe_step, read_pause_seconds
-from src.companion.game_state import KEY_INVENTORY_OWN
+from src.companion.game_state import KEY_INVENTORY_OWN, MERCHANT_IS_CLOSED, MERCHANT_IS_NONE
 from src.companion.gestures import GESTURE_NAMES as ALL_GESTURE_NAMES, pick_gesture
 from src.companion.ref_ids import format_ref_id, parse_ref_id, split_form_id
 from src.companion.server_log import log, shorten
@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.40"
+SERVER_VERSION: str = "0.41"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -207,8 +207,13 @@ TOOLS: list[dict[str, Any]] = [
             "back, and go on once the player has caught up. When you are there you follow the player again. Use it when "
             "the player asks you to show the way. Not in the saddle. "
             "Trading: buy = buy something from a merchant, sell = sell something of yours to one. The target is the "
-            "merchant (its ref_id from 'Nearby'), 'detail' the ID of the item and after it how many or 'all' (nothing = 1), "
-            "eg '00034CDF 2'. See what there is and what it costs with STATE and 'merchant' first. You walk over to the "
+            "merchant (its ref_id from 'Nearby'), 'detail' the IDs of the items with commas between them, each with how many "
+            "or 'all' behind it if not one, eg '00034CDF 2, 0003EADD' (one movement of the hand, and the answer lists what "
+            f"was traded for how much and what was not). sell with 'detail' '{consts.HAND_OVER_JUNK}' sells everything the merchant "
+            "buys that you neither wear, hold nor have as a favorite, apart from ammunition, potions, food and keys. The "
+            "items may also stand in 'target' as for give and take: then 'detail' is the merchant, or how many, and "
+            "without a merchant it is the one you looked at or traded with last. "
+            "See what there is and what it costs with STATE and 'merchant' first. You walk over to the "
             "merchant if you are not there, and your next STATE tells you how it went. You pay with your own gold (the "
             "player can give you some with the gold's ID 0000000F), the merchant pays with its own. If the gold does not "
             "last for all of them, nothing is traded and the answer says for how many it lasts. "
@@ -590,6 +595,10 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
                                              space_degrees=space_degrees, space_from_facing=is_space_from_facing,
                                              space_angle=space_angle, space_direction=space_direction,
                                              inventory_filter=inventory_filter, read=read, read_page=read_page, merchant=merchant)
+        shown_state = state_result.get("state")
+        shown_merchant = shown_state.get("merchant") if isinstance(shown_state, dict) and state_result.get("merchant_wanted") else None
+        if isinstance(shown_merchant, dict) and shown_merchant.get("status") != MERCHANT_IS_NONE:
+            queue.last_merchant = str(shown_merchant.get("ref_id", ""))
         if queue.chain is not None:
             state_result["queue"] = queue.chain.describe()
         if arguments.get(ARGUMENT_DEBUG) is True:
@@ -611,6 +620,8 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         return {"status": consts.STATUS_FAILED, "message": f"Unknown action '{action}'. Allowed: {', '.join(consts.PLAYER_ACTIONS)}"}, True
     if action == consts.ACTION_PAUSE:
         return {"status": consts.STATUS_FAILED, "message": "pause only waits between commands that follow each other (see 'then' and 'after_previous')."}, True
+    if action in consts.TRADE_ACTIONS:
+        return await _run_trade(action, target, detail, queue)
     # give with 'junk' names no item. take with it is told further down that only give knows it
     is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and detail.lower() == consts.HAND_OVER_JUNK
     if action in consts.ACTIONS_REQUIRING_TARGET and target == "" and not is_junk_wanted:
@@ -623,7 +634,9 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         if len(hand_over) > 0:
             return await _hand_over(action, hand_over, note, queue)
     if action == consts.ACTION_SIT and target == "":
-        target = await _find_nearest_seat(queue)
+        target, seat_problem = await _find_nearest_seat(queue)
+        if seat_problem != "":
+            return {"status": consts.STATUS_FAILED, "message": seat_problem}, True
         if target == "":
             return {"status": consts.STATUS_FAILED, "message": "The game shows no seat within about 10 meters of you. Go closer to one, or name a seat from 'Things' in STATE as the target."}, True
     if target != "":
@@ -664,22 +677,6 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         if item_form_id is None or item_form_id == 0:
             return {"status": consts.STATUS_FAILED, "message": "For loot 'detail' is the ID of the item to take, or 'all' for everything."}, True
         item = format_ref_id(item_form_id)
-    if action in consts.TRADE_ACTIONS:
-        # The ID of the item, and after it how many
-        words = detail.replace(",", " ").split()
-        item_form_id = parse_ref_id(words[0]) if len(words) > 0 else None
-        if len(words) not in (1, 2) or item_form_id is None or item_form_id == 0:
-            return {"status": consts.STATUS_FAILED, "message": f"For {action} 'detail' is the ID of the item, and after it how many or '{consts.COUNT_ALL_TEXT}' "
-                               "(nothing = 1), eg '00034CDF 2'. STATE with 'merchant' lists the IDs and the prices."}, True
-        item = format_ref_id(item_form_id)
-        if len(words) == 2:
-            if words[1].lower() == consts.COUNT_ALL_TEXT:
-                count = consts.COUNT_ALL
-            elif words[1].isdecimal() and int(words[1]) > 0:
-                count = int(words[1])
-            else:
-                return {"status": consts.STATUS_FAILED, "message": f"For {action} the number after the ID is how many: a number above 0 or '{consts.COUNT_ALL_TEXT}'."}, True
-        detail = item
     if action == consts.ACTION_AUTO_HEAL:
         target = ""
         detail = detail.lower().removesuffix("%").strip()
@@ -870,6 +867,137 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     is_run = arguments.get("run") is True and action in consts.ACTIONS_WITH_RUN
     result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run, talk=gesture_event, extra=extra)
     is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+    return result, is_error
+
+
+def _is_id(text: str) -> bool:
+    """Whether a text of a trade is an ID (of an item or a character) and not how many"""
+    return len(text) >= consts.TRADE_ID_LENGTH and parse_ref_id(text) not in (None, 0)
+
+
+def _read_counts(texts: list[str]) -> list[int] | None:
+    """How many, for each text: a number above 0, or COUNT_ALL_TEXT. None if one of them is neither"""
+    counts: list[int] = []
+    for text in texts:
+        if text.lower() == consts.COUNT_ALL_TEXT:
+            counts.append(consts.COUNT_ALL)
+        elif text.isdecimal() and int(text) > 0:
+            counts.append(int(text))
+        else:
+            return None
+    return counts
+
+
+async def _read_trade_junk(merchant: str, queue: CompanionCommandQueue) -> tuple[str, list[tuple[str, int]]]:
+    """sell with 'junk': everything the merchant buys that the companion neither wears, holds nor has as a favorite, apart
+    from ammunition, potions, food and keys. Returns what is wrong as text for the AI (empty = nothing) and the items"""
+    merchant_result = await queue.get_state(merchant=merchant, is_for_the_ai=False)
+    state = merchant_result.get("state")
+    known = state.get("merchant") if isinstance(state, dict) and merchant_result.get("merchant_wanted") else None
+    if not isinstance(known, dict) or known.get("ref_id") != merchant:
+        return "The game did not tell in time what this merchant buys, so nothing was sold. Try again.", []
+    if known.get("status") == MERCHANT_IS_NONE:
+        return f"{known.get('name')} is no merchant.", []
+    if known.get("status") == MERCHANT_IS_CLOSED:
+        return f"{known.get('name')} does not trade at this hour.", []
+    # The merchant's list leaves out what the companion wears. Its favorites are only marked in its own inventory
+    own_result = await queue.get_state(inventory=consts.INVENTORY_OWN, is_for_the_ai=False)
+    own_state = own_result.get("state")
+    inventory = own_state.get(KEY_INVENTORY_OWN) if isinstance(own_state, dict) and own_result.get("inventory_wanted") else None
+    if not isinstance(inventory, dict):
+        return "The game did not send your inventory in time, so nothing was sold. Try again.", []
+    kept = {item["id"] for item in inventory["items"] if item["favorite"] or item["equipped"]}
+    junk = [(str(item["id"]), consts.COUNT_ALL) for item in known.get("sellable", [])
+            if item["id"] not in kept and item["group"] not in consts.JUNK_KEPT_GROUPS]
+    if len(junk) == 0:
+        return "You carry nothing that counts as junk and that this merchant buys.", []
+    return "", junk[:consts.HAND_OVER_HIGHEST_ITEMS]
+
+
+async def _run_trade(action: str, target: str, detail: str, queue: CompanionCommandQueue) -> tuple[dict[str, Any], bool]:
+    """buy and sell. The usual form: the merchant as the target, the items in 'detail'. The items may also stand in
+    'target' as for give and take: then the merchant is the one in 'detail', or the one the AI dealt with last"""
+    is_selling = action == consts.ACTION_SELL
+    usage = (f"For {action} the target is the merchant (its ref_id from 'Nearby') and 'detail' the IDs of the items with commas between them, "
+             f"each with how many or '{consts.COUNT_ALL_TEXT}' behind it if not one: eg '00034CDF 2, 0003EADD'.")
+    if is_selling:
+        usage += (f" Or 'detail' '{consts.HAND_OVER_JUNK}': everything the merchant buys that you neither wear, hold nor have as a favorite, "
+                  "apart from ammunition, potions, food and keys.")
+    usage += " STATE with 'merchant' lists the IDs and the prices."
+
+    def failed(message: str) -> tuple[dict[str, Any], bool]:
+        return {"status": consts.STATUS_FAILED, "message": message}, True
+
+    target_words = [word for word in re.split(r"[,;\s]+", target) if word != ""]
+    detail_words = [word for word in re.split(r"[,;\s]+", detail) if word != ""]
+    if not all(_is_id(word) for word in target_words):
+        return failed(f"'{target}' is not made of IDs. {usage}")
+    target_ids = [format_ref_id(parse_ref_id(word) or 0) for word in target_words]
+    detail_ids = [format_ref_id(parse_ref_id(word) or 0) for word in detail_words if _is_id(word)]
+    last_merchant = queue.last_merchant
+    merchant = ""
+    items: list[tuple[str, int]] = []
+    if detail.lower() == consts.HAND_OVER_JUNK:
+        if not is_selling:
+            return failed(f"Only sell knows '{consts.HAND_OVER_JUNK}'. For buy, name the items.")
+        if len(target_ids) > 1 or (len(target_ids) == 0 and last_merchant == ""):
+            return failed(f"sell with '{consts.HAND_OVER_JUNK}' needs the merchant as the target (its ref_id from 'Nearby').")
+        merchant = target_ids[0] if len(target_ids) == 1 else last_merchant
+        problem, items = await _read_trade_junk(merchant, queue)
+        if problem != "":
+            return failed(problem)
+    elif len(detail_ids) > 0 and len(target_ids) <= 1 and not (len(target_ids) == 1 and detail_ids == [last_merchant] and target_ids[0] != last_merchant):
+        # The usual form: the items in 'detail', each with how many behind it if not one
+        merchant = target_ids[0] if len(target_ids) == 1 else last_merchant
+        if merchant == "":
+            return failed(f"Action '{action}' needs a target: the merchant. {usage}")
+        if not _is_id(detail_words[0]):
+            return failed(f"'{detail_words[0]}' is not the ID of an item. {usage}")
+        for word in detail_words:
+            if _is_id(word):
+                items.append((format_ref_id(parse_ref_id(word) or 0), 1))
+                continue
+            counts = _read_counts([word])
+            if counts is None:
+                return failed(f"'{word}' is neither the ID of an item nor how many (a number above 0 or '{consts.COUNT_ALL_TEXT}'). {usage}")
+            items[-1] = (items[-1][0], counts[0])
+    elif len(target_ids) > 0:
+        # The items in 'target', as for give and take. 'detail' is the merchant, or how many
+        if target_ids == [last_merchant] or (len(target_ids) == 1 and len(detail_words) == 0 and last_merchant == ""):
+            return failed(f"{action} needs the items. {usage}")
+        counts = [] if len(detail_ids) > 0 else _read_counts(detail_words)
+        if counts is None:
+            return failed(f"'{detail}' is neither IDs of items nor how many. {usage}")
+        merchant = detail_ids[0] if len(detail_ids) == 1 and len(detail_words) == 1 else last_merchant
+        if merchant == "":
+            return failed(f"{action} needs the merchant. {usage} Once you have looked at a merchant with STATE and 'merchant', the items alone are enough.")
+        if len(counts) not in (0, 1, len(target_ids)):
+            return failed(f"With the items in 'target', 'detail' is the merchant, or how many of each ('1,1,3'), one number for all of them, or '{consts.COUNT_ALL_TEXT}'. {usage}")
+        for place, item_id in enumerate(target_ids):
+            items.append((item_id, 1 if len(counts) == 0 else counts[0] if len(counts) == 1 else counts[place]))
+    else:
+        return failed(f"Action '{action}' needs a target: the merchant. {usage}")
+
+    if len(items) > consts.HAND_OVER_HIGHEST_ITEMS:
+        return failed(f"At most {consts.HAND_OVER_HIGHEST_ITEMS} kinds of items at a time. You named {len(items)}.")
+    first_id, first_count = items[0]
+    if len(items) == 1:
+        result = await queue.send_command(action, target=merchant, detail=first_id, count=first_count, item=first_id)
+    else:
+        state = await queue.peek_state()
+        protocol = state.get("protocol") if isinstance(state, dict) else 0
+        if not isinstance(protocol, int) or protocol < consts.TRADE_LIST_PROTOCOL:
+            return failed("Several items in one go need a newer game mod than the one that is running (build and install it again with "
+                          "build.py --install). Nothing was traded. One item at a time still works.")
+        numbers: list[int] = []
+        for item_id, count in items:
+            high, low = split_form_id(parse_ref_id(item_id) or 0)
+            numbers.extend([high, low, count])
+        result = await queue.send_command(action, target=merchant, detail=",".join(item_id for item_id, _ in items), count=first_count, item=first_id,
+                                          extra={consts.KEY_COMMAND_ITEMS: numbers}, result_timeout_seconds=consts.HAND_OVER_TIMEOUT_SECONDS)
+    is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+    if not is_error:
+        queue.last_merchant = merchant
     return result, is_error
 
 
@@ -1124,20 +1252,26 @@ async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: Compan
     return ("" if is_ok else problem), line
 
 
-async def _find_nearest_seat(queue: CompanionCommandQueue) -> str:
-    """Returns the ref_id of the seat that is nearest to the companion (or to the player, if the companion's place is not known), or an empty text"""
+async def _find_nearest_seat(queue: CompanionCommandQueue) -> tuple[str, str]:
+    """Returns the ref_id of the seat that is nearest to the companion (or to the player, if the companion's place is
+    not known), or an empty text if there is none, and why no seat could be looked for (empty = it could)"""
     # The game is asked for the things around the companion. An older game mod, or one whose companion is far away,
     # answers with the things around the player, and then the distance from the companion is the calculated one
     state_result = await queue.get_state(is_for_the_ai=False, things=True, around_companion=True)
+    if state_result.get("connected") and not state_result.get("fresh"):
+        # The state the server still has can be from another place: in a test a seat was looked for in a tavern among
+        # the things of the street outside, and "no seat" was the answer
+        return "", ("The game did not send the things around you in time, so no seat could be picked. Try again in a moment, "
+                    "or name a seat from 'Things' in STATE as the target.")
     state = state_result.get("state")
     things = state.get("things") if isinstance(state, dict) else None
     if not isinstance(things, list):
-        return ""
+        return "", ""
     seats = [thing for thing in things if thing.get("seat")]
     if len(seats) == 0:
-        return ""
+        return "", ""
     nearest = min(seats, key=lambda seat: seat.get("distance_from_companion_meters", seat.get("distance_meters", 0)))
-    return str(nearest.get("ref_id", ""))
+    return str(nearest.get("ref_id", "")), ""
 
 
 def _tool_json(payload: dict[str, Any], is_error: bool) -> dict[str, Any]:

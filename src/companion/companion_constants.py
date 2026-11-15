@@ -309,6 +309,11 @@ class companion_constants:
     ACTION_BUY: str = "buy"
     ACTION_SELL: str = "sell"
     TRADE_ACTIONS: list[str] = [ACTION_BUY, ACTION_SELL]
+    # buy and sell with several items in one command carry them like give and take (KEY_COMMAND_ITEMS). Game mods
+    # from this protocol on know that
+    TRADE_LIST_PROTOCOL: int = 14
+    # A text of at least this many characters is read as an ID, a shorter one as how many
+    TRADE_ID_LENGTH: int = 6
     HORSE_NAME_MAX_LENGTH: int = 40
     # call_horse: whom the horse runs to, if not to its owner
     CALL_TO_PLAYER: str = "player"
@@ -376,7 +381,7 @@ class companion_constants:
     # These take 'run': the companion runs instead of walking
     ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW, ACTION_LEAD]
     ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE,
-                                           ACTION_LEAD, ACTION_BUY, ACTION_SELL] + ITEM_ACTIONS
+                                           ACTION_LEAD] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"
