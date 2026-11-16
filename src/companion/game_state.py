@@ -223,6 +223,9 @@ KEY_QUICK_NUMBERS: str = "quick_numbers"
 KEY_QUICK_TEXTS: str = "quick_texts"
 # Set by expand_quick_state: this state was built in one go. The second time in KEY_TIMES is then how long the plugin took
 KEY_BUILT_QUICK: str = "built_quick"
+# From plugin version 26 on the plugin works out health, sitting, sleeping and running itself, and the game mod checks
+# that now and then against what the game tells its script. Where the two differ it sends this text. Only for the log
+KEY_PLUGIN_MISMATCH: str = "plugin_mismatch"
 QUICK_BLOCK_OF_HORSE_CALLED: int = 6
 QUICK_BLOCK_KEYS: dict[int, str] = {1: KEY_TIMES, 2: "player", 3: "world", 4: "companion", 5: "gold", QUICK_BLOCK_OF_HORSE_CALLED: "horse_called",
                                     7: "player_horse", 8: "horse", 9: "nearby", 10: "nearby_senses"}
@@ -544,6 +547,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
             state["space_look"] = space_look
     _add_view_of_companion(state)
 
+    mismatch = raw.get(KEY_PLUGIN_MISMATCH)
+    if isinstance(mismatch, str) and mismatch.strip() != "":
+        state["plugin_mismatch"] = mismatch.strip()
     times = _numbers(raw.get(KEY_TIMES))
     if times is not None and len(times) == TIME_VALUE_COUNT:
         state["build_ms"], state["scan_ms"] = times

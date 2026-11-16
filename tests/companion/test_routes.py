@@ -3451,6 +3451,17 @@ def test_the_log_names_the_menus_that_were_open():
         log.removeHandler(keeper)
     assert [line for line in lines if "menus were open" in line] == ["GAME says these menus were open: BarterMenu 34 s, Console 0.8 s"]
 
+    # Where the plugin of the game mod and its script tell different things, the game mod says so, and that is logged
+    lines.clear()
+    log.addHandler(keeper)
+    try:
+        with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+            client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun", "plugin_mismatch": "companion runs: plugin 1, script 0"}})
+            client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}})
+    finally:
+        log.removeHandler(keeper)
+    assert [line for line in lines if "disagree" in line] == ["GAME says its plugin and its script disagree: companion runs: plugin 1, script 0"]
+
 
 def test_a_state_built_in_one_go_unpacks_to_the_state_it_always_was():
     from src.companion import game_state

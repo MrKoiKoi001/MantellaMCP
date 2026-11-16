@@ -168,6 +168,10 @@ class CompanionCommandQueue:
                     self.__reports = (self.__reports + [report.strip()])[-self.MAX_REPORTS:]
                 # And for what happened in the game
                 self.__keep_events(state.pop("events", None))
+                # Only for the log: where the plugin of the game mod and its script tell different things
+                mismatch = state.pop("plugin_mismatch", None)
+                if mismatch:
+                    log.info("GAME says its plugin and its script disagree: %s", shorten(str(mismatch)))
                 self.__state = state
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
