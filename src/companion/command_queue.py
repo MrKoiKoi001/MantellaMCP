@@ -172,8 +172,12 @@ class CompanionCommandQueue:
                 self.__state_time = time.monotonic()
                 self.__state_version += 1
                 # The game mod measures itself how long collecting took, and how long of that the characters around took
-                log.info("GAME sent its state (number %d). Collecting it took the script %s ms, of that the characters around %s ms.",
-                         self.__state_version, state.get("build_ms", "?"), state.get("scan_ms", "?"))
+                if state.get("quick") is True:
+                    log.info("GAME sent its state (number %d), built in one go. It took the script %s ms, of that the plugin %s ms.",
+                             self.__state_version, state.get("build_ms", "?"), state.get("scan_ms", "?"))
+                else:
+                    log.info("GAME sent its state (number %d). Collecting it took the script %s ms, of that the characters around %s ms.",
+                             self.__state_version, state.get("build_ms", "?"), state.get("scan_ms", "?"))
             self.__keep_events(events)
             if isinstance(events, list) and len(events) > 0:
                 log.info("GAME sent %d urgent events: %s", len(events), shorten(" | ".join(str(event.get("text", "")) for event in events if isinstance(event, dict))))
@@ -355,7 +359,8 @@ class CompanionCommandQueue:
                         space: bool = False, find: str = "", space_meters: int = 0,
                         space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
                         space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "",
-                        inventory_filter: str = "", read: str = "", read_page: int = 1, merchant: str = "") -> dict[str, Any]:
+                        inventory_filter: str = "", read: str = "", read_page: int = 1, merchant: str = "",
+                        slow: bool = False) -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
@@ -363,6 +368,8 @@ class CompanionCommandQueue:
             inventory_filter: Only a part of that inventory (companion_constants.FILTER_FAVORITES or FILTER_EQUIPPED), or empty for all of it
             corpse: ref_id of a dead character or a container. The fresh state then carries what is in it, instead of 'inventory'
             merchant: ref_id of a merchant. The fresh state then carries what it offers, instead of 'inventory'
+            slow: True = the game mod builds the state the old way, question by question, although its plugin could
+                build it in one go (see companion_constants.STATE_OPTION_SLOW). For comparing the two ways
             things: Whether the fresh state should carry the things close to the player (furniture, containers, loose items)
             max_lines: How many characters, and how many things, the fresh state should list at most
             around_companion: Whether the fresh state should list everything as the companion sees it (what is around
@@ -399,15 +406,21 @@ class CompanionCommandQueue:
             extra: dict[str, Any] = {}
             if inventory_filter != "":
                 extra[consts.KEY_COMMAND_INVENTORY_FILTER] = inventory_filter
+            read_high, read_low = split_form_id(parse_ref_id(read) or 0)
             if read != "":
-                read_high, read_low = split_form_id(parse_ref_id(read) or 0)
                 extra.update({consts.KEY_COMMAND_READ: read, consts.KEY_COMMAND_READ_HIGH: read_high,
                               consts.KEY_COMMAND_READ_LOW: read_low, consts.KEY_COMMAND_READ_PAGE: read_page})
+            # All of it once more as one list of numbers, which newer game mods read instead (see KEY_COMMAND_STATE_OPTIONS)
+            target_high, target_low = split_form_id(parse_ref_id(corpse or merchant) or 0)
+            extra[consts.KEY_COMMAND_STATE_OPTIONS] = [
+                max_lines, int(things), int(around_companion), int(stats), int(visible), int(space), space_meters, space_degrees,
+                int(space_from_facing), space_angle, read_high, read_low, read_page, int(self.mutes_game_lines), int(slow),
+                target_high, target_low, int(inventory != ""), int(find != ""), int(inventory_filter != ""), int(read != "")]
             request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse or merchant, detail=inventory, count=max_lines, things=things,
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
                                               find=find, space_meters=space_meters, space_degrees=space_degrees,
                                               space_from_facing=space_from_facing, space_angle=space_angle,
-                                              extra=extra if len(extra) > 0 else None, waits_for_pause=False,
+                                              extra=extra, waits_for_pause=False,
                                               pickup_seconds=refresh_timeout_seconds)
             # Only a game that picked up the request will send a fresh state for it
             if request["status"] == consts.STATUS_DELIVERED:

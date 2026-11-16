@@ -3446,3 +3446,103 @@ def test_the_log_names_the_menus_that_were_open():
     finally:
         log.removeHandler(keeper)
     assert [line for line in lines if "menus were open" in line] == ["GAME says these menus were open: BarterMenu 34 s, Console 0.8 s"]
+
+
+def test_a_state_built_in_one_go_unpacks_to_the_state_it_always_was():
+    from src.companion import game_state
+    from src.companion.fake_game import HORSE_REF_ID, PLAYER_HORSE_REF_ID, build_state, pack_quick_state
+    from src.companion.game_state import KEY_QUICK_NUMBERS, KEY_QUICK_TEXTS, expand_quick_state, read_game_state
+
+    variants = [
+        build_state(),
+        build_state(has_heard_lines=True, has_traps=True, has_events=True, report="You picked up Iron Dagger.", is_waiting=True),
+        build_state(horse_ref_id=HORSE_REF_ID, is_riding=True, is_ride_locked=True, is_player_riding=True, player_horse_ref_id=PLAYER_HORSE_REF_ID,
+                    called_horse_ref_id=PLAYER_HORSE_REF_ID, horse_names={HORSE_REF_ID: "Klumpatsch"}),
+        build_state(inventory=consts.INVENTORY_BOTH, has_stats=True, find="Warmaiden", is_sitting=True, expression="happy", is_around_companion=True,
+                    target_ref_id="000F6845", lead_state=1, is_sneaking=True),
+    ]
+    for raw in variants:
+        packed = pack_quick_state(raw)
+        # What goes along with every state is in the two lists, and only there
+        assert KEY_QUICK_NUMBERS in packed and KEY_QUICK_TEXTS in packed
+        for key in (game_state.KEY_LOCATION, game_state.KEY_PLAYER_VALUES, game_state.KEY_WORLD_VALUES, game_state.KEY_COMPANION_VALUES,
+                    game_state.KEY_QUESTS, game_state.KEY_NEARBY_VALUES, game_state.KEY_NEARBY_NAMES, game_state.KEY_HANDS, game_state.KEY_TIMES):
+            assert key in raw and key not in packed
+        unpacked = read_game_state(packed)
+        assert unpacked.pop("quick") is True
+        assert unpacked == read_game_state(raw)
+    # A state that is not packed stays as it is and carries no mark
+    assert expand_quick_state({"location": "Riften"}) == {"location": "Riften"}
+    assert "quick" not in read_game_state(build_state())
+
+    # A list of numbers that is cut off: what came whole before the cut counts, the rest is left out
+    packed = pack_quick_state(build_state())
+    cut = dict(packed)
+    cut[KEY_QUICK_NUMBERS] = packed[KEY_QUICK_NUMBERS][:24]
+    cut_state = read_game_state(cut)
+    assert cut_state["location"] == "Whiterun, Plains District" and cut_state["player"]["health_percent"] == read_game_state(packed)["player"]["health_percent"]
+    assert "companion" not in cut_state
+    # Whatever arrives, nothing breaks, and the texts still count
+    for broken in ([], [99], [5, 0, 0, 0, 0, 2, 500, 1], [5, 0, 0, 0, 0, 2, -3], ["x"], None, "numbers"):
+        state = read_game_state({KEY_QUICK_NUMBERS: broken, KEY_QUICK_TEXTS: ["location\tWhiterun", "no tab", 7, "\tno key"]})
+        assert state["location"] == "Whiterun" and state["quick"] is True
+    assert read_game_state({KEY_QUICK_NUMBERS: [1], KEY_QUICK_TEXTS: "location\tWhiterun"}) is not None
+    # What the game mod sends as a single entry next to the lists counts as it is
+    assert read_game_state({KEY_QUICK_TEXTS: ["location\tWhiterun"], "location": "Riften"})["location"] == "Riften"
+    # A text keeps the tabs behind its first one: the lines of the quests are split by tabs themselves
+    assert expand_quick_state({KEY_QUICK_TEXTS: ["quests\ta\tb", "quests\tc"]})["quests"] == ["a\tb", "c"]
+
+
+def test_state_asks_with_one_list_and_compare_tells_where_the_two_ways_differ():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, pack_quick_state
+    from src.companion.mcp_route import _list_differences
+
+    assert _list_differences({"a": 1, "quick": True, "build_ms": 3, "b": {"c": [1, 2]}, "e": [1]}, {"a": 1, "build_ms": 9, "b": {"c": [1, 3]}, "d": "x", "e": [1, 2]}) == [
+        "b.c[1]: in one go 2 / the old way 3", 'd: only the old way has it: "x"', "e: in one go [1] / the old way [1, 2]"]
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def state(arguments: dict):
+            return rpc(client, "tools/call", {"name": "STATE", "arguments": arguments})
+
+        received_commands: list[dict] = []
+        # What the game mod tells the old way, and whether its plugin can build a state in one go at all
+        slow_location = ["Whiterun, Plains District"]
+        can_build_quick = [True]
+
+        def game():
+            body: dict = {consts.KEY_STATE: pack_quick_state(build_state())}
+            for _ in range(12):
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                body = {}
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    received_commands.append(sent)
+                    raw = build_state()
+                    if sent[consts.KEY_COMMAND_STATE_OPTIONS][consts.STATE_OPTION_SLOW] or not can_build_quick[0]:
+                        raw[game_state.KEY_LOCATION] = slow_location[0]
+                        body = {consts.KEY_STATE: raw}
+                    else:
+                        body = {consts.KEY_STATE: pack_quick_state(raw)}
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # What the state should carry goes to the game as one list of numbers, and as single entries for older game mods
+        assert "Whiterun" in tool_text(state({"things": True, "max": 7, "find": "Warmaiden"}))
+        options = received_commands[0][consts.KEY_COMMAND_STATE_OPTIONS]
+        assert len(options) == consts.STATE_OPTION_COUNT
+        assert options[:6] == [7, 1, 0, 0, 0, 0] and options[consts.STATE_OPTION_SLOW] == 0
+        # No inventory, a text to find, no filter, no book
+        assert options[17:] == [0, 1, 0, 0]
+        assert received_commands[0][consts.KEY_COMMAND_THINGS] == 1 and received_commands[0][consts.KEY_COMMAND_FIND] == "Warmaiden"
+        # compare: once in one go, once the old way
+        same = state({"compare": True})
+        assert tool_text(same).startswith("STATE compare: in one go it took the script") and tool_text(same).endswith("Both ways tell the same.")
+        assert same.json()["result"]["isError"] is False
+        assert [sent[consts.KEY_COMMAND_STATE_OPTIONS][consts.STATE_OPTION_SLOW] for sent in received_commands[1:3]] == [0, 1]
+        slow_location[0] = "Riften"
+        differing = tool_text(state({"compare": True}))
+        assert "1 differences" in differing and '- location: in one go "Whiterun, Plains District" / the old way "Riften"' in differing
+        # A game mod whose plugin cannot build the state in one go: there is nothing to compare
+        can_build_quick[0] = False
+        old_way = state({"compare": True})
+        assert "built its state the old way" in tool_text(old_way) and old_way.json()["result"]["isError"] is True

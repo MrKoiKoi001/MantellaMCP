@@ -321,6 +321,17 @@ class companion_constants:
     TRADE_LIST_PROTOCOL: int = 14
     # A text of at least this many characters is read as an ID, a shorter one as how many
     TRADE_ID_LENGTH: int = 6
+    # report_state: what the state should carry, as one list of numbers next to the single entries. Every entry the
+    # game mod reads costs it a picture of the game, so game mods from protocol 16 on read this list instead. The
+    # places in it are the WantedOption... of KI_MCP_Gefaehrte_Loop.psc: how many lines, things, around the companion,
+    # stats, visible, space, its meters, degrees, 'from where it faces' and angle, the two halves of the ID of the
+    # book and its page, mute, STATE_OPTION_SLOW, the two halves of the ID of the target, and whether there is an
+    # inventory, a text to find, a filter and a book to read at all
+    KEY_COMMAND_STATE_OPTIONS: str = PREFIX + "state_options"
+    # 1 at this place = build the state the old way, question by question, although the plugin could build it in one
+    # go. The server compares the two ways with it (STATE with 'compare')
+    STATE_OPTION_SLOW: int = 14
+    STATE_OPTION_COUNT: int = 21
     # pick_up with several things in one command. Either 'target' names several ref_ids: then KEY_COMMAND_ITEMS carries
     # VALUES_PER_PICK_UP numbers per thing, the two halves of its ref ID. Or 'detail' starts with PICK_UP_ALL: then
     # KEY_COMMAND_PICK_ALL says within how many meters around the target (or around the companion, without a target)

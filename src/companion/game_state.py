@@ -199,6 +199,22 @@ BOOK_PIECE_FOLLOWS_DIRECTLY: str = "2"
 NAMES_SUFFIX: str = "_names"
 # How long the game mod took in milliseconds: for the whole state, and for the characters nearby alone
 KEY_TIMES: str = "times_ms"
+# From protocol 16 on the plugin of the game mod collects what goes along with every state in one go (GetWholeState in
+# plugin.cpp), and the game mod sends that packed into two lists, because every single entry costs it a picture of
+# the game. KEY_QUICK_NUMBERS: first how many numbers are meant for the game mod itself (they are skipped here), then
+# one block per list of numbers of the state: which one (QUICK_BLOCK_KEYS), how many numbers, the numbers.
+# KEY_QUICK_TEXTS: one line per text: the key of the entry, a tab, the text; the entries in QUICK_TEXT_LISTS are lists
+# and have one line per text. expand_quick_state turns both back into the entries above. What a state is only
+# given when it was asked for (things, inventories ...) the game mod still sends as single entries next to them
+KEY_QUICK_NUMBERS: str = "quick_numbers"
+KEY_QUICK_TEXTS: str = "quick_texts"
+# Set by expand_quick_state: this state was built in one go. The second time in KEY_TIMES is then how long the plugin took
+KEY_BUILT_QUICK: str = "built_quick"
+QUICK_BLOCK_OF_HORSE_CALLED: int = 6
+QUICK_BLOCK_KEYS: dict[int, str] = {1: KEY_TIMES, 2: "player", 3: "world", 4: "companion", 5: "gold", QUICK_BLOCK_OF_HORSE_CALLED: "horse_called",
+                                    7: "player_horse", 8: "horse", 9: "nearby"}
+QUICK_TEXT_LISTS: tuple[str, ...] = ("quests", "quest_targets", "places", "traps", "heard", "events", "hands", "nearby_names")
+QUICK_TEXT_SEPARATOR: str = "\t"
 
 PLAYER_VALUE_COUNT: int = 11
 # Older game mods say nothing about sneaking, still older ones nothing about sitting and sleeping, and the oldest
@@ -267,7 +283,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 15
+GAME_PROTOCOL: int = 16
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -366,8 +382,11 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     """
     if not isinstance(raw, dict):
         return None
+    raw = expand_quick_state(raw)
 
     state: dict[str, Any] = {}
+    if raw.get(KEY_BUILT_QUICK) is True:
+        state["quick"] = True
     location = raw.get(KEY_LOCATION)
     if isinstance(location, str):
         state["location"] = location
@@ -1075,6 +1094,43 @@ def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:
             "text": text.strip(),
         })
     return heard
+
+
+def expand_quick_state(raw: dict[str, Any]) -> dict[str, Any]:
+    """Turns a state the game mod sent packed (see KEY_QUICK_NUMBERS) back into the single entries a state always had.
+    A state that is not packed comes back as it is. What cannot be read is left out, as if the game had not sent it"""
+    if KEY_QUICK_NUMBERS not in raw and KEY_QUICK_TEXTS not in raw:
+        return raw
+    expanded: dict[str, Any] = {KEY_BUILT_QUICK: True}
+    numbers = _numbers(raw.get(KEY_QUICK_NUMBERS))
+    if numbers is not None and len(numbers) > 0 and 0 < numbers[0] <= len(numbers):
+        place = numbers[0]
+        while place + 1 < len(numbers):
+            block, count = numbers[place], numbers[place + 1]
+            values = numbers[place + 2:place + 2 + max(count, 0)]
+            if count < 0 or len(values) != count:
+                # Cut off. What came before it is whole
+                break
+            key = QUICK_BLOCK_KEYS.get(block)
+            if key is not None:
+                # The horse that was called is a single number in the state, everything else a list
+                expanded[key] = values[0] if block == QUICK_BLOCK_OF_HORSE_CALLED and count == 1 else values
+            place += 2 + count
+    texts = raw.get(KEY_QUICK_TEXTS)
+    if isinstance(texts, list):
+        for entry in texts:
+            if not isinstance(entry, str) or QUICK_TEXT_SEPARATOR not in entry:
+                continue
+            key, text = entry.split(QUICK_TEXT_SEPARATOR, 1)
+            if key in QUICK_TEXT_LISTS:
+                expanded.setdefault(key, []).append(text)
+            elif key != "":
+                expanded[key] = text
+    # What the game mod sent as a single entry counts as it is
+    for key, value in raw.items():
+        if key not in (KEY_QUICK_NUMBERS, KEY_QUICK_TEXTS):
+            expanded[key] = value
+    return expanded
 
 
 def read_menus(raw_lines: Any) -> list[tuple[str, float]]:

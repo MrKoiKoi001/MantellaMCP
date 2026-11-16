@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.43"
+SERVER_VERSION: str = "0.44"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -37,6 +37,10 @@ TOOL_COMMAND: str = "COMMAND"
 SAY_LANGUAGE_NOTE: str = "Write it in English: the voice cannot pronounce other languages. "
 TOOL_STATE: str = "STATE"
 ARGUMENT_DEBUG: str = "debug"
+ARGUMENT_COMPARE: str = "compare"
+# What differs by itself between a state built in one go and one built the old way: the mark of the first, and how
+# long each took
+COMPARE_SKIPPED_KEYS: tuple[str, ...] = ("quick", "build_ms", "scan_ms")
 ARGUMENT_INVENTORY: str = "inventory"
 ARGUMENT_FILTER: str = "filter"
 ARGUMENT_CORPSE: str = "corpse"
@@ -404,6 +408,7 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_READ: {"type": "string", "description": "The ID of a book or a note (from an inventory, from 'Things' or from 'Events'): also give one page of its text."},
                 ARGUMENT_PAGE: {"type": "integer", "description": "With 'read': which page of the book. Nothing = the first one."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
+                ARGUMENT_COMPARE: {"type": "boolean", "description": "Only for testing the game mod, never while playing: true = fetch the state twice, built in one go by the plugin and built the old way, and list what differs. The player should stand still meanwhile."},
             },
         },
     },
@@ -524,6 +529,9 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
         if find_gesture != "":
             # The server knows the gestures itself, the game is not asked
             return _tool_text(_describe_found_gestures(find_gesture), False)
+        if arguments.get(ARGUMENT_COMPARE) is True:
+            compared, is_compare_error = await _compare_states(queue)
+            return _tool_text(compared, is_compare_error)
         inventory = str(arguments.get(ARGUMENT_INVENTORY, "") or "").strip().lower()
         inventory_filter = str(arguments.get(ARGUMENT_FILTER, "") or "").strip().lower()
         if inventory_filter not in consts.INVENTORY_FILTERS:
@@ -884,6 +892,61 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run, talk=gesture_event, extra=extra)
     is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
     return result, is_error
+
+
+def _list_differences(quick: Any, slow: Any, path: str = "") -> list[str]:
+    """Where two states differ, one line per place: its path, what the state built in one go has and what the other has"""
+    if isinstance(quick, dict) and isinstance(slow, dict):
+        lines: list[str] = []
+        for key in sorted(set(quick) | set(slow), key=str):
+            if path == "" and key in COMPARE_SKIPPED_KEYS:
+                continue
+            where = f"{path}.{key}" if path != "" else str(key)
+            if key not in quick:
+                lines.append(f"{where}: only the old way has it: {shorten(json.dumps(slow[key], ensure_ascii=False))}")
+            elif key not in slow:
+                lines.append(f"{where}: only in one go has it: {shorten(json.dumps(quick[key], ensure_ascii=False))}")
+            else:
+                lines.extend(_list_differences(quick[key], slow[key], where))
+        return lines
+    if isinstance(quick, list) and isinstance(slow, list) and len(quick) == len(slow):
+        lines = []
+        for place, (quick_entry, slow_entry) in enumerate(zip(quick, slow)):
+            lines.extend(_list_differences(quick_entry, slow_entry, f"{path}[{place}]"))
+        return lines
+    if quick != slow:
+        return [f"{path}: in one go {shorten(json.dumps(quick, ensure_ascii=False))} / the old way {shorten(json.dumps(slow, ensure_ascii=False))}"]
+    return []
+
+
+async def _compare_states(queue: CompanionCommandQueue) -> tuple[str, bool]:
+    """STATE with 'compare': asks the game for its state twice, built in one go by the plugin of the game mod and built
+    the old way, question by question, and lists where the two differ. Nothing here can check the plugin, only the
+    game can. Returns the text and whether it is an error. What was heard and what happened is not used up"""
+    quick_result = await queue.get_state(is_for_the_ai=False)
+    quick_state = quick_result.get("state")
+    if not quick_result.get("fresh") or not isinstance(quick_state, dict):
+        return "STATE compare: the game sent no fresh state, so there is nothing to compare. Is it running, with no menu open?", True
+    if quick_state.get("quick") is not True:
+        return ("STATE compare: the game mod built its state the old way. Its plugin (KI_MCP_Gefaehrte.dll) is older than interface version 24, "
+                "or the game mod switched the way in one go off after it failed (until the game is loaded again). Nothing to compare."), True
+    slow_result = await queue.get_state(is_for_the_ai=False, slow=True)
+    slow_state = slow_result.get("state")
+    if not slow_result.get("fresh") or not isinstance(slow_state, dict):
+        return "STATE compare: the game sent the state built in one go, but then no second one built the old way. Try again.", True
+    if slow_state.get("quick") is True:
+        return "STATE compare: the game mod was asked for the old way and built the state in one go again. It is older than this server.", True
+    differences = _list_differences(quick_state, slow_state)
+    head = (f"STATE compare: in one go it took the script {quick_state.get('build_ms', '?')} ms (of that the plugin {quick_state.get('scan_ms', '?')} ms), "
+            f"the old way {slow_state.get('build_ms', '?')} ms.")
+    if len(differences) == 0:
+        log.info("%s Both ways tell the same.", head)
+        return head + " Both ways tell the same.", False
+    log.info("%s %d differences:", head, len(differences))
+    for line in differences:
+        log.info("STATE compare: %s", line)
+    return (head + f" {len(differences)} differences (what moved in between differs by itself: positions, distances, the time):\n"
+            + "\n".join("- " + line for line in differences)), False
 
 
 def _read_pick_up_all(detail: str) -> tuple[str, int, str] | None:

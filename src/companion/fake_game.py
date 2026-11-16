@@ -61,6 +61,11 @@ THINGS: list[list[str]] = [
 ]
 SEAT_REF_ID: str = "0005A3F1"
 ITEM_REF_ID: str = "0005A410"
+# The state in one go (see pack_quick_state): how many numbers come before the first block, and the texts that are
+# no lists
+QUICK_HEAD_COUNT: int = 5
+QUICK_SINGLE_TEXTS: tuple[str, ...] = (game_state.KEY_LOCATION, game_state.KEY_PLAYER_NAME, game_state.KEY_COMPANION_NAME, game_state.KEY_COMPANION_VOICE,
+                                       game_state.KEY_COMPANION_PLACE, game_state.KEY_PLAYER_HORSE_NAME, game_state.KEY_HORSE_NAME)
 # Of which kind the loose things are, for pick_up with 'all' and a kind (see consts.PICK_UP_KINDS)
 LOOSE_KINDS: dict[str, str] = {ITEM_REF_ID: "weapons"}
 # The traps close to the player as the plugin writes them: kind (always 3), ref ID, distance and angle from the player,
@@ -585,6 +590,31 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     return True, f"Fake game did '{action}'.", target_ref_id
 
 
+def pack_quick_state(raw: dict) -> dict:
+    """Packs a state the way the game mod sends it when its plugin has built it in one go (see
+    game_state.KEY_QUICK_NUMBERS): the lists of numbers as blocks in one list, the texts as lines in another.
+    What is only given when it was asked for stays a single entry"""
+    packed = dict(raw)
+    # The first numbers are for the game mod itself: how many of them there are, and four flags
+    numbers: list[int] = [QUICK_HEAD_COUNT] + [0] * (QUICK_HEAD_COUNT - 1)
+    for block, key in game_state.QUICK_BLOCK_KEYS.items():
+        if key not in packed:
+            continue
+        value = packed.pop(key)
+        values = [value] if isinstance(value, int) else list(value)
+        numbers += [block, len(values)] + values
+    texts: list[str] = []
+    for key in QUICK_SINGLE_TEXTS + game_state.QUICK_TEXT_LISTS:
+        if key not in packed:
+            continue
+        value = packed.pop(key)
+        for text in [value] if isinstance(value, str) else value:
+            texts.append(key + game_state.QUICK_TEXT_SEPARATOR + text)
+    packed[game_state.KEY_QUICK_NUMBERS] = numbers
+    packed[game_state.KEY_QUICK_TEXTS] = texts
+    return packed
+
+
 def pick_up_several(numbers: list[int]) -> tuple[bool, str]:
     """Answers pick_up with several things like the game mod does: it sets off, and what is nothing to pick up is left out
 
@@ -740,6 +770,8 @@ def main():
     wanted_inventory = ""
     wanted_corpse = ""
     are_things_wanted = False
+    # Like the game mod with its newest plugin: the state is built in one go, unless the server asks for the old way
+    is_slow_wanted = False
     print(f"Fake game polling {url} (Ctrl+C to stop)")
     while True:
         poll_id += 1
@@ -751,15 +783,19 @@ def main():
                               consts.KEY_BUSY: int(walk_target_ref_id != ""), consts.KEY_FAILS: 0}
         if is_state_wanted:
             # Only the first state has something that was said
-            request_body[consts.KEY_STATE] = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
-                                                         is_around_companion, target_ref_id != "", look_target_ref_id,
-                                                         leader_ref_id, expression, are_stats_wanted, is_visible_wanted,
-                                                         has_traps=True, has_space=is_space_wanted, find=wanted_find,
-                                                         space_info=space_info, horse_ref_id=horse_ref_id, is_riding=is_riding,
-                                                         is_ride_locked=is_ride_locked, player_horse_ref_id=PLAYER_HORSE_REF_ID,
-                                                         called_horse_ref_id=called_horse_ref_id, horse_names=horse_names,
-                                                         is_sneaking=sneak_mode == SNEAK_NUMBERS[consts.SNEAK_ON], sneak_mode=sneak_mode,
-                                                         has_events=poll_id == 1, read=wanted_read, read_page=wanted_read_page)
+            built_state = build_state(is_waiting, target_ref_id, is_fleeing, walk_target_ref_id, poll_id == 1, wanted_inventory, wanted_corpse, "", is_sitting, are_things_wanted,
+                                      is_around_companion, target_ref_id != "", look_target_ref_id,
+                                      leader_ref_id, expression, are_stats_wanted, is_visible_wanted,
+                                      has_traps=True, has_space=is_space_wanted, find=wanted_find,
+                                      space_info=space_info, horse_ref_id=horse_ref_id, is_riding=is_riding,
+                                      is_ride_locked=is_ride_locked, player_horse_ref_id=PLAYER_HORSE_REF_ID,
+                                      called_horse_ref_id=called_horse_ref_id, horse_names=horse_names,
+                                      is_sneaking=sneak_mode == SNEAK_NUMBERS[consts.SNEAK_ON], sneak_mode=sneak_mode,
+                                      has_events=poll_id == 1, read=wanted_read, read_page=wanted_read_page)
+            # Rays and 'only what can be seen' are built the old way by the game mod as well
+            is_built_slow = is_slow_wanted or is_space_wanted or is_visible_wanted
+            request_body[consts.KEY_STATE] = built_state if is_built_slow else pack_quick_state(built_state)
+            is_slow_wanted = False
             wanted_find = ""
             wanted_read = ""
             are_things_wanted = False
@@ -791,6 +827,8 @@ def main():
             detail = command.get(consts.KEY_COMMAND_DETAIL)
             if action == consts.ACTION_REPORT_STATE:
                 is_state_wanted = True
+                state_options = command.get(consts.KEY_COMMAND_STATE_OPTIONS)
+                is_slow_wanted = isinstance(state_options, list) and len(state_options) > consts.STATE_OPTION_SLOW and bool(state_options[consts.STATE_OPTION_SLOW])
                 wanted_inventory = str(detail or "")
                 wanted_corpse = str(target or "")
                 are_things_wanted = bool(command.get(consts.KEY_COMMAND_THINGS))
