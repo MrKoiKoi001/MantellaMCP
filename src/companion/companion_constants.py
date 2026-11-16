@@ -261,6 +261,9 @@ class companion_constants:
     ACTION_FAVORITE: str = "favorite"
     FAVORITE_ON: str = "on"
     FAVORITE_OFF: str = "off"
+    # The same as favorite with 'detail' off, under a name of its own: in a test the AI did not find the way to
+    # take a mark off again. The server turns it into favorite before anything else looks at the command
+    ACTION_UNFAVORITE: str = "unfavorite"
     ACTION_GIVE: str = "give"
     ACTION_TAKE: str = "take"
     # give and take with several items in one command: a list of numbers, VALUES_PER_HAND_OVER per item: the two
@@ -407,6 +410,7 @@ class companion_constants:
         ACTION_RENAME_HORSE,
         ACTION_SNEAK,
         ACTION_PASSIVE,
+        ACTION_UNFAVORITE,
         ACTION_LEAD,
         ACTION_AUTO_HEAL,
         ACTION_BUY,
@@ -418,7 +422,7 @@ class companion_constants:
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
         ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
-        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL, ACTION_PASSIVE,
+        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL, ACTION_PASSIVE, ACTION_UNFAVORITE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE]

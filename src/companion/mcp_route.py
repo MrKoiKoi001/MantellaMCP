@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.48"
+SERVER_VERSION: str = "0.49"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -187,7 +187,7 @@ TOOLS: list[dict[str, Any]] = [
             "you know its spell from then on and the tome is used up, "
             "unequip = put the item away, "
             "favorite = mark a weapon, a shield or a piece of armor of yours as a favorite ('detail' on, the default) or "
-            "take the mark off (off). The game hands you the strongest thing you carry on its own. Once you have favorites "
+            "take the mark off (off). unfavorite = take the mark off, the same as favorite with 'detail' off. The game hands you the strongest thing you carry on its own. Once you have favorites "
             "you switch back to them by yourself: a favorite weapon instead of another weapon (one for close combat, one "
             "for range if you mark both), a favorite shield, a favorite piece of armor per part of the body. So mark "
             "what you want to fight in, and what you only carry for the player stays baggage. "
@@ -640,6 +640,10 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     action = str(arguments.get("action", "")).strip().lower()
     target = str(arguments.get("target", "") or "").strip()
     detail = str(arguments.get("detail", "") or "").strip()
+    if action == consts.ACTION_UNFAVORITE:
+        # Another name for favorite with 'off'. The game mod only knows favorite
+        action = consts.ACTION_FAVORITE
+        detail = consts.FAVORITE_OFF
     if action not in consts.PLAYER_ACTIONS:
         return {"status": consts.STATUS_FAILED, "message": f"Unknown action '{action}'. Allowed: {', '.join(consts.PLAYER_ACTIONS)}"}, True
     if action == consts.ACTION_PAUSE:
@@ -1261,6 +1265,8 @@ def _check_step(step: Any) -> str:
     action = str(step.get("action", "")).strip().lower()
     if action not in consts.PLAYER_ACTIONS:
         return f"has the unknown action '{action}'"
+    if action == consts.ACTION_UNFAVORITE:
+        action = consts.ACTION_FAVORITE
     is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and str(step.get("detail", "") or "").strip().lower() == consts.HAND_OVER_JUNK
     # pick_up with 'all' collects around the companion if no target is named
     is_collecting = action == consts.ACTION_PICK_UP and _read_pick_up_all(str(step.get("detail", "") or "")) is not None

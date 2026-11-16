@@ -3652,3 +3652,28 @@ def test_passive_holds_the_companion_back_and_the_state_tells_it():
         assert state["companion"]["passive"] is True
         you_line = [line for line in describe_state({"connected": True, "fresh": True, "state": state}).split("\n") if line.startswith("You, ")][0]
         assert ", passive on" in you_line
+
+
+def test_unfavorite_is_favorite_with_off():
+    from src.companion.mcp_route import _check_step
+
+    assert "needs a target" in _check_step({"action": "unfavorite"}) and _check_step({"action": "unfavorite", "target": "00013985"}) == ""
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_STATE: {"location": "Whiterun"}}).json()
+            received_commands.extend(reply[consts.KEY_COMMANDS])
+            results = [{consts.KEY_COMMAND_ID: received_commands[0][consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "Done."}]
+            client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        assert "needs a target" in tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "unfavorite"}}))["message"]
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "unfavorite", "target": "00013985", "detail": "on"}}))
+        assert answer["status"] == consts.STATUS_DONE
+        sent = received_commands[0]
+        # What reaches the game is favorite, with 0 for 'off'
+        assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_TARGET]) == (consts.ACTION_FAVORITE, 0, "00013985")
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "unfavorite" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
