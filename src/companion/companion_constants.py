@@ -301,6 +301,10 @@ class companion_constants:
     SNEAK_ON: str = "on"
     SNEAK_OFF: str = "off"
     SNEAK_CHOICES: list[str] = [SNEAK_AUTO, SNEAK_ON, SNEAK_OFF]
+    # The companion holds back ('detail' on): it follows as always, but starts no fight of its own accord. off = as always
+    ACTION_PASSIVE: str = "passive"
+    PASSIVE_ON: str = "on"
+    PASSIVE_OFF: str = "off"
     # lead: the companion walks ahead of the player to a target, like move_to, and waits whenever the player falls behind
     ACTION_LEAD: str = "lead"
     # auto_heal: whether the companion heals the player and itself without being told, when their health is low.
@@ -402,6 +406,7 @@ class companion_constants:
         ACTION_CALL_HORSE,
         ACTION_RENAME_HORSE,
         ACTION_SNEAK,
+        ACTION_PASSIVE,
         ACTION_LEAD,
         ACTION_AUTO_HEAL,
         ACTION_BUY,
@@ -413,7 +418,7 @@ class companion_constants:
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
         ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
-        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL,
+        ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL, ACTION_PASSIVE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
     ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE]

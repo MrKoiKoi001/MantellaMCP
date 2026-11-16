@@ -3406,6 +3406,10 @@ def test_pick_up_takes_several_things_and_everything_around():
         command({"action": "pick_up", "target": ITEM_REF_ID})
         assert consts.KEY_COMMAND_ITEMS not in received_commands[4] and consts.KEY_COMMAND_PICK_ALL not in received_commands[4]
 
+    # With something to follow ('then') the command is checked before anything starts: 'all' needs no target there either
+    from src.companion.mcp_route import _check_step
+    assert _check_step({"action": "pick_up", "detail": "all 6 potions"}) == ""
+    assert "needs a target" in _check_step({"action": "pick_up"}) and "needs a target" in _check_step({"action": "pick_up", "detail": "6"})
     # Every word the AI may write for a kind leads to a kind the game mod knows
     assert set(consts.PICK_UP_KIND_WORDS.values()) == set(consts.PICK_UP_KINDS) | {consts.PICK_UP_NO_CLUTTER}
     # The simulator answers like the game mod
@@ -3546,3 +3550,94 @@ def test_state_asks_with_one_list_and_compare_tells_where_the_two_ways_differ():
         can_build_quick[0] = False
         old_way = state({"compare": True})
         assert "built its state the old way" in tool_text(old_way) and old_way.json()["result"]["isError"] is True
+
+
+def test_visible_from_the_companion_tells_who_is_close_and_who_is_heard():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, pack_quick_state
+    from src.companion.game_state import read_game_state
+
+    def state_with(senses, plugin_version: int = game_state.PLUGIN_VERSION_WITH_SENSES) -> dict:
+        raw = build_state(is_visible_only=True, is_around_companion=True)
+        raw[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_PLUGIN_VERSION] = plugin_version
+        raw[game_state.KEY_TIMES] = [412, 7]
+        if senses is not None:
+            raw[game_state.KEY_NEARBY_SENSES] = senses
+        return raw
+
+    count = len(build_state()[game_state.KEY_NEARBY_VALUES]) // game_state.VALUES_PER_NEARBY_CHARACTER
+    assert count >= 3
+    senses = [1, 2, 3] + [1] * (count - 3)
+    packed = pack_quick_state(state_with(senses))
+    # The senses travel as a block of their own
+    assert game_state.KEY_NEARBY_SENSES not in packed
+    state = read_game_state(packed)
+    by_ref_id = {character["ref_id"]: character.get("sense") for character in state["nearby"]}
+    values = build_state()[game_state.KEY_NEARBY_VALUES]
+    for place, sense in enumerate(senses):
+        ref_id = f"{values[place * game_state.VALUES_PER_NEARBY_CHARACTER] & 0xFFFFFFFF:08X}"
+        assert by_ref_id[ref_id] == game_state.SENSE_NAMES[sense]
+    # The plugin tells its own time in tenths of a millisecond from this version on, an older one in whole ones
+    assert (state["build_ms"], state["scan_ms"]) == (412, 0.7)
+    assert read_game_state(pack_quick_state(state_with(senses, game_state.PLUGIN_VERSION_WITH_SENSES - 1)))["scan_ms"] == 7
+    assert read_game_state(state_with(senses))["scan_ms"] == 7
+    # A list that does not fit the characters, or none: nobody carries a sense
+    for other in ([1], senses + [1], ["x"] * count, None):
+        assert all("sense" not in character for character in read_game_state(pack_quick_state(state_with(other)))["nearby"])
+    # A number that names no sense is left out for that character alone
+    assert [character.get("sense") for character in read_game_state(state_with([9] + [2] * (count - 1)))["nearby"]].count(None) == 1
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        received_commands: list[dict] = []
+
+        def game():
+            body: dict = {consts.KEY_STATE: pack_quick_state(build_state())}
+            for _ in range(4):
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                body = {}
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    received_commands.append(sent)
+                    body = {consts.KEY_STATE: pack_quick_state(state_with(senses))}
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        text = tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {"around": "you", "visible": True}}))
+        # Around the companion, and only what it notices
+        options = received_commands[0][consts.KEY_COMMAND_STATE_OPTIONS]
+        assert (options[2], options[4]) == (1, 1)
+        assert "'close' = within about 2 meters of you" in text
+        lines = text.split("\n")
+        assert len([line for line in lines if line.endswith(", close")]) == 1
+        assert len([line for line in lines if line.endswith(", heard (not seen)")]) == 1
+
+
+def test_passive_holds_the_companion_back_and_the_state_tells_it():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, pack_quick_state, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "passive needs 'on' or 'off'" in command({"action": "passive"})["message"]
+        assert "passive needs 'on' or 'off'" in command({"action": "passive", "detail": "maybe"})["message"]
+        # What is fine is refused only because no game is there
+        assert command({"action": "passive", "detail": "ON"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "passive" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+    # Holding back leaves waiting commands alone, like sneak does
+    assert consts.ACTION_PASSIVE in consts.ACTIONS_KEEPING_QUEUE
+    assert run_command(consts.ACTION_PASSIVE, "", "", "", consts.PASSIVE_ON)[1].startswith("You hold back now")
+    assert run_command(consts.ACTION_PASSIVE, "", "", "", consts.PASSIVE_OFF)[1] == "You attack enemies of your own accord again."
+
+    # The state tells it with an entry of its own, built the old way or in one go
+    raw = build_state()
+    assert "passive" not in read_game_state(raw)["companion"]
+    raw[game_state.KEY_COMPANION_PASSIVE] = 1
+    for sent in (raw, pack_quick_state(raw)):
+        state = read_game_state(sent)
+        assert state["companion"]["passive"] is True
+        you_line = [line for line in describe_state({"connected": True, "fresh": True, "state": state}).split("\n") if line.startswith("You, ")][0]
+        assert ", passive on" in you_line

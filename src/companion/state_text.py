@@ -11,7 +11,7 @@ from src.companion.companion_constants import companion_constants as consts
 from src.companion.game_state import (LEAD_WAITING, LEAD_WALKING, MERCHANT_IS_CLOSED, MERCHANT_IS_NONE, ITEM_KINDS_BY_GROUP, GAME_PROTOCOL, PLUGIN_VERSION_WITH_SIGHT, VISIBLE_HALF_ANGLE_DEGREES, ITEM_GROUPS, KEY_INVENTORY_CORPSE, KEY_INVENTORY_OWN, KEY_INVENTORY_PLAYER,
                                       MAX_INVENTORY_ITEMS, OTHER_ITEM_GROUP, PLACE_DOOR, PLACE_MARKER,
                                       TARGET_BEHIND_DOOR, TARGET_ELSEWHERE, THING_CONTAINER, THING_FURNITURE, THING_ITEM,
-                                      SPACE_SLOPE, SPACE_WALL)
+                                      SPACE_SLOPE, SPACE_WALL, PLUGIN_VERSION_WITH_SENSES, SENSE_CLOSE, SENSE_HEARD)
 
 DEGREES_PER_DIRECTION: float = 45.0
 # About how far around the player the game has loaded the ground and the walls outdoors. Rays find nothing beyond that
@@ -140,6 +140,10 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.append(f"Only what {viewer} can see: characters in front of {viewer} with no wall in between, "
                      f"doors and places in front {walls_note}, "
                      f"things within {VISIBLE_HALF_ANGLE_DEGREES} degrees left and right (for things walls are not checked).")
+        if is_from_companion and state.get("quick") is True and int(state.get("plugin_version") or 0) >= PLUGIN_VERSION_WITH_SENSES:
+            lines.append("Among the characters are also those you notice without seeing them: 'close' = within about 2 meters of you, "
+                         "wherever they stand, and 'heard (not seen)' = you hear them (the louder they are, the further; walls dampen it). "
+                         "Of someone you only hear, your character knows that something is there and roughly where, not who it is.")
         things = [thing for thing in things if abs(thing.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
         places = [place for place in places if abs(place.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
     elif state_result.get("visible_wanted"):
@@ -637,6 +641,9 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
     # The command sneak took the companion out of sneaking as the player does
     if companion.get("sneak_mode") in (consts.SNEAK_ON, consts.SNEAK_OFF):
         parts.append(f"sneak {companion['sneak_mode']}")
+    # The command passive: the companion starts no fight of its own accord
+    if companion.get("passive"):
+        parts.append("passive on")
     if companion.get("leading") == LEAD_WAITING:
         parts.append("leading the player (waiting for the player to catch up)")
     elif companion.get("leading") == LEAD_WALKING:
@@ -787,6 +794,11 @@ def _describe_nearby_character(character: dict[str, Any], is_from_companion: boo
     line += _describe_position(character, is_from_companion)
     if character.get("hostile"):
         line += ", hostile"
+    # 'visible' from the companion: whom it does not see, but has close by or hears
+    if character.get("sense") == SENSE_CLOSE:
+        line += ", close"
+    elif character.get("sense") == SENSE_HEARD:
+        line += ", heard (not seen)"
     return line
 
 

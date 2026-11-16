@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.44"
+SERVER_VERSION: str = "0.46"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -254,6 +254,10 @@ TOOLS: list[dict[str, Any]] = [
             "creep ahead on your own), off = you walk upright whatever the player does. on and off hold until sneak with "
             "'auto'. STATE shows 'sneaking' for the player and for you. Not in the saddle, and in a fight it only takes "
             "hold afterwards. While you sneak, speak with 'quiet'. "
+            "passive = whether you hold back, in 'detail': on = you follow as always but start no fight of your own accord "
+            "(to pass a wolf by the road, or not to disturb a talk), off = you attack enemies as always. If you or the player "
+            "are attacked you fight back all the same, and attack with a target still works. It holds until passive with "
+            "'off'; STATE shows 'passive on' for you meanwhile. stand_down only ends the fight that is going on. "
             "Commands one after the other: 'then' is a list of up to " + str(MAX_WAITING_STEPS) + " more commands (each with "
             "action, target, detail and so on) that start one by one, each when you are done with the one before: move_to a "
             "bard and then gesture dance, sit and then say, say and then mount. 'after_previous': true puts a single command "
@@ -383,6 +387,9 @@ TOOLS: list[dict[str, Any]] = [
             "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
             "characters in front with no wall in between, living first, then the dead, then the things in front, and only the "
             "doors and places in front with no wall in between. "
+            "From your own view ('around' you) the characters also hold whom you notice without seeing: 'close' = within about "
+            "2 meters of you wherever they stand, 'heard (not seen)' = someone you hear, of whom your character only knows that "
+            "something is there and roughly where. "
             "Use it when the talk is about what someone sees, not for an overview. "
             "With 'stats' you get the level of the player, whether a level-up is waiting, perk points to spend, health, magicka, "
             "stamina, the weight carried and all skills (highest first), and your own level, health, magicka and stamina."
@@ -879,6 +886,12 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
             return {"status": consts.STATUS_FAILED, "message": f"sneak needs one of these in 'detail': {SNEAK_NAMES}. "
                                f"'{consts.SNEAK_ON}' = you sneak whatever the player does, '{consts.SNEAK_OFF}' = you walk upright whatever the player does, "
                                f"'{consts.SNEAK_AUTO}' = you sneak whenever the player sneaks again."}, True
+    if action == consts.ACTION_PASSIVE:
+        target = ""
+        detail = detail.lower()
+        if detail not in (consts.PASSIVE_ON, consts.PASSIVE_OFF):
+            return {"status": consts.STATUS_FAILED, "message": f"passive needs '{consts.PASSIVE_ON}' or '{consts.PASSIVE_OFF}' in 'detail': "
+                               f"'{consts.PASSIVE_ON}' = you start no fight of your own accord, '{consts.PASSIVE_OFF}' = you attack enemies as always."}, True
     if action == consts.ACTION_RENAME_HORSE:
         # One line without the breaks and double blanks a name does not have
         detail = " ".join(detail.split())
@@ -1248,7 +1261,9 @@ def _check_step(step: Any) -> str:
     if action not in consts.PLAYER_ACTIONS:
         return f"has the unknown action '{action}'"
     is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and str(step.get("detail", "") or "").strip().lower() == consts.HAND_OVER_JUNK
-    if action in consts.ACTIONS_REQUIRING_TARGET and str(step.get("target", "") or "").strip() == "" and not is_junk_wanted:
+    # pick_up with 'all' collects around the companion if no target is named
+    is_collecting = action == consts.ACTION_PICK_UP and _read_pick_up_all(str(step.get("detail", "") or "")) is not None
+    if action in consts.ACTIONS_REQUIRING_TARGET and str(step.get("target", "") or "").strip() == "" and not is_junk_wanted and not is_collecting:
         return f"needs a target for '{action}' (ref_id from STATE)"
     if action == consts.ACTION_PAUSE and read_pause_seconds(step) is None:
         return "needs the seconds of the pause in 'detail': a number from 1 to 60"

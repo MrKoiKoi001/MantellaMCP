@@ -34,6 +34,8 @@ KEY_COMPANION_VALUES: str = "companion"
 KEY_COMPANION_PLACE: str = "companion_place"
 # Only if the companion's face has a look because of the command expression: that look as the AI named it
 KEY_COMPANION_EXPRESSION: str = "companion_expression"
+# 1 while the companion holds back because of the command passive. Left out otherwise
+KEY_COMPANION_PASSIVE: str = "companion_passive"
 # Only when the server asked for it. 29 numbers about the player: level, health, magicka and stamina as they are now,
 # magicka and stamina in percent, weight carried, the most that can be carried, perk points not spent yet,
 # experience gathered in this level, experience it takes to reach the next one, then the skills (see PLAYER_SKILLS)
@@ -113,6 +115,17 @@ KEY_NEARBY_LINES: str = "nearby_lines"
 # One text per character: its place in the list above, a colon and its name, eg "0:Bandit".
 # The HTTP plugin of the game drops names it cannot send without a word, so the place cannot be counted
 KEY_NEARBY_NAMES: str = "nearby_names"
+# With 'visible' and the companion as the viewer (plugin of the game mod from PLUGIN_VERSION_WITH_SENSES on): by which
+# sense the companion notices each character of KEY_NEARBY_VALUES, one number per character (see SENSE_NAMES). The
+# list then holds whom it sees, whom it has within about two meters all around, and whom it hears without seeing
+KEY_NEARBY_SENSES: str = "nearby_senses"
+SENSE_SEEN: str = "seen"
+SENSE_CLOSE: str = "close"
+SENSE_HEARD: str = "heard"
+SENSE_NAMES: dict[int, str] = {1: SENSE_SEEN, 2: SENSE_CLOSE, 3: SENSE_HEARD}
+PLUGIN_VERSION_WITH_SENSES: int = 25
+# From the same version on the plugin tells how long it took for a state in one go in tenths of a millisecond
+QUICK_TIME_STEPS_PER_MILLISECOND: int = 10
 # Gold of the player and of the companion (0 without a companion)
 KEY_GOLD: str = "gold"
 # What the companion holds: two texts, "R:" and "L:" followed by the name of what is in that hand (nothing = empty hand)
@@ -212,7 +225,7 @@ KEY_QUICK_TEXTS: str = "quick_texts"
 KEY_BUILT_QUICK: str = "built_quick"
 QUICK_BLOCK_OF_HORSE_CALLED: int = 6
 QUICK_BLOCK_KEYS: dict[int, str] = {1: KEY_TIMES, 2: "player", 3: "world", 4: "companion", 5: "gold", QUICK_BLOCK_OF_HORSE_CALLED: "horse_called",
-                                    7: "player_horse", 8: "horse", 9: "nearby"}
+                                    7: "player_horse", 8: "horse", 9: "nearby", 10: "nearby_senses"}
 QUICK_TEXT_LISTS: tuple[str, ...] = ("quests", "quest_targets", "places", "traps", "heard", "events", "hands", "nearby_names")
 QUICK_TEXT_SEPARATOR: str = "\t"
 
@@ -283,7 +296,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 16
+GAME_PROTOCOL: int = 17
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -534,6 +547,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     times = _numbers(raw.get(KEY_TIMES))
     if times is not None and len(times) == TIME_VALUE_COUNT:
         state["build_ms"], state["scan_ms"] = times
+        if state.get("quick") is True and int(state.get("plugin_version") or 0) >= PLUGIN_VERSION_WITH_SENSES:
+            # The second time is the plugin's own, in finer steps
+            state["scan_ms"] = times[1] / QUICK_TIME_STEPS_PER_MILLISECOND
     return state
 
 
@@ -589,6 +605,8 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
         companion["auto_heal_percent"] = values[COMPANION_PLACE_OF_AUTO_HEAL]
         if values[COMPANION_PLACE_OF_LEADING] in LEAD_STATES:
             companion["leading"] = LEAD_STATES[values[COMPANION_PLACE_OF_LEADING]]
+    if raw.get(KEY_COMPANION_PASSIVE) == 1:
+        companion["passive"] = True
     for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() != "":
@@ -1268,6 +1286,10 @@ def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
     if values is None or len(values) % VALUES_PER_NEARBY_CHARACTER != 0:
         return []
     names = _names_by_place(raw.get(KEY_NEARBY_NAMES))
+    # A list of senses that does not fit the characters is left out
+    senses = _numbers(raw.get(KEY_NEARBY_SENSES))
+    if senses is not None and len(senses) != len(values) // VALUES_PER_NEARBY_CHARACTER:
+        senses = None
 
     nearby: list[dict[str, Any]] = []
     for place in range(len(values) // VALUES_PER_NEARBY_CHARACTER):
@@ -1285,6 +1307,8 @@ def _read_nearby(raw: dict[str, Any]) -> list[dict[str, Any]]:
         # carries, plus 1 (0 = it does not tell)
         if dead != 0 and hostile > 0:
             character["item_count"] = hostile - 1
+        if senses is not None and senses[place] in SENSE_NAMES:
+            character["sense"] = SENSE_NAMES[senses[place]]
         nearby.append(character)
     # The living first and among them the hostile ones, then the dead, each nearest first
     nearby.sort(key=lambda character: (character["dead"], not character["hostile"], character["distance_meters"]))

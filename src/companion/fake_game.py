@@ -575,6 +575,11 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if target != MERCHANT_REF_ID:
             return False, f"{name_of(target) or target} is no merchant.", target_ref_id
         return True, f"Fake game did '{action}' with the item {item_id} at {name_of(target)}.", target_ref_id
+    if action == consts.ACTION_PASSIVE:
+        if detail == consts.PASSIVE_OFF:
+            return True, "You attack enemies of your own accord again.", target_ref_id
+        return True, ("You hold back now: you follow as always, but start no fight of your own accord. If you or the player are attacked, "
+                      "you fight back, and 'attack' with a target still works. This holds until passive with 'off'."), target_ref_id
     if action == consts.ACTION_SNEAK:
         if detail == consts.SNEAK_ON:
             return True, "You sneak now, whatever the player does, until sneak with 'off' or 'auto'. Speak with 'quiet' while you sneak.", target_ref_id
