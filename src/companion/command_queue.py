@@ -10,6 +10,15 @@ from src.companion.server_log import log, shorten
 
 # From this long on describe_silence counts in minutes
 SILENCE_IN_MINUTES_FROM_SECONDS: float = 120.0
+# From this long on describe_menu counts in whole seconds
+MENU_WHOLE_SECONDS: float = 10.0
+
+
+def describe_menu(name: str, open_seconds: float) -> str:
+    """A menu that was open in the game and for how long, for the log: 'BarterMenu 34 s', 'Console 0.8 s'"""
+    if open_seconds < MENU_WHOLE_SECONDS:
+        return f"{name} {open_seconds:.1f} s"
+    return f"{name} {round(open_seconds)} s"
 
 
 def describe_silence(silent_seconds: float) -> str:
@@ -119,7 +128,8 @@ class CompanionCommandQueue:
     # ------------------------------------------------------------------ game side
 
     async def poll(self, state: dict[str, Any] | None, results: list[dict[str, Any]] | None,
-                   busy: Any = None, fails: Any = None, events: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+                   busy: Any = None, fails: Any = None, events: list[dict[str, Any]] | None = None,
+                   menus: list[tuple[str, float]] | None = None) -> list[dict[str, Any]]:
         """Called for every long polling request of the game.
 
         Args:
@@ -128,6 +138,7 @@ class CompanionCommandQueue:
             busy: 1 if the companion is in the middle of something that takes time, 0 if not, None if the game mod does not tell
             fails: How many things the companion started have failed so far, None if the game mod does not tell
             events: The urgent events since the request before (see game_state.read_events), or None
+            menus: The menus that were open since the request before (see game_state.read_menus), or None. Only logged
 
         Returns:
             The commands the game should execute now. Empty if nothing came up within hold_seconds.
@@ -141,6 +152,9 @@ class CompanionCommandQueue:
             elif silent_seconds >= self.SILENCE_LOG_SECONDS:
                 log.info("GAME back after %.1f s of silence. Before that it was handed: %s", silent_seconds, self.__last_handed
                          or "nothing, its request had run out (so it stood still: a menu, its window not in front, a loading screen; or the answer got lost)")
+            if menus:
+                # Newer game mods tell which menus were open in the meantime, so a silence explains itself
+                log.info("GAME says these menus were open: %s", ", ".join(describe_menu(name, seconds) for name, seconds in menus))
             self.__poll_generation += 1
             own_generation = self.__poll_generation
             self.__is_poll_open = True

@@ -3322,3 +3322,127 @@ def test_buy_and_sell_take_several_items_and_sell_junk():
         junk = command({"action": "sell", "target": MERCHANT_REF_ID, "detail": "JUNK"})
         assert junk["status"] == consts.STATUS_DONE
         assert (received_commands[3][consts.KEY_COMMAND_ITEM_LOW], received_commands[3][consts.KEY_COMMAND_COUNT]) == (0x3985, consts.COUNT_ALL)
+
+
+def test_whom_the_companion_speaks_to_gets_a_look_that_fits_how_it_speaks():
+    # Every look for the listener belongs to a manner of speaking and is a look the game has
+    assert set(consts.LISTENER_FACES) <= set(consts.MANNERS)
+    assert set(consts.LISTENER_FACES.values()) <= set(consts.EXPRESSIONS)
+    assert consts.EXPRESSIONS[consts.LISTENER_FACES["angry"]] == 12 and consts.EXPRESSIONS[consts.LISTENER_FACES["joking"]] == 10
+    # Without a voice the server cannot speak, but it does not break over a target and a manner either
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Hello.", "target": "000198AC", "manner": "angry"}}))
+        assert answer["status"] == consts.STATUS_FAILED and "voice" in answer["message"]
+
+
+def test_pick_up_takes_several_things_and_everything_around():
+    from src.companion import game_state
+    from src.companion.fake_game import ITEM_REF_ID, build_state, collect_around, pick_up_several
+    from src.companion.ref_ids import parse_ref_id, split_form_id
+
+    other_ref_id = "0005A411"
+
+    def halves(ref_id: str) -> list[int]:
+        return list(split_form_id(parse_ref_id(ref_id)))
+
+    with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        received_commands: list[dict] = []
+        old_state = build_state()
+        old_state[game_state.KEY_WORLD_VALUES][game_state.WORLD_PLACE_OF_PROTOCOL] = consts.PICK_UP_LIST_PROTOCOL - 1
+        states: list[dict] = [old_state]
+
+        def game():
+            results: list[dict] = []
+            for _ in range(10):
+                body = {consts.KEY_RESULTS: results, consts.KEY_BUSY: 0, consts.KEY_FAILS: 0}
+                if len(states) > 0:
+                    body[consts.KEY_STATE] = states.pop(0)
+                reply = client.post(consts.ROUTE_GAME, json=body).json()
+                results = []
+                for sent in reply.get(consts.KEY_COMMANDS, []):
+                    if sent[consts.KEY_COMMAND_ACTION] == consts.ACTION_REPORT_STATE:
+                        states.append(build_state())
+                    else:
+                        received_commands.append(sent)
+                        results.append({consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True,
+                                        consts.KEY_RESULT_MESSAGE: "You set off."})
+
+        threading.Thread(target=game, daemon=True).start()
+        time.sleep(0.3)
+        # A game mod from before this would only walk to the first thing, so the server does not send it the list
+        too_old = command({"action": "pick_up", "target": f"{ITEM_REF_ID},{other_ref_id}"})
+        assert too_old["status"] == consts.STATUS_FAILED and "newer game mod" in too_old["message"]
+        assert "newer game mod" in command({"action": "pick_up", "detail": "all"})["message"]
+        # Any state of a game mod that is new enough lifts that
+        tool_text(rpc(client, "tools/call", {"name": "STATE", "arguments": {}}))
+        # What the server turns down itself never reaches the game
+        assert "'plate' is not a ref_id" in command({"action": "pick_up", "target": f"{ITEM_REF_ID}, plate"})["message"]
+        assert "at most 10" in command({"action": "pick_up", "detail": "all 50"})["message"]
+        assert "only one kind" in command({"action": "pick_up", "detail": "all 2 shiny"})["message"]
+        assert "You named 2" in command({"action": "pick_up", "target": f"{ITEM_REF_ID},{other_ref_id}", "detail": "all"})["message"]
+        assert "needs a target" in command({"action": "pick_up"})["message"]
+        assert not received_commands
+        # Several things: their ref IDs in two halves each, in the order they were named, each one once
+        several = command({"action": "pick_up", "target": f"{ITEM_REF_ID}, {other_ref_id.lower()} {ITEM_REF_ID}"})
+        assert several == {"status": consts.STATUS_DONE, "message": "You set off."}
+        assert received_commands[0][consts.KEY_COMMAND_ITEMS] == halves(ITEM_REF_ID) + halves(other_ref_id)
+        assert (received_commands[0][consts.KEY_COMMAND_TARGET], received_commands[0][consts.KEY_COMMAND_DETAIL]) == (ITEM_REF_ID, f"{ITEM_REF_ID},{other_ref_id}")
+        assert consts.KEY_COMMAND_PICK_ALL not in received_commands[0]
+        # Everything around: the meters (2 if none are named) and the kind as the game mod knows it. No target = around the companion
+        command({"action": "pick_up", "detail": "ALL"})
+        sent = received_commands[1]
+        assert (sent[consts.KEY_COMMAND_PICK_ALL], sent[consts.KEY_COMMAND_PICK_FILTER], sent[consts.KEY_COMMAND_TARGET]) == (consts.PICK_UP_USUAL_METERS, "", "")
+        assert consts.KEY_COMMAND_ITEMS not in sent
+        command({"action": "pick_up", "detail": "all 4m Potions", "target": ITEM_REF_ID})
+        sent = received_commands[2]
+        assert (sent[consts.KEY_COMMAND_PICK_ALL], sent[consts.KEY_COMMAND_PICK_FILTER], sent[consts.KEY_COMMAND_TARGET]) == (4, "potions", ITEM_REF_ID)
+        assert sent[consts.KEY_COMMAND_DETAIL] == "all 4 potions"
+        command({"action": "pick_up", "detail": "all 3 no clutter"})
+        assert (received_commands[3][consts.KEY_COMMAND_PICK_ALL], received_commands[3][consts.KEY_COMMAND_PICK_FILTER]) == (3, consts.PICK_UP_NO_CLUTTER)
+        # One thing goes the way it always went
+        command({"action": "pick_up", "target": ITEM_REF_ID})
+        assert consts.KEY_COMMAND_ITEMS not in received_commands[4] and consts.KEY_COMMAND_PICK_ALL not in received_commands[4]
+
+    # Every word the AI may write for a kind leads to a kind the game mod knows
+    assert set(consts.PICK_UP_KIND_WORDS.values()) == set(consts.PICK_UP_KINDS) | {consts.PICK_UP_NO_CLUTTER}
+    # The simulator answers like the game mod
+    is_ok, message = pick_up_several(halves(ITEM_REF_ID) + halves("0000BEEF"))
+    assert is_ok and message.startswith("You walk to Iron Dagger to pick it up.") and message.endswith(" 1 of your list you leave out.")
+    assert pick_up_several(halves("0000BEEF"))[0] is False
+    assert collect_around(2, "weapons")[0] is True and collect_around(2, consts.PICK_UP_NO_CLUTTER)[0] is True
+    assert collect_around(2, "potions") == (False, "You took nothing: there is nothing loose of the kind 'potions' within 2 meters around you that is free to take.")
+    assert collect_around(1, "")[0] is False
+
+
+def test_the_log_names_the_menus_that_were_open():
+    import logging
+
+    from src.companion.command_queue import describe_menu
+    from src.companion.game_state import read_menus
+    from src.companion.server_log import log
+
+    # As the plugin of the game mod writes them: the name, a tab and the milliseconds. What is not readable is left out
+    assert read_menus(["BarterMenu\t34200", "Console\t800", "broken", "NoTime\tsoon", 7]) == [("BarterMenu", 34.2), ("Console", 0.8)]
+    assert read_menus(None) == [] and read_menus("BarterMenu\t1") == []
+    assert describe_menu("BarterMenu", 34.2) == "BarterMenu 34 s" and describe_menu("Console", 0.8) == "Console 0.8 s"
+
+    lines: list[str] = []
+
+    class Keeper(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(record.getMessage())
+
+    keeper = Keeper()
+    log.addHandler(keeper)
+    try:
+        with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+            reply = client.post(consts.ROUTE_GAME, json={consts.KEY_MENUS: ["BarterMenu\t34200", "Console\t800"]}).json()
+            assert reply[consts.KEY_REPLY_TYPE] == consts.REPLY_TYPE_IDLE
+            # A request without menus, or from an older game mod, leaves no such line
+            client.post(consts.ROUTE_GAME, json={})
+    finally:
+        log.removeHandler(keeper)
+    assert [line for line in lines if "menus were open" in line] == ["GAME says these menus were open: BarterMenu 34 s, Console 0.8 s"]

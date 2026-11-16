@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
-from src.companion.game_state import read_events, read_game_state
+from src.companion.game_state import read_events, read_game_state, read_menus
 
 # Headers that Cloudflare (and other reverse proxies) add to every request they forward.
 # The game always calls from this machine directly, so a request carrying one of these came from outside.
@@ -38,7 +38,7 @@ def add_game_route(app: FastAPI, queue: CompanionCommandQueue):
 
         commands = await queue.poll(read_game_state(body.get(consts.KEY_STATE)), body.get(consts.KEY_RESULTS),
                                     body.get(consts.KEY_BUSY), body.get(consts.KEY_FAILS),
-                                    read_events(body.get(consts.KEY_EVENTS)))
+                                    read_events(body.get(consts.KEY_EVENTS)), read_menus(body.get(consts.KEY_MENUS)))
 
         reply: dict[str, Any] = {consts.KEY_MANTELLA_REPLY_TYPE: consts.MANTELLA_REPLY_TYPE_IGNORED}
         poll_id = body.get(consts.KEY_POLL_ID)

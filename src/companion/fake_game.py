@@ -61,6 +61,8 @@ THINGS: list[list[str]] = [
 ]
 SEAT_REF_ID: str = "0005A3F1"
 ITEM_REF_ID: str = "0005A410"
+# Of which kind the loose things are, for pick_up with 'all' and a kind (see consts.PICK_UP_KINDS)
+LOOSE_KINDS: dict[str, str] = {ITEM_REF_ID: "weapons"}
 # The traps close to the player as the plugin writes them: kind (always 3), ref ID, distance and angle from the player,
 # 0, and the folder the game keeps the model of the trap in
 TRAPS: list[list[str]] = [
@@ -583,6 +585,42 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     return True, f"Fake game did '{action}'.", target_ref_id
 
 
+def pick_up_several(numbers: list[int]) -> tuple[bool, str]:
+    """Answers pick_up with several things like the game mod does: it sets off, and what is nothing to pick up is left out
+
+    Args:
+        numbers: consts.VALUES_PER_PICK_UP numbers per thing: the two halves of its ref ID
+    """
+    names: list[str] = []
+    refused_count = 0
+    for place in range(len(numbers) // consts.VALUES_PER_PICK_UP):
+        high, low = numbers[place * consts.VALUES_PER_PICK_UP:(place + 1) * consts.VALUES_PER_PICK_UP]
+        wanted_id = f"{(high << 16) | low:08X}"
+        found = [name for kind, ref_id, distance, angle, flag, name in THINGS if ref_id == wanted_id and kind == "2"]
+        if len(found) == 0:
+            refused_count += 1
+        else:
+            names.append(found[0])
+    if len(names) == 0:
+        return False, "You took nothing. Number 1 of your list is no thing the game has here. Take the ref_ids from 'Things' in STATE."
+    note = f" {refused_count} of your list you leave out." if refused_count > 0 else ""
+    if len(names) == 1:
+        return True, f"You walk to {names[0]} to pick it up. Your next STATE tells you whether you got it." + note
+    return True, f"You set off to pick up {len(names)} things, the nearest first: {names[0]}. Your next STATE tells you what you got." + note
+
+
+def collect_around(meters: int, kind: str) -> tuple[bool, str]:
+    """Answers pick_up with 'all' like the game mod does: everything loose within that many meters, of that kind"""
+    names = [name for thing_kind, ref_id, distance, angle, flag, name in THINGS
+             if thing_kind == "2" and int(distance) <= meters and kind in ("", consts.PICK_UP_NO_CLUTTER, LOOSE_KINDS.get(ref_id, ""))]
+    kind_text = "" if kind == "" else (" that is no clutter" if kind == consts.PICK_UP_NO_CLUTTER else f" of the kind '{kind}'")
+    if len(names) == 0:
+        return False, f"You took nothing: there is nothing loose{kind_text} within {meters} meters around you that is free to take."
+    if len(names) == 1:
+        return True, f"You walk to {names[0]} to pick it up. Your next STATE tells you whether you got it."
+    return True, f"You set off to pick up {len(names)} things, the nearest first: {names[0]}. Your next STATE tells you what you got."
+
+
 def hand_over(action: str, numbers: list[int]) -> tuple[bool, str]:
     """Answers give and take with several items like the game mod does: what changed hands and what did not
 
@@ -779,7 +817,12 @@ def main():
             item_id = f"{item_number:08X}" if item_number != 0 else ""
             is_ok, message, target_ref_id = run_command(str(action), str(target or ""), target_ref_id, item_id, str(detail or ""), horse_ref_id,
                                                         bool(command.get(consts.KEY_COMMAND_QUIET)))
-            if isinstance(command.get(consts.KEY_COMMAND_ITEMS), list):
+            if action == consts.ACTION_PICK_UP and int(command.get(consts.KEY_COMMAND_PICK_ALL) or 0) > 0:
+                # Everything loose around
+                is_ok, message = collect_around(int(command[consts.KEY_COMMAND_PICK_ALL]), str(command.get(consts.KEY_COMMAND_PICK_FILTER) or ""))
+            elif action == consts.ACTION_PICK_UP and isinstance(command.get(consts.KEY_COMMAND_ITEMS), list):
+                is_ok, message = pick_up_several([int(number) for number in command[consts.KEY_COMMAND_ITEMS]])
+            elif isinstance(command.get(consts.KEY_COMMAND_ITEMS), list):
                 # give or take with several items in one go
                 is_ok, message = hand_over(str(action), [int(number) for number in command[consts.KEY_COMMAND_ITEMS]])
             if is_ok:

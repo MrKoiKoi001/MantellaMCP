@@ -22,6 +22,8 @@ class companion_constants:
     # With a request, if there are any, from a game mod whose plugin keeps events: the urgent events since the request
     # before (a fight begins, someone dies), one text per event (see game_state.read_events)
     KEY_EVENTS: str = PREFIX + "events"
+    # Which menus were open in the game since its request before (see game_state.read_menus). Only for the log
+    KEY_MENUS: str = PREFIX + "menus"
     KEY_RESULT_OK: str = PREFIX + "ok"
     KEY_RESULT_MESSAGE: str = PREFIX + "message"
 
@@ -229,6 +231,11 @@ class companion_constants:
     KEY_COMMAND_SAY_NUMBER: str = "companion_say_number"
     # say: the number of the look the face takes on while the companion speaks (FACE_NONE = none)
     KEY_COMMAND_FACE: str = "companion_face"
+    # say to a character: the number of the look the face of that character takes on while the companion speaks to it.
+    # It also keeps its eyes on the companion for that long. Left out = its face stays as it is
+    KEY_COMMAND_LISTENER_FACE: str = "companion_listener_face"
+    # Which look that is, by how the companion speaks (a name from MANNERS -> a name from EXPRESSIONS)
+    LISTENER_FACES: dict[str, str] = {"angry": "surprised", "excited": "happy", "joking": "happy", "sad": "sad", "thinking": "puzzled"}
     # say: how long the sound of the sentence is in milliseconds. The game mod needs it when the sentence starts later,
     # because the companion first turns to or walks over to another character
     KEY_COMMAND_SAY_MS: str = "companion_say_ms"
@@ -314,6 +321,29 @@ class companion_constants:
     TRADE_LIST_PROTOCOL: int = 14
     # A text of at least this many characters is read as an ID, a shorter one as how many
     TRADE_ID_LENGTH: int = 6
+    # pick_up with several things in one command. Either 'target' names several ref_ids: then KEY_COMMAND_ITEMS carries
+    # VALUES_PER_PICK_UP numbers per thing, the two halves of its ref ID. Or 'detail' starts with PICK_UP_ALL: then
+    # KEY_COMMAND_PICK_ALL says within how many meters around the target (or around the companion, without a target)
+    # everything loose is picked up, and KEY_COMMAND_PICK_FILTER which kind ("" = everything). The game mod leaves out
+    # what belongs to someone then. Game mods from PICK_UP_LIST_PROTOCOL on know both
+    KEY_COMMAND_PICK_ALL: str = PREFIX + "pick_all"
+    KEY_COMMAND_PICK_FILTER: str = PREFIX + "pick_filter"
+    VALUES_PER_PICK_UP: int = 2
+    PICK_UP_LIST_PROTOCOL: int = 15
+    PICK_UP_ALL: str = "all"
+    PICK_UP_USUAL_METERS: int = 2
+    PICK_UP_HIGHEST_METERS: int = 10
+    PICK_UP_HIGHEST_ITEMS: int = 30
+    # The kinds the plugin of the game mod knows (GetLooseKind in plugin.cpp), and everything but clutter
+    PICK_UP_KINDS: list[str] = ["potions", "food", "ingredients", "weapons", "armor", "ammo", "books", "scrolls", "keys", "gold", "misc"]
+    PICK_UP_NO_CLUTTER: str = "no_clutter"
+    # What the AI may write for them
+    PICK_UP_KIND_WORDS: dict[str, str] = {
+        "potion": "potions", "food": "food", "ingredient": "ingredients", "weapon": "weapons", "armor": "armor", "armour": "armor",
+        "ammo": "ammo", "ammunition": "ammo", "arrows": "ammo", "book": "books", "scroll": "scrolls", "key": "keys", "gold": "gold",
+        "coins": "gold", "misc": "misc", "other": "misc", "no clutter": PICK_UP_NO_CLUTTER, "without clutter": PICK_UP_NO_CLUTTER,
+        "noclutter": PICK_UP_NO_CLUTTER,
+    }
     HORSE_NAME_MAX_LENGTH: int = 40
     # call_horse: whom the horse runs to, if not to its owner
     CALL_TO_PLAYER: str = "player"

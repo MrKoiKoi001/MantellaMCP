@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.41"
+SERVER_VERSION: str = "0.43"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -134,7 +134,13 @@ TOOLS: list[dict[str, Any]] = [
             "Containers in a house or a shop belong to someone, so empty those only when the player wants it. "
             "pick_up = walk to the target, an item that lies around (from 'Things' in STATE, also an arrow that was shot), "
             "and take it. Your next STATE tells you whether you got it. Afterwards you follow or wait as before. "
-            "What lies in a house or a shop belongs to someone, so take that only when the player wants it. "
+            "Several things in one go: put their ref_ids into 'target' with commas between them. You walk to the nearest, "
+            "take everything of your list that lies within reach there with one bend, and go on to the rest. "
+            "Or 'all' in 'detail' = everything loose around you, or around the one thing in 'target': 'all' (within "
+            f"{consts.PICK_UP_USUAL_METERS} meters), 'all 4' (within 4 meters, at most {consts.PICK_UP_HIGHEST_METERS}), "
+            f"'all 3 potions' (only that kind: {', '.join(consts.PICK_UP_KINDS)}), 'all 3 no clutter' (everything but plates, "
+            "tankards and the like). 'all' leaves out what belongs to someone. "
+            "What lies in a house or a shop belongs to someone, so name that by its ref_id only when the player wants it. "
             "sit = walk to the piece of furniture that is the target and sit down on it (no target = the seat nearest to you). "
             "That takes a few seconds, your next STATE says 'sitting' once you sit. "
             "You stay seated until 'follow' or another command that makes you move. "
@@ -161,6 +167,8 @@ TOOLS: list[dict[str, Any]] = [
             "To another character you stop, walk over first if they are more than about 5 meters away, turn to them and "
             "then speak; afterwards you follow the player again if you did before. No wait or face is needed for that. "
             "manner = how you speak, it moves your hands and face to match for this sentence: " + MANNER_NAMES + ". "
+            "A character you speak to (not the player) looks at you while you speak, and its face answers how you speak: "
+            "startled when you are angry, glad when you joke or are excited, sad or puzzled with you. "
             "Nothing = neutral, with hands that vary on their own. A look you set with expression stays on your face. "
             "While you walk or fight you keep moving and only your lips, head and face move. "
             "sheathe = put your weapon away and keep it away even when the player draws one (otherwise you draw whenever "
@@ -254,8 +262,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
-                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, release_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take); for give and take also several IDs with commas between them. Required for these actions, except sit and look_at."},
-                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, auto, on or off for sneak, the seconds for pause."},
+                "target": {"type": "string", "description": "ref_id of the target from STATE: a character (attack, move_to, follow, loot, look_at, face), a container (loot, move_to), a seat (sit, move_to), an item that lies around (pick_up), a horse (claim_horse, release_horse, mount, call_horse, rename_horse), a door (enter, move_to, look_at), a place or a quest target (move_to, look_at, face). For say: whom you speak to (a character; nothing = the player). Or the ID of an item from an inventory (equip, unequip, give, take); for give and take also several IDs with commas between them, for pick_up several ref_ids. Required for these actions, except sit and look_at, and pick_up with 'all'."},
+                "detail": {"type": "string", "description": "Extra information for the action: how many for give and take, the ID of the item for loot (nothing or 'all' = everything), 'all' with the meters and maybe a kind for pick_up, the name of the gesture or 'stop' for gesture, the look or 'none' for expression, the direction (back, left, right) for make_room, the direction and the meters for move, how far to stop in front of the target for move_to, the point of the compass for face, the text to speak for say, the spell name for cast_spell, 'on' or 'off' for ride_lock, the new name for rename_horse, auto, on or off for sneak, the seconds for pause."},
                 "loud": {"type": "boolean", "description": "Only for say: true = call it out with a raised voice instead of speaking normally."},
                 "quiet": {"type": "boolean", "description": "Only for say: true = say it in a low voice instead of speaking normally, eg while you sneak. Not together with 'loud'."},
                 "run": {"type": "boolean", "description": "Only for move_to, move, enter and follow: true = run instead of walk."},
@@ -622,6 +630,11 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         return {"status": consts.STATUS_FAILED, "message": "pause only waits between commands that follow each other (see 'then' and 'after_previous')."}, True
     if action in consts.TRADE_ACTIONS:
         return await _run_trade(action, target, detail, queue)
+    if action == consts.ACTION_PICK_UP:
+        # Several things, or everything around. A single thing goes the usual way further down
+        picked_up = await _run_pick_up(target, detail, queue)
+        if picked_up is not None:
+            return picked_up
     # give with 'junk' names no item. take with it is told further down that only give knows it
     is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and detail.lower() == consts.HAND_OVER_JUNK
     if action in consts.ACTIONS_REQUIRING_TARGET and target == "" and not is_junk_wanted:
@@ -712,6 +725,9 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
         talk, idle = _split_animation(animations[0]) if len(animations) > 0 else ("", "")
         # How loud it is for the game: enemies can hear what is said normally and, further away, what is called out
         say_extra: dict[str, Any] = {}
+        # Whom the companion speaks to looks at it, with a face that fits how it speaks
+        if target != "" and manner in consts.LISTENER_FACES:
+            say_extra[consts.KEY_COMMAND_LISTENER_FACE] = consts.EXPRESSIONS[consts.LISTENER_FACES[manner]]
         if is_quiet:
             say_extra[consts.KEY_COMMAND_QUIET] = 1
         if is_loud:
@@ -868,6 +884,81 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     result = await queue.send_command(action, target, detail, count=count, item=item, run=is_run, talk=gesture_event, extra=extra)
     is_error = result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
     return result, is_error
+
+
+def _read_pick_up_all(detail: str) -> tuple[str, int, str] | None:
+    """pick_up with 'all' in 'detail': within how many meters and which kind. Returns what is wrong as text for the AI
+    (empty = nothing), the meters and the kind as the game mod knows it ("" = everything). None if 'detail' does not ask for that"""
+    words = detail.lower().replace(",", " ").replace("_", " ").split()
+    if len(words) == 0 or words[0] != consts.PICK_UP_ALL:
+        return None
+    words = words[1:]
+    problem = (f"For pick_up with '{consts.PICK_UP_ALL}' 'detail' is: '{consts.PICK_UP_ALL}' (everything loose within {consts.PICK_UP_USUAL_METERS} meters), "
+               f"'{consts.PICK_UP_ALL} 4' (within 4 meters, at most {consts.PICK_UP_HIGHEST_METERS}), '{consts.PICK_UP_ALL} 3 potions' (only one kind: "
+               f"{', '.join(consts.PICK_UP_KINDS)}) or '{consts.PICK_UP_ALL} 3 no clutter' (everything but plates, tankards and the like).")
+    meters = consts.PICK_UP_USUAL_METERS
+    if len(words) > 0 and words[0].removesuffix("m").isdecimal():
+        meters = int(words[0].removesuffix("m"))
+        words = words[1:]
+        if len(words) > 0 and words[0] in ("m", "meter", "meters"):
+            words = words[1:]
+        if not 1 <= meters <= consts.PICK_UP_HIGHEST_METERS:
+            return problem, 0, ""
+    kind = ""
+    if len(words) > 0:
+        kind_text = " ".join(words)
+        kind = consts.PICK_UP_KIND_WORDS.get(kind_text) or consts.PICK_UP_KIND_WORDS.get(kind_text.removesuffix("s")) or ""
+        if kind == "":
+            return problem, 0, ""
+    return "", meters, kind
+
+
+async def _run_pick_up(target: str, detail: str, queue: CompanionCommandQueue) -> tuple[dict[str, Any], bool] | None:
+    """pick_up with several things in 'target', or with 'all' in 'detail' for everything loose around. Returns what the
+    game answered and whether that is an error, or None for a single thing: that goes the way it always went"""
+    texts = target.replace(",", " ").replace(";", " ").split()
+    collecting = _read_pick_up_all(detail)
+    if collecting is None and len(texts) <= 1:
+        return None
+    ref_ids: list[str] = []
+    for text in texts:
+        form_id = parse_ref_id(text)
+        if form_id is None or form_id == 0:
+            return {"status": consts.STATUS_FAILED, "message": f"'{text}' is not a ref_id. Take the ref_ids of the things from 'Things' in STATE, "
+                    "with commas between them."}, True
+        if format_ref_id(form_id) not in ref_ids:
+            ref_ids.append(format_ref_id(form_id))
+    meters = 0
+    kind = ""
+    if collecting is not None:
+        problem, meters, kind = collecting
+        if problem != "":
+            return {"status": consts.STATUS_FAILED, "message": problem}, True
+        if len(ref_ids) > 1:
+            return {"status": consts.STATUS_FAILED, "message": f"With '{consts.PICK_UP_ALL}' the target is the one thing to look around, or nothing "
+                    f"(then around you). You named {len(ref_ids)}. To pick up just these, leave 'detail' empty."}, True
+    elif len(ref_ids) > consts.PICK_UP_HIGHEST_ITEMS:
+        return {"status": consts.STATUS_FAILED, "message": f"At most {consts.PICK_UP_HIGHEST_ITEMS} things at a time. You named {len(ref_ids)}."}, True
+    # A game mod from before this would walk to the first thing only, or look for a thing without a ref_id
+    state = await queue.peek_state()
+    if isinstance(state, dict):
+        protocol = state.get("protocol")
+        if not isinstance(protocol, int) or protocol < consts.PICK_UP_LIST_PROTOCOL:
+            return {"status": consts.STATUS_FAILED, "message": f"Several things in one go and '{consts.PICK_UP_ALL}' need a newer game mod than the "
+                    "one that is running (build and install it again with build.py --install). Nothing was picked up. One thing at a time still works."}, True
+    if collecting is not None:
+        result = await queue.send_command(consts.ACTION_PICK_UP, target=ref_ids[0] if len(ref_ids) > 0 else "",
+                                          detail=" ".join(part for part in (consts.PICK_UP_ALL, str(meters), kind) if part != ""),
+                                          extra={consts.KEY_COMMAND_PICK_ALL: meters, consts.KEY_COMMAND_PICK_FILTER: kind},
+                                          result_timeout_seconds=consts.HAND_OVER_TIMEOUT_SECONDS)
+    else:
+        numbers: list[int] = []
+        for ref_id in ref_ids:
+            numbers.extend(split_form_id(parse_ref_id(ref_id) or 0))
+        # The first thing goes along the usual way as well. The game mod reads the list
+        result = await queue.send_command(consts.ACTION_PICK_UP, target=ref_ids[0], detail=",".join(ref_ids),
+                                          extra={consts.KEY_COMMAND_ITEMS: numbers}, result_timeout_seconds=consts.HAND_OVER_TIMEOUT_SECONDS)
+    return result, result["status"] not in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
 
 
 def _is_id(text: str) -> bool:

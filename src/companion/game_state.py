@@ -267,7 +267,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 14
+GAME_PROTOCOL: int = 15
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -294,6 +294,11 @@ ITEM_GROUPS: dict[int, str] = {
 }
 OTHER_ITEM_GROUP: str = "Other"
 QUEST_PART_SEPARATOR: str = "\t"
+# A line about a menu that was open (see read_menus): its name and how long in milliseconds
+MENU_PART_COUNT: int = 2
+MAX_MENU_LINES: int = 20
+MAX_MENU_NAME_LENGTH: int = 40
+MILLISECONDS_PER_SECOND: float = 1000.0
 QUEST_PART_COUNT_BEFORE_OBJECTIVES: int = 3
 # The journal lists the objectives of these quests under 'Miscellaneous' and does not show their names
 QUEST_TYPE_MISCELLANEOUS: int = 6
@@ -1070,6 +1075,22 @@ def _read_heard(raw_lines: Any) -> list[dict[str, Any]]:
             "text": text.strip(),
         })
     return heard
+
+
+def read_menus(raw_lines: Any) -> list[tuple[str, float]]:
+    """Which menus were open in the game since its request before, as the plugin of the game mod wrote them, oldest
+    first: the name the game gives the menu and for how many seconds it was open. Empty if there is nothing readable"""
+    menus: list[tuple[str, float]] = []
+    if not isinstance(raw_lines, list):
+        return menus
+    for entry in raw_lines[:MAX_MENU_LINES]:
+        if not isinstance(entry, str):
+            continue
+        parts = entry.split(QUEST_PART_SEPARATOR)
+        if len(parts) != MENU_PART_COUNT or parts[0].strip() == "" or not parts[1].isdecimal():
+            continue
+        menus.append((parts[0].strip()[:MAX_MENU_NAME_LENGTH], int(parts[1]) / MILLISECONDS_PER_SECOND))
+    return menus
 
 
 def read_events(raw_lines: Any) -> list[dict[str, Any]]:
