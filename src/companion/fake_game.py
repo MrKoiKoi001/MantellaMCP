@@ -427,6 +427,9 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     if action == consts.ACTION_ATTACK:
         for character in NEARBY:
             if character["ref_id"] == target:
+                if detail == consts.ATTACK_HOLD:
+                    return True, (f"You stay where you stand and attack {character['name']} from here. You keep to this spot, in this fight and "
+                                  "after it, until a command sends you somewhere: 'follow' brings you back to the player."), target
                 return True, f"You attack {character['name']} now.", target
         return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_FOLLOW and target not in ("", PLAYER_REF_ID):
@@ -575,6 +578,9 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if target != MERCHANT_REF_ID:
             return False, f"{name_of(target) or target} is no merchant.", target_ref_id
         return True, f"Fake game did '{action}' with the item {item_id} at {name_of(target)}.", target_ref_id
+    if action == consts.ACTION_COVER:
+        return True, ("You run to cover about 5 meters away, out of sight of the 1 enemies around, and keep to it until a command sends you "
+                      "somewhere ('follow' brings you back to the player)."), target_ref_id
     if action == consts.ACTION_PASSIVE:
         if detail == consts.PASSIVE_OFF:
             return True, "You attack enemies of your own accord again.", target_ref_id

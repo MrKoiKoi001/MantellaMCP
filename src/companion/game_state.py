@@ -36,6 +36,10 @@ KEY_COMPANION_PLACE: str = "companion_place"
 KEY_COMPANION_EXPRESSION: str = "companion_expression"
 # 1 while the companion holds back because of the command passive. Left out otherwise
 KEY_COMPANION_PASSIVE: str = "companion_passive"
+# 1 while the companion keeps to its spot because of attack with 'hold'. Left out otherwise
+KEY_COMPANION_HOLDING: str = "companion_holding"
+# 1 while the spot the companion keeps to is a cover it took because of the command cover. Left out otherwise
+KEY_COMPANION_COVERING: str = "companion_covering"
 # Only when the server asked for it. 29 numbers about the player: level, health, magicka and stamina as they are now,
 # magicka and stamina in percent, weight carried, the most that can be carried, perk points not spent yet,
 # experience gathered in this level, experience it takes to reach the next one, then the skills (see PLAYER_SKILLS)
@@ -299,7 +303,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 17
+GAME_PROTOCOL: int = 19
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -613,6 +617,10 @@ def _read_companion(raw: dict[str, Any]) -> dict[str, Any] | None:
             companion["leading"] = LEAD_STATES[values[COMPANION_PLACE_OF_LEADING]]
     if raw.get(KEY_COMPANION_PASSIVE) == 1:
         companion["passive"] = True
+    if raw.get(KEY_COMPANION_HOLDING) == 1:
+        companion["holding_position"] = True
+    if raw.get(KEY_COMPANION_COVERING) == 1:
+        companion["in_cover"] = True
     for key, name in ((KEY_COMPANION_PLACE, "place"), (KEY_COMPANION_EXPRESSION, "expression")):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() != "":

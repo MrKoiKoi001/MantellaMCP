@@ -644,6 +644,12 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
     # The command passive: the companion starts no fight of its own accord
     if companion.get("passive"):
         parts.append("passive on")
+    # attack with 'hold': the companion keeps to its spot in a fight until a command sends it somewhere
+    # cover: the spot it keeps to is one its enemies could not see when it took it
+    if companion.get("in_cover"):
+        parts.append("in cover")
+    elif companion.get("holding_position"):
+        parts.append("holding position")
     if companion.get("leading") == LEAD_WAITING:
         parts.append("leading the player (waiting for the player to catch up)")
     elif companion.get("leading") == LEAD_WALKING:

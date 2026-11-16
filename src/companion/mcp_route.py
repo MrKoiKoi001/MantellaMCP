@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.49"
+SERVER_VERSION: str = "0.51"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -103,7 +103,19 @@ TOOLS: list[dict[str, Any]] = [
             "follow = follow the player. With a target (the ref_id of a character) you follow that character instead, "
             "wherever it goes, until 'follow' without a target or another command that sends you somewhere. "
             "wait = stay here, "
-            "attack = attack the target (works on peaceful characters too, so only when the player wants it), "
+            "attack = attack the target (works on peaceful characters too, so only when the player wants it): you run "
+            f"to it. With 'detail' '{consts.ATTACK_HOLD}' you stay where you stand instead and fight from there, eg to shoot from a "
+            "height without jumping down. For that you need something that reaches far (bow, crossbow, staff, spell), best in "
+            "your hands already: without it the game lets you run to the target all the same. You keep to that spot "
+            "after the fight as well, until a command sends you somewhere ('follow' brings you back to the player); "
+            "STATE shows 'holding position' for you meanwhile. "
+            "cover = take cover: you run to the nearest spot around you that none of your enemies can see (no target, "
+            "the game picks the spot) and keep to it like after attack with 'hold'. It helps against archers and mages, "
+            "not against someone who runs at you: for that there is flee. If you are hit in your cover or an enemy that "
+            "sees you comes close, you run to the next cover by yourself and your next STATE tells you so. From your "
+            f"cover attack with '{consts.ATTACK_HOLD}' lets you fight without leaving it. It ends with a command that sends you "
+            "somewhere, like 'follow'; STATE shows 'in cover' for you meanwhile. It fails if no enemy is around or no "
+            "such spot is near. "
             "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
             "flee = retreat: you do not fight and run from enemies until your next command, "
             "move_to = walk to the target and wait there until 'follow'. The target is anything with a ref_id in STATE: "
@@ -234,7 +246,8 @@ TOOLS: list[dict[str, Any]] = [
             "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
             "release_horse = give your horse back (or, with a target, another horse you once took): it belongs to whom "
             "it belonged before again. mount = walk to your horse, get on and ride after the player; only a horse "
-            "that is too far away to walk to is brought to your side. With a target you take that horse as yours first. dismount = get off, "
+            "that is too far away to walk to is brought to your side. With a target you take that horse as yours first; "
+            "your own horse can be the target wherever it stands, also far away where nobody sees it. dismount = get off, "
             "the horse stays where it is; if the game does not let you off, STATE tells you so afterwards. When the player mounts or dismounts, you do the same on your "
             "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
             "does, until ride_lock 'off'. mount and dismount always work. In the saddle you can speak, look, cast and "
@@ -891,6 +904,29 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
             return {"status": consts.STATUS_FAILED, "message": f"sneak needs one of these in 'detail': {SNEAK_NAMES}. "
                                f"'{consts.SNEAK_ON}' = you sneak whatever the player does, '{consts.SNEAK_OFF}' = you walk upright whatever the player does, "
                                f"'{consts.SNEAK_AUTO}' = you sneak whenever the player sneaks again."}, True
+    if action == consts.ACTION_ATTACK:
+        detail = detail.lower()
+        if detail not in ("", consts.ATTACK_HOLD):
+            return {"status": consts.STATUS_FAILED, "message": f"For attack 'detail' is '{consts.ATTACK_HOLD}' (you stay where you stand and fight from there) "
+                               "or nothing (you run to the target)."}, True
+        if detail == consts.ATTACK_HOLD:
+            # A game mod from before this would not read the word and let the companion run to its target
+            state = await queue.peek_state()
+            if isinstance(state, dict):
+                protocol = state.get("protocol")
+                if not isinstance(protocol, int) or protocol < consts.ATTACK_HOLD_PROTOCOL:
+                    return {"status": consts.STATUS_FAILED, "message": f"attack with '{consts.ATTACK_HOLD}' needs a newer game mod than the one that is running "
+                            "(build and install it again with build.py --install). Nothing was attacked. Without 'detail' you run to the target as before."}, True
+    if action == consts.ACTION_COVER:
+        target = ""
+        detail = ""
+        # A game mod from before this does not know the command
+        state = await queue.peek_state()
+        if isinstance(state, dict):
+            protocol = state.get("protocol")
+            if not isinstance(protocol, int) or protocol < consts.COVER_PROTOCOL:
+                return {"status": consts.STATUS_FAILED, "message": "cover needs a newer game mod than the one that is running "
+                        "(build and install it again with build.py --install). You stay as you are."}, True
     if action == consts.ACTION_PASSIVE:
         target = ""
         detail = detail.lower()

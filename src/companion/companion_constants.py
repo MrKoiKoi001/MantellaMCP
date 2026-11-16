@@ -308,6 +308,16 @@ class companion_constants:
     ACTION_PASSIVE: str = "passive"
     PASSIVE_ON: str = "on"
     PASSIVE_OFF: str = "off"
+    # attack with 'detail' hold: the companion stays where it stands and fights from there, and keeps to that spot
+    # until a command sends it somewhere. Game mods from ATTACK_HOLD_PROTOCOL on know it. An older one would not
+    # read the word and let the companion run to its target
+    ATTACK_HOLD: str = "hold"
+    ATTACK_HOLD_PROTOCOL: int = 18
+    # cover: the companion runs to a spot near it that none of its enemies can see, keeps to it like after attack
+    # with 'hold', and changes it by itself when it is hit there or an enemy comes close. No target, no detail.
+    # Game mods from COVER_PROTOCOL on know it
+    ACTION_COVER: str = "cover"
+    COVER_PROTOCOL: int = 19
     # lead: the companion walks ahead of the player to a target, like move_to, and waits whenever the player falls behind
     ACTION_LEAD: str = "lead"
     # auto_heal: whether the companion heals the player and itself without being told, when their health is low.
@@ -410,6 +420,7 @@ class companion_constants:
         ACTION_RENAME_HORSE,
         ACTION_SNEAK,
         ACTION_PASSIVE,
+        ACTION_COVER,
         ACTION_UNFAVORITE,
         ACTION_LEAD,
         ACTION_AUTO_HEAL,

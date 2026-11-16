@@ -3654,6 +3654,72 @@ def test_passive_holds_the_companion_back_and_the_state_tells_it():
         assert ", passive on" in you_line
 
 
+def test_attack_with_hold_keeps_the_companion_at_its_spot_and_the_state_tells_it():
+    from src.companion import game_state
+    from src.companion.fake_game import NEARBY, build_state, pack_quick_state, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.state_text import describe_state
+
+    enemy = NEARBY[0]["ref_id"]
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        # Anything else than 'hold' in 'detail' is told, so that a wish the game cannot grant does not get lost
+        refused = command({"action": "attack", "target": enemy, "detail": "with the bow"})
+        assert refused["status"] == consts.STATUS_FAILED and "For attack 'detail' is 'hold'" in refused["message"]
+        # What is fine is refused only because no game is there
+        assert command({"action": "attack", "target": enemy, "detail": "HOLD"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        assert command({"action": "attack", "target": enemy})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "'hold'" in tools[0]["description"] and "holding position" in tools[0]["description"]
+    assert consts.ATTACK_HOLD_PROTOCOL <= game_state.GAME_PROTOCOL
+    assert run_command(consts.ACTION_ATTACK, enemy, "")[1] == f"You attack {NEARBY[0]['name']} now."
+    assert run_command(consts.ACTION_ATTACK, enemy, "", "", consts.ATTACK_HOLD)[1].startswith("You stay where you stand and attack ")
+
+    # The state tells it with an entry of its own, built the old way or in one go
+    raw = build_state()
+    assert "holding_position" not in read_game_state(raw)["companion"]
+    raw[game_state.KEY_COMPANION_HOLDING] = 1
+    for sent in (raw, pack_quick_state(raw)):
+        state = read_game_state(sent)
+        assert state["companion"]["holding_position"] is True
+        you_line = [line for line in describe_state({"connected": True, "fresh": True, "state": state}).split("\n") if line.startswith("You, ")][0]
+        assert ", holding position" in you_line
+
+
+def test_cover_needs_no_target_and_the_state_tells_it():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, pack_quick_state, run_command
+    from src.companion.game_state import read_game_state
+    from src.companion.mcp_route import _check_step
+    from src.companion.state_text import describe_state
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        # What is fine is refused only because no game is there
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "cover"}}))
+        assert answer["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "cover" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+        assert "cover = take cover" in tools[0]["description"] and "'in cover'" in tools[0]["description"]
+    assert _check_step({"action": "cover"}) == ""
+    # It sends the companion somewhere, so commands that wait are dropped like for move_to
+    assert consts.ACTION_COVER not in consts.ACTIONS_KEEPING_QUEUE and consts.ACTION_COVER not in consts.ACTIONS_REQUIRING_TARGET
+    assert consts.COVER_PROTOCOL <= game_state.GAME_PROTOCOL
+    assert run_command(consts.ACTION_COVER, "", "")[1].startswith("You run to cover")
+
+    # The state tells it instead of 'holding position', built the old way or in one go
+    raw = build_state()
+    assert "in_cover" not in read_game_state(raw)["companion"]
+    raw[game_state.KEY_COMPANION_HOLDING] = 1
+    raw[game_state.KEY_COMPANION_COVERING] = 1
+    for sent in (raw, pack_quick_state(raw)):
+        state = read_game_state(sent)
+        assert state["companion"]["in_cover"] is True
+        you_line = [line for line in describe_state({"connected": True, "fresh": True, "state": state}).split("\n") if line.startswith("You, ")][0]
+        assert ", in cover" in you_line and "holding position" not in you_line
+
+
 def test_unfavorite_is_favorite_with_off():
     from src.companion.mcp_route import _check_step
 
