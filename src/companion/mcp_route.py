@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.46"
+SERVER_VERSION: str = "0.47"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -233,8 +233,8 @@ TOOLS: list[dict[str, Any]] = [
             "the player tells you which horse is yours). The player can still ride it. A horse that belongs to someone "
             "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
             "release_horse = give your horse back (or, with a target, another horse you once took): it belongs to whom "
-            "it belonged before again. mount = get on your horse and ride after the player; if the horse is "
-            "far away it is brought to your side. With a target you take that horse as yours first. dismount = get off, "
+            "it belonged before again. mount = walk to your horse, get on and ride after the player; only a horse "
+            "that is too far away to walk to is brought to your side. With a target you take that horse as yours first. dismount = get off, "
             "the horse stays where it is; if the game does not let you off, STATE tells you so afterwards. When the player mounts or dismounts, you do the same on your "
             "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
             "does, until ride_lock 'off'. mount and dismount always work. In the saddle you can speak, look, cast and "
@@ -242,6 +242,7 @@ TOOLS: list[dict[str, Any]] = [
             "saddle (run: true = gallop), follow with a target makes you ride after that character, wait makes you stop "
             "where you are, still in the saddle. What is done on foot (enter, loot, pick_up, sit, open, close, make_room) "
             "needs dismount first. You cannot ride indoors. "
+            "Only one horse can be called at a time: calling another one stops the one that is still on its way. "
             "call_horse = a horse runs to its owner and stays there: your horse comes to you, the horse of the player to the "
             "player (the target is its ref_id from 'Your horse' or 'Player's horse' in STATE; no target = your horse, or the "
             "player's if you have none). 'detail' 'player' or 'you' sends it to that one instead. Use it when the player "
