@@ -102,9 +102,19 @@ KEY_SPACE_INFO: str = "space_info"
 # come as texts of their own
 KEY_VIEW: str = "view"
 KEY_VIEW_NAMES: str = "view_names"
+# Only with a state that is about what the companion sees ('visible' from the companion, 'space', 'view'): how far it
+# sees right now (see UpdateSight in the plugin of the game mod). The meters, the weather (see WEATHER_NAMES, -1
+# indoors or not known), the part the time of day leaves in percent, 1 if indoors, the light (see SIGHT_LIGHTS), 1 if a
+# torch keeps the sight from being shorter, the light level the game tells (0 to 150), the time of day in minutes
+KEY_SIGHT: str = "sight"
+SIGHT_VALUE_COUNT: int = 8
+SIGHT_LIGHTS: dict[int, str] = {1: "bright", 2: "dim", 3: "dark"}
 VIEW_FORMAT: int = 1
 VIEW_HEAD_COUNT: int = 8
-VIEW_TERRAINS: dict[int, str] = {1: "ground", 2: "wall", 3: "roof"}
+VIEW_TERRAINS: dict[int, str] = {1: "ground", 2: "wall", 3: "roof", 4: "water", 5: "water", 6: "water"}
+# Water is a try with two ways at once: the ray met the layer the game has for water, the ground it met lies below the
+# water height of the cell, or both. Which of them found it goes along for testing ('water_by' of a cell)
+VIEW_WATER_WAYS: dict[int, str] = {4: "layer", 5: "height", 6: "both"}
 VIEW_IS_CREATURE: int = 1
 VIEW_CREATURE_HOSTILE: int = 1
 VIEW_CREATURE_DEAD: int = 2
@@ -319,7 +329,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 20
+GAME_PROTOCOL: int = 21
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -403,7 +413,9 @@ UNKNOWN_NAME: str = "unknown"
 # Papyrus only knows signed numbers, so ref IDs from 80000000 on arrive as negative numbers
 REF_ID_MASK: int = 0xFFFFFFFF
 # The four kinds of weather the game tells apart (Weather.GetClassification). The game calls the first one 'pleasant'
-WEATHER_NAMES: dict[int, str] = {0: "clear", 1: "cloudy", 2: "rain", 3: "snow"}
+WEATHER_NAMES: dict[int, str] = {0: "clear", 1: "cloudy", 2: "rain", 3: "snow", 4: "fog", 5: "dense fog", 6: "snowstorm"}
+# The last three only come from the plugin of the game mod (from interface version 32 on): the game marks its fog
+# weathers as cloudy and its snowstorms as snow, and the plugin tells them apart by how far the fog of the weather reaches
 MINUTES_PER_HOUR: int = 60
 MINUTES_PER_DAY: int = 1440
 # Closer than this, a direction from one character to another says nothing
@@ -565,6 +577,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["space"] = space
         if space_look is not None:
             state["space_look"] = space_look
+    sight = read_sight(raw.get(KEY_SIGHT))
+    if sight is not None:
+        state["sight"] = sight
     view = read_view(raw.get(KEY_VIEW), raw.get(KEY_VIEW_NAMES))
     if view is not None:
         state["view"] = view
@@ -928,6 +943,22 @@ def _read_spells(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
     return spells
 
 
+def read_sight(raw_sight: Any) -> dict[str, Any] | None:
+    """How far the companion sees (see KEY_SIGHT), or None if the game sent nothing that can be read"""
+    values = _numbers(raw_sight)
+    if values is None or len(values) < SIGHT_VALUE_COUNT or values[0] < 1:
+        return None
+    meters, weather, time_percent, is_indoors, light, is_torch, light_level, minutes = values[:SIGHT_VALUE_COUNT]
+    sight: dict[str, Any] = {"meters": meters, "indoors": is_indoors != 0, "time_percent": time_percent, "torch": is_torch != 0,
+                             "minutes": minutes}
+    if weather in WEATHER_NAMES:
+        sight["weather"] = WEATHER_NAMES[weather]
+    if light in SIGHT_LIGHTS:
+        sight["light"] = SIGHT_LIGHTS[light]
+        sight["light_level"] = light_level
+    return sight
+
+
 def read_view(raw_view: Any, raw_names: Any) -> dict[str, Any] | None:
     """The picture in front of the companion (see KEY_VIEW), or None if the game sent none or one this server cannot read"""
     values = _numbers(raw_view)
@@ -965,6 +996,8 @@ def read_view(raw_view: Any, raw_names: Any) -> dict[str, Any] | None:
             if terrain in VIEW_TERRAINS:
                 cell["terrain"] = VIEW_TERRAINS[terrain]
                 cell["meters"] = meters
+                if terrain in VIEW_WATER_WAYS:
+                    cell["water_by"] = VIEW_WATER_WAYS[terrain]
             for place, entry_meters in ((first, first_meters), (second, second_meters)):
                 if 1 <= place <= len(legend):
                     cell["entries"].append({"label": legend[place - 1]["label"], "meters": entry_meters})

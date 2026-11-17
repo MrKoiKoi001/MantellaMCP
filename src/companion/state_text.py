@@ -55,7 +55,7 @@ def _direction(angle_degrees: float, names: list[str]) -> str:
 # view: the top of the picture reaches this part of its height above the level of the eyes (see VIEW_PART_ABOVE in the
 # plugin of the game mod), so the row at that part from the top is the one that looks straight ahead
 VIEW_PART_ABOVE: float = 0.4
-VIEW_TERRAIN_LETTERS: dict[str, str] = {"wall": "W", "roof": "R"}
+VIEW_TERRAIN_LETTERS: dict[str, str] = {"wall": "W", "roof": "R", "water": "A"}
 
 
 def _describe_view_cell(cell: dict[str, Any]) -> str:
@@ -95,6 +95,13 @@ def _describe_view_in_words(view: dict[str, Any]) -> str:
         if nearest is not None:
             drops.append(f"{words} {'right at your feet' if nearest == 0 else f'about {nearest} m away'}")
     sentences = [("The ground drops away " + ", ".join(drops) + ".") if len(drops) > 0 else "No drop in view."]
+    waters: list[str] = []
+    for words, sector_columns in sectors:
+        water_meters = [cells[row][column]["meters"] for row in range(rows) for column in sector_columns if cells[row][column].get("terrain") == "water"]
+        if len(water_meters) > 0:
+            waters.append(f"{words} {'right at your feet' if min(water_meters) == 0 else f'about {min(water_meters)} m away'}")
+    if len(waters) > 0:
+        sentences.append("Water " + ", ".join(waters) + ".")
     level_row = min(rows - 1, int(rows * VIEW_PART_ABOVE))
     walls = [cells[level_row][column]["meters"] for column in sectors[1][1] if cells[level_row][column].get("terrain") == "wall"]
     if len(walls) > 0:
@@ -104,6 +111,33 @@ def _describe_view_in_words(view: dict[str, Any]) -> str:
     return " ".join(sentences)
 
 
+SIGHT_WEATHERS_IN_THE_WAY: tuple[str, ...] = ("rain", "snow", "fog", "dense fog", "snowstorm")
+MINUTES_PER_HOUR: int = 60
+
+
+def describe_sight(sight: dict[str, Any]) -> str:
+    """How far the companion sees right now, with what shortens it: 'Sight from you: about 25 m (fog, night).'"""
+    reasons: list[str] = []
+    if sight.get("indoors"):
+        light = sight.get("light")
+        if light == "dim":
+            reasons.append("dim light")
+        elif light == "dark":
+            reasons.append("dark")
+        if light is not None:
+            # The light level of the game, for setting where bright ends and dark begins
+            reasons.append(f"light level {sight.get('light_level')}")
+    else:
+        if sight.get("weather") in SIGHT_WEATHERS_IN_THE_WAY:
+            reasons.append(sight["weather"])
+        if sight.get("time_percent", 100) < 100:
+            hour = sight.get("minutes", 0) / MINUTES_PER_HOUR
+            reasons.append("dusk" if 18 <= hour < 21 else ("dawn" if 4 <= hour < 7 else "night"))
+    if sight.get("torch"):
+        reasons.append("as far as the torch lights")
+    return f"Sight from you: about {sight['meters']} m" + (f" ({', '.join(reasons)})" if len(reasons) > 0 else "") + "."
+
+
 def describe_view(view: Any) -> list[str]:
     """The picture in front of the companion as lines of text: a line that explains it, one line per row of cells,
     the legend and a sentence about drops and walls"""
@@ -111,7 +145,7 @@ def describe_view(view: Any) -> list[str]:
         return ["View: the game sent none. Its game mod, or the plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version 28), "
                 "is older than this, or your character is not in the loaded area."]
     lines = [f"View from you ({view['degrees']} degrees wide, {view['columns']}x{view['rows']}): top row = up, bottom row = the ground at your feet, "
-             "left = your left. In a cell a plain number = ground that many meters away, W = wall, R = roof or ceiling, "
+             "left = your left. In a cell a plain number = ground that many meters away, W = wall, R = roof or ceiling, A = water, "
              "C = creature, O = object (see the legend), the number behind a colon = meters from you along the ground, "
              f"empty = nothing within {view['range_meters']} m, (...) = several in one cell, the nearest first:"]
     for cells in view["cells"]:
@@ -205,6 +239,10 @@ def describe_state(state_result: dict[str, Any]) -> str:
         lines.append("The lists below show what is around you, not around the player.")
     elif state_result.get("around_wanted"):
         lines.append("The game listed what is around the player: your character is not close enough to look around on its own.")
+    # How far the companion sees, wherever something is told that it sees
+    sight = state.get("sight")
+    if isinstance(sight, dict) and (state_result.get("visible_wanted") or state_result.get("space_wanted") or state_result.get("view_wanted")):
+        lines.append(describe_sight(sight))
     # 'visible': the game has left out the characters the viewer cannot see. The things are left out here, by their direction
     is_visible_only = bool(state_result.get("visible_wanted")) and bool(state.get("visible_only"))
     if is_visible_only:
@@ -222,6 +260,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
                          "Of someone you only hear, your character knows that something is there and roughly where, not who it is.")
         things = [thing for thing in things if abs(thing.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
         places = [place for place in places if abs(place.get("angle_degrees", 0)) <= VISIBLE_HALF_ANGLE_DEGREES]
+        # No further than the companion sees in this weather and light. The plugin has done that for characters and places
+        if is_from_companion and isinstance(sight, dict):
+            things = [thing for thing in things if thing.get("distance_meters", 0) <= sight["meters"]]
     elif state_result.get("visible_wanted"):
         lines.append("The game could not check what can be seen (inside a place it has not loaded, or an older game mod). "
                      "The lists below hold everything around.")
@@ -240,8 +281,12 @@ def describe_state(state_result: dict[str, Any]) -> str:
     elif state_result.get("find_missed"):
         lines.append("The game did not send what it found in time. Ask again.")
     if state_result.get("space_wanted"):
-        lines.append(_describe_space(state.get("space"), state.get("space_look"), str(state_result.get("space_direction_wanted") or ""),
-                                     state_result.get("space_meters_wanted") or 0))
+        space_line = _describe_space(state.get("space"), state.get("space_look"), str(state_result.get("space_direction_wanted") or ""),
+                                     state_result.get("space_meters_wanted") or 0)
+        space_look = state.get("space_look")
+        if isinstance(sight, dict) and isinstance(space_look, dict) and space_look.get("meters", 0) >= sight["meters"]:
+            space_line += f" The rays end where your sight ends, at about {sight['meters']} m: 'open' only means that you see nothing in the way up to there."
+        lines.append(space_line)
     elif state_result.get("space_missed"):
         lines.append("The game did not send the space around you in time. Ask again.")
     if state_result.get("view_wanted"):

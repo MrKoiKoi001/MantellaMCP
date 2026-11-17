@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.53"
+SERVER_VERSION: str = "0.55"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -395,18 +395,30 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
 ]
 
 STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
+    (("sight", "visible", "space", "view"), (
+        "Sight: how far your character sees depends on the weather, the time of day and the light. Outdoors by day about "
+        "200 meters when it is clear or cloudy, 100 in rain or snow, 50 in fog or a snowstorm, 25 in dense fog; from the "
+        "evening on it gets less, down to a quarter of that in the deep of the night. Indoors about 50 meters in a bright "
+        "place, 25 in dim light, 8 in the dark. A torch in your hand or in the hand of the player beside you keeps it "
+        "from getting shorter than 20 meters. Whenever you ask what you see ('visible' with around 'you', 'space', "
+        "'view'), a line 'Sight from you' tells the meters and what shortens them, and nothing further away is "
+        "listed as seen: characters beyond it are left out or only 'heard (not seen)', the rays of 'space' and the "
+        "picture of 'view' end there, places of the map show up to three times as far because they are big. "
+        "What the player sees is not cut short this way. "
+    )),
     (("view", "view_size"), (
         "With 'view' you get a coarse picture of what lies in front of your character: a grid of cells over 120 degrees, "
         f"{consts.VIEW_USUAL_COLUMNS} wide and {consts.VIEW_USUAL_ROWS} high unless 'view_size' names another size (columns x rows, eg '24x12' for a closer "
         f"look or '8x5' for a rough one; {consts.VIEW_MIN_COLUMNS} to {consts.VIEW_MAX_COLUMNS} columns, {consts.VIEW_MIN_ROWS} to {consts.VIEW_MAX_ROWS} rows). "
         "The top row is up, the bottom row the ground at your feet, left is your left. Each cell holds what one ray from "
         "your eyes meets: a plain number = ground that many meters away, W = a wall or another upright thing, R = a roof "
-        "or ceiling, empty = nothing within 80 meters (the sky, or a drop if it is in the lower rows). C1, C2 ... are "
+        "or ceiling, A = water with the meters to its surface, empty = nothing within 80 meters (the sky, or a drop if "
+        "it is in the lower rows). C1, C2 ... are "
         "creatures and O1, O2 ... objects (doors, chests, furniture, things that lie around) with their meters behind a "
         "colon; the legend below the grid names them with their ref_ids for commands. Several in one cell stand in "
         "brackets, the nearest first. Meters are counted along the ground from your feet. Below the legend a sentence "
-        "tells where the ground drops away and whether a wall is straight ahead. Water does not show, and very large "
-        "creatures look narrower than they are. It is long, so ask for it only when it matters: before you pick a spot "
+        "tells where the ground drops away, where water is and whether a wall is straight ahead. Finding water is new "
+        "and may miss some. Very large creatures look narrower than they are. It is long, so ask for it only when it matters: before you pick a spot "
         "to shoot from, to see what stands in front of what, or when the player asks what you see. For a drop or a wall "
         "alone 'space' is shorter. "
     )),
