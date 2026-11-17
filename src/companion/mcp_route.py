@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.55"
+SERVER_VERSION: str = "0.57"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -398,9 +398,9 @@ STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
     (("sight", "visible", "space", "view"), (
         "Sight: how far your character sees depends on the weather, the time of day and the light. Outdoors by day about "
         "200 meters when it is clear or cloudy, 100 in rain or snow, 50 in fog or a snowstorm, 25 in dense fog; from the "
-        "evening on it gets less, down to a quarter of that in the deep of the night. Indoors about 50 meters in a bright "
-        "place, 25 in dim light, 8 in the dark. A torch in your hand or in the hand of the player beside you keeps it "
-        "from getting shorter than 20 meters. Whenever you ask what you see ('visible' with around 'you', 'space', "
+        "evening on it gets less, down to a quarter of that in the deep of the night. Indoors about 50 meters, but only "
+        "15 in a dark place (a cave, a crypt, a ruin, a mine) and 25 there with a torch in your hand or in the hand of "
+        "the player beside you. Outdoors a torch keeps the sight from getting shorter than 20 meters. Whenever you ask what you see ('visible' with around 'you', 'space', "
         "'view'), a line 'Sight from you' tells the meters and what shortens them, and nothing further away is "
         "listed as seen: characters beyond it are left out or only 'heard (not seen)', the rays of 'space' and the "
         "picture of 'view' end there, places of the map show up to three times as far because they are big. "
@@ -480,6 +480,9 @@ STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "Directions are relative to where the player (after 'from you': your character) faces: "
         "ahead, ahead-right, right, behind-right, behind, behind-left, left, ahead-left. "
         "Use the player's view when the player points at someone, and your own view when you talk about where you stand. "
+        "Behind distance and direction of a character or a thing ', 8 m above' or ', 4 m below' tells how much higher or "
+        "lower it stands than the feet of whoever it is measured from (the player, or you with around 'you'): up on a wall, "
+        "down in a pit. Without it the difference is under 2 meters. "
     )),
     (("around",), (
         "With 'around' set to 'you' the game lists what is around your own character instead (characters, things, places "

@@ -119,14 +119,8 @@ def describe_sight(sight: dict[str, Any]) -> str:
     """How far the companion sees right now, with what shortens it: 'Sight from you: about 25 m (fog, night).'"""
     reasons: list[str] = []
     if sight.get("indoors"):
-        light = sight.get("light")
-        if light == "dim":
-            reasons.append("dim light")
-        elif light == "dark":
-            reasons.append("dark")
-        if light is not None:
-            # The light level of the game, for setting where bright ends and dark begins
-            reasons.append(f"light level {sight.get('light_level')}")
+        if sight.get("light") == "dark":
+            reasons.append("a dark place")
     else:
         if sight.get("weather") in SIGHT_WEATHERS_IN_THE_WAY:
             reasons.append(sight["weather"])
@@ -134,7 +128,7 @@ def describe_sight(sight: dict[str, Any]) -> str:
             hour = sight.get("minutes", 0) / MINUTES_PER_HOUR
             reasons.append("dusk" if 18 <= hour < 21 else ("dawn" if 4 <= hour < 7 else "night"))
     if sight.get("torch"):
-        reasons.append("as far as the torch lights")
+        reasons.append("by torchlight")
     return f"Sight from you: about {sight['meters']} m" + (f" ({', '.join(reasons)})" if len(reasons) > 0 else "") + "."
 
 
@@ -980,7 +974,16 @@ def _describe_where(character: dict[str, Any]) -> str:
     angle = character.get("angle_degrees")
     if isinstance(angle, (int, float)) and not isinstance(angle, bool):
         where += f" {relative_direction(angle)}"
-    return where
+    return where + _describe_height(character)
+
+
+def _describe_height(character: dict[str, Any]) -> str:
+    """How much higher or lower than the feet of whoever the game measured from: ', 8 m above' or ', 4 m below'.
+    Empty if the game told no height, which it only does from 2 meters on"""
+    height = character.get("height_meters")
+    if not isinstance(height, int) or isinstance(height, bool) or height == 0:
+        return ""
+    return f", {abs(height)} m {'above' if height > 0 else 'below'}"
 
 
 def _name_of(ref_id: str, nearby: list[dict[str, Any]]) -> str:

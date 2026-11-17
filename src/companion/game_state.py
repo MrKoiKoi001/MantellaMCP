@@ -107,6 +107,13 @@ KEY_VIEW_NAMES: str = "view_names"
 # indoors or not known), the part the time of day leaves in percent, 1 if indoors, the light (see SIGHT_LIGHTS), 1 if a
 # torch keeps the sight from being shorter, the light level the game tells (0 to 150), the time of day in minutes
 KEY_SIGHT: str = "sight"
+# How much higher or lower than the viewer the characters and things of the lists stand (see TakeHeights in the plugin
+# of the game mod): two numbers each, the ref ID and the whole meters above the feet of the viewer (negative = below).
+# Only what stands at least 2 meters higher or lower is in it
+KEY_HEIGHTS: str = "heights"
+VALUES_PER_HEIGHT: int = 2
+# The lists of a state whose entries can carry a height
+LISTS_WITH_HEIGHTS: tuple[str, ...] = ("nearby", "things", "traps", "found")
 SIGHT_VALUE_COUNT: int = 8
 SIGHT_LIGHTS: dict[int, str] = {1: "bright", 2: "dim", 3: "dark"}
 VIEW_FORMAT: int = 1
@@ -583,6 +590,7 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
     view = read_view(raw.get(KEY_VIEW), raw.get(KEY_VIEW_NAMES))
     if view is not None:
         state["view"] = view
+    _add_heights(state, read_heights(raw.get(KEY_HEIGHTS)))
     _add_view_of_companion(state)
 
     mismatch = raw.get(KEY_PLUGIN_MISMATCH)
@@ -971,10 +979,18 @@ def read_view(raw_view: Any, raw_names: Any) -> dict[str, Any] | None:
     if len(values) < cells_start + columns * rows * per_cell:
         return None
     names = raw_names if isinstance(raw_names, list) else []
+    # Only what stands in a cell is in the legend: a cell keeps two entries, so the plugin may name more than the picture shows
+    shown: set[int] = set()
+    for cell_number in range(columns * rows):
+        start = cells_start + cell_number * per_cell
+        shown.update((values[start + 3], values[start + 5]))
     legend: list[dict[str, Any]] = []
+    labels: dict[int, str] = {}
     creature_count = 0
     thing_count = 0
     for number in range(legend_count):
+        if number + 1 not in shown:
+            continue
         kind, high, low, flags = values[VIEW_HEAD_COUNT + number * per_legend: VIEW_HEAD_COUNT + number * per_legend + 4]
         name = str(names[number]).strip() if number < len(names) else ""
         entry: dict[str, Any] = {"ref_id": format_ref_id(((high & 0xFFFF) << 16) | (low & 0xFFFF)), "name": name or "unknown"}
@@ -986,6 +1002,7 @@ def read_view(raw_view: Any, raw_names: Any) -> dict[str, Any] | None:
             thing_count += 1
             entry.update({"label": f"O{thing_count}", "is_creature": False, "kind": VIEW_THING_KINDS.get(flags, "thing")})
         legend.append(entry)
+        labels[number + 1] = entry["label"]
     grid: list[list[dict[str, Any]]] = []
     for row in range(rows):
         cells: list[dict[str, Any]] = []
@@ -999,8 +1016,10 @@ def read_view(raw_view: Any, raw_names: Any) -> dict[str, Any] | None:
                 if terrain in VIEW_WATER_WAYS:
                     cell["water_by"] = VIEW_WATER_WAYS[terrain]
             for place, entry_meters in ((first, first_meters), (second, second_meters)):
-                if 1 <= place <= len(legend):
-                    cell["entries"].append({"label": legend[place - 1]["label"], "meters": entry_meters})
+                if place in labels:
+                    cell["entries"].append({"label": labels[place], "meters": entry_meters})
+            # The plugin puts characters first so that things do not push them out. Shown is the nearest first
+            cell["entries"].sort(key=lambda entry: entry["meters"])
             cells.append(cell)
         grid.append(cells)
     return {"columns": columns, "rows": rows, "degrees": degrees, "range_meters": range_meters, "legend": legend, "cells": grid}
@@ -1384,6 +1403,30 @@ def _map_offset(distance: float, map_direction_degrees: float) -> tuple[float, f
     """How far to the east and to the north something is that lies in this direction on the map (0 = north, 90 = east)"""
     radians = math.radians(map_direction_degrees)
     return distance * math.sin(radians), distance * math.cos(radians)
+
+
+def read_heights(raw_heights: Any) -> dict[str, int]:
+    """How many meters above (negative: below) the viewer something stands, by its ref ID (see KEY_HEIGHTS).
+    Empty if the game sent nothing that can be read"""
+    values = _numbers(raw_heights)
+    if values is None or len(values) % VALUES_PER_HEIGHT != 0:
+        return {}
+    return {_ref_id(values[place]): values[place + 1] for place in range(0, len(values), VALUES_PER_HEIGHT) if values[place + 1] != 0}
+
+
+def _add_heights(state: dict[str, Any], heights: dict[str, int]) -> None:
+    """Adds 'height_meters' to the characters and things the game told a height for. It counts from whoever the
+    game measured the lists from"""
+    if len(heights) == 0:
+        return
+    for name in LISTS_WITH_HEIGHTS:
+        entries = state.get(name)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            height = heights.get(entry.get("ref_id")) if isinstance(entry, dict) else None
+            if height is not None:
+                entry["height_meters"] = height
 
 
 def _signed_angle(angle_degrees: float) -> int:

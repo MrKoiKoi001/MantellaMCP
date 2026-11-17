@@ -3783,6 +3783,12 @@ def test_view_turns_the_numbers_of_the_plugin_into_a_picture_of_text():
     assert lines[1:4] == [",,,", "(C1:6,C2:9,W:12),(C2:9,W:12),O1:5,R:2", "2,2,2,"]
     assert lines[4:8] == ["Legend:", "C1 Koi 00000014, the player", "C2 Frost Troll 0004A2B1, hostile", "O1 Chest FF000EB0, container"]
     assert lines[8] == "In words: The ground drops away to your right right at your feet. Straight ahead a wall about 5 m away."
+    # A character comes first in the numbers of a cell so that things cannot push it out, but the nearest is shown first.
+    # What stands in no cell is not in the legend, and the numbers of the labels have no gaps
+    crowded = [1, 2, 1, 120, 80, 3, 4, 7] + [2, 0, 1, 4, 1, 0, 2, 0, 2, 0, 3, 4] + [0, 0, 0, 2, 4, 3, 3] + nothing
+    crowded_view = read_view(crowded, ["Cheese", "Orgnar", "Tankard"])
+    assert [entry["label"] + " " + entry["name"] for entry in crowded_view["legend"]] == ["C1 Orgnar", "O1 Tankard"]
+    assert describe_view(crowded_view)[1] == "(O1:3,C1:4),"
     # Water: whichever way the plugin found it, it is an A with the meters to its surface, and the sentence names it
     wet = list(numbers)
     first_cell = 8 + len(legend)
@@ -3836,9 +3842,9 @@ def test_sight_tells_how_far_the_companion_sees_and_what_shortens_it():
     assert describe_sight(read_sight([150, 1, 75, 0, 0, 0, 60, 1170])) == "Sight from you: about 150 m (dusk)."
     assert describe_sight(read_sight([63, 2, 63, 0, 0, 0, 40, 330])) == "Sight from you: about 63 m (rain, dawn)."
     # Indoors the light counts, and its level goes along so that the bounds can be set after a look in the game
-    assert describe_sight(read_sight([8, -1, 100, 1, 3, 0, 7, 720])) == "Sight from you: about 8 m (dark, light level 7)."
-    assert describe_sight(read_sight([20, -1, 100, 1, 3, 1, 7, 720])) == "Sight from you: about 20 m (dark, light level 7, as far as the torch lights)."
-    assert describe_sight(read_sight([50, -1, 100, 1, 1, 0, 90, 720])) == "Sight from you: about 50 m (light level 90)."
+    assert describe_sight(read_sight([15, -1, 100, 1, 3, 0, 0, 720])) == "Sight from you: about 15 m (a dark place)."
+    assert describe_sight(read_sight([25, -1, 100, 1, 3, 1, 0, 720])) == "Sight from you: about 25 m (a dark place, by torchlight)."
+    assert describe_sight(read_sight([50, -1, 100, 1, 1, 0, 0, 720])) == "Sight from you: about 50 m."
     assert read_sight([0, 0, 100, 0, 0, 0, 0, 0]) is None and read_sight([5, 0]) is None and read_sight(None) is None
     # The plugin tells fog and snowstorm apart from clouds and snow
     assert game_state.WEATHER_NAMES[4] == "fog" and game_state.WEATHER_NAMES[5] == "dense fog" and game_state.WEATHER_NAMES[6] == "snowstorm"
@@ -3854,6 +3860,37 @@ def test_sight_tells_how_far_the_companion_sees_and_what_shortens_it():
         assert "Sight from you: about 13 m (fog, night)." in describe_state({"connected": True, "fresh": True, "state": shown, "view_wanted": True})
     assert "Sight: how far your character sees" in describe_help("sight")[0] and "Sight: how far" in describe_help("visible")[0]
     assert consts.VIEW_PROTOCOL <= game_state.GAME_PROTOCOL
+
+
+def test_heights_tell_who_stands_above_or_below_the_viewer():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, pack_quick_state
+    from src.companion.game_state import read_game_state, read_heights
+    from src.companion.mcp_route import describe_help
+    from src.companion.state_text import _describe_position, describe_state
+
+    assert read_heights([0x0001B743, 8, 0x0001B744, -4]) == {"0001B743": 8, "0001B744": -4}
+    assert read_heights([0x0001B743]) == {} and read_heights(None) == {}
+    # Measured from the companion there is only that view, measured from the player the height belongs to the player
+    guard = {"distance_meters": 15, "angle_degrees": 0, "height_meters": 8}
+    assert _describe_position(guard, True) == "from you 15 m ahead, 8 m above"
+    assert _describe_position({"distance_meters": 6, "angle_degrees": 90, "height_meters": -4}, True) == "from you 6 m right, 4 m below"
+    assert _describe_position({"distance_meters": 6, "angle_degrees": 90}, True) == "from you 6 m right"
+    assert _describe_position(guard, False).startswith("15 m ahead, 8 m above")
+
+    # In the state: the character the game told a height for carries it, the others do not, built the old way or in one go
+    raw = build_state()
+    nearby = read_game_state(raw)["nearby"]
+    assert len(nearby) >= 2 and all("height_meters" not in character for character in nearby)
+    raw[game_state.KEY_HEIGHTS] = [int(nearby[0]["ref_id"], 16), 8]
+    for sent in (raw, pack_quick_state(raw)):
+        shown = read_game_state(sent)
+        by_id = {character["ref_id"]: character for character in shown["nearby"]}
+        assert by_id[nearby[0]["ref_id"]]["height_meters"] == 8
+        assert "height_meters" not in by_id[nearby[1]["ref_id"]]
+        text = describe_state({"connected": True, "fresh": True, "state": shown})
+        assert text.count(", 8 m above") == 1 and "m below" not in text
+    assert "8 m above" in describe_help("directions")[0]
 
 
 def test_unfavorite_is_favorite_with_off():
