@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.51"
+SERVER_VERSION: str = "0.53"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -51,6 +51,8 @@ ARGUMENT_AROUND: str = "around"
 ARGUMENT_STATS: str = "stats"
 ARGUMENT_VISIBLE: str = "visible"
 ARGUMENT_SPACE: str = "space"
+ARGUMENT_VIEW: str = "view"
+ARGUMENT_VIEW_SIZE: str = "view_size"
 # A spell is named by its ID (this many hex digits, as STATE lists it) or by its name
 SPELL_ID_LENGTH: int = 8
 ARGUMENT_SPACE_DIRECTION: str = "space_direction"
@@ -82,6 +84,8 @@ SERVER_INSTRUCTIONS: str = (
     "Your character is whoever follows the player in the game at the moment; STATE tells you who that is. "
     "If the player has no follower yet, you have no body in the game. "
     "Use STATE to see where you are and who is around, and COMMAND to act. "
+    "HELP is the manual for both: their descriptions only list what there is, so read the topic of a command in HELP "
+    "before you use that command for the first time. "
     "Targets are always the ref_id values from STATE, never names. "
     "When the player points you at someone (eg 'the archer behind me on the left'), get STATE "
     "and pick the matching character by its direction and distance. "
@@ -95,190 +99,531 @@ SERVER_INSTRUCTIONS: str = (
     "(eg 'to the left of our hero a wolf lies in wait')."
 )
 
+# The manual. All of this used to stand in the descriptions of the two tools, and an AI is handed the descriptions of
+# all tools with every single request: about 37,000 characters each time. Now the descriptions only name what there is
+# (COMMAND_DESCRIPTION, STATE_DESCRIPTION), and the tool HELP hands out the piece of the manual that is asked for.
+# One entry per piece: the topics that bring it up, and its text. A topic is the name of a command, of an argument or
+# a line of STATE, or a matter of its own (run, riding, then). Whoever adds a command writes its piece here and a
+# few words into COMMAND_DESCRIPTION
+COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
+    (("follow",), (
+        "follow = follow the player. With a target (the ref_id of a character) you follow that character instead, "
+        "wherever it goes, until 'follow' without a target or another command that sends you somewhere. "
+    )),
+    (("wait",), (
+        "wait = stay here, "
+    )),
+    (("attack",), (
+        "attack = attack the target (works on peaceful characters too, so only when the player wants it): you run "
+        f"to it. With 'detail' '{consts.ATTACK_HOLD}' you stay where you stand instead and fight from there, eg to shoot from a "
+        "height without jumping down. For that you need something that reaches far (bow, crossbow, staff, spell), best in "
+        "your hands already: without it the game lets you run to the target all the same. You keep to that spot "
+        "after the fight as well, until a command sends you somewhere ('follow' brings you back to the player); "
+        "STATE shows 'holding position' for you meanwhile. "
+    )),
+    (("cover",), (
+        "cover = take cover: you run to the nearest spot around you that none of your enemies can see (no target, "
+        "the game picks the spot) and keep to it like after attack with 'hold'. It helps against archers and mages, "
+        "not against someone who runs at you: for that there is flee. If you are hit in your cover or an enemy that "
+        "sees you comes close, you run to the next cover by yourself and your next STATE tells you so. From your "
+        f"cover attack with '{consts.ATTACK_HOLD}' lets you fight without leaving it. It ends with a command that sends you "
+        "somewhere, like 'follow'; STATE shows 'in cover' for you meanwhile. It fails if no enemy is around or no "
+        "such spot is near. "
+    )),
+    (("stand_down",), (
+        "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
+    )),
+    (("flee",), (
+        "flee = retreat: you do not fight and run from enemies until your next command, "
+    )),
+    (("move_to",), (
+        "move_to = walk to the target and wait there until 'follow'. The target is anything with a ref_id in STATE: "
+        "a character, a thing, a door from 'Doors', a place from 'Places' (only if it is close enough to be loaded) "
+        "or the target of a quest. You stop at a door, you do not go through it. "
+        f"In front of a character you stop about {consts.MOVE_TO_PERSON_METERS} meters away; 'detail' can name another distance in meters "
+        f"(0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, also for a thing). If the target is not in your lists, look for it with STATE and 'find'. "
+    )),
+    (("move",), (
+        "move = walk a number of meters in a direction and wait there until 'follow', for when there is nothing with a "
+        "ref_id to walk to. 'detail' is the direction and behind it the meters, eg 'north 10' or 'ahead-left 6' "
+        f"(nothing = {consts.MOVE_DEFAULT_METERS}, at most {consts.MOVE_HIGHEST_METERS}). Directions: a point of the compass ({COMPASS_NAMES}) "
+        f"or seen from where you face ({RELATIVE_NAMES}). Look first with STATE and 'space' where walls and drops are. "
+        "Your next STATE tells you if you did not get that far. "
+    )),
+    (("enter",), (
+        "enter = walk to the target, a door from 'Doors', and go through it on your own. You wait on the other side "
+        "until 'follow', which brings you back out. The player stays outside, so the game does not load the place you are in: "
+        "STATE with around 'you' then only shows what the game keeps of it in memory (the characters who live there, the doors), "
+        "not everything that is really there. Say so when you report what is inside. "
+    )),
+    (("run", "follow", "move_to", "move", "enter"), (
+        "run = true: run instead of walk (move_to, move, enter, follow). With move_to, move and enter you run there. "
+        "With follow you keep running after the player until your next command; when you fall more than about 10 meters "
+        "behind the player you run to catch up on your own, also without run. "
+    )),
+    (("make_room",), (
+        "make_room = step a few meters out of the way, for when you stand in the player's way. 'detail' says where to: "
+        "back (away from the player, also if you name nothing), left or right (as the player sees it who looks at you), "
+        f"with the meters behind it if you like, eg 'left 5' (nothing = {consts.ROOM_DEFAULT_METERS}, at most {consts.ROOM_HIGHEST_METERS}). "
+        "If that side is blocked you try another one yourself, and your next STATE tells you. "
+        "If you were following the player, you stay at the new spot for a moment and then follow again. "
+    )),
+    (("face",), (
+        "face = turn your whole body (you turn on the spot as characters do, and the answer comes when you face there) to the target (anything with a ref_id, also a place or a quest target far away) "
+        f"or to the point of the compass in 'detail' ({COMPASS_NAMES}). Do this before you point at something with a gesture. "
+        "Only while you stand: not while you walk, fight or sit. "
+    )),
+    (("loot",), (
+        "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
+        "everything, or only the kind of item whose ID is in 'detail' (see what is in it with STATE and 'corpse' first). "
+        "The walk takes a while. At a body you kneel down, at a container you go through it, and only then you have "
+        "the things; your next STATE tells you what you got. Afterwards you follow or wait as before. "
+        "Containers in a house or a shop belong to someone, so empty those only when the player wants it. "
+    )),
+    (("pick_up",), (
+        "pick_up = walk to the target, an item that lies around (from 'Things' in STATE, also an arrow that was shot), "
+        "and take it. Your next STATE tells you whether you got it. Afterwards you follow or wait as before. "
+        "Several things in one go: put their ref_ids into 'target' with commas between them. You walk to the nearest, "
+        "take everything of your list that lies within reach there with one bend, and go on to the rest. "
+        "Or 'all' in 'detail' = everything loose around you, or around the one thing in 'target': 'all' (within "
+        f"{consts.PICK_UP_USUAL_METERS} meters), 'all 4' (within 4 meters, at most {consts.PICK_UP_HIGHEST_METERS}), "
+        f"'all 3 potions' (only that kind: {', '.join(consts.PICK_UP_KINDS)}), 'all 3 no clutter' (everything but plates, "
+        "tankards and the like). 'all' leaves out what belongs to someone. "
+        "What lies in a house or a shop belongs to someone, so name that by its ref_id only when the player wants it. "
+    )),
+    (("sit",), (
+        "sit = walk to the piece of furniture that is the target and sit down on it (no target = the seat nearest to you). "
+        "That takes a few seconds, your next STATE says 'sitting' once you sit. "
+        "You stay seated until 'follow' or another command that makes you move. "
+    )),
+    (("look_at",), (
+        "look_at = keep your eyes on the target (a character or anything else with a ref_id; the player is 00000014). "
+        "It holds until look_at without a target, which lets you look around freely again. "
+    )),
+    (("gesture",), (
+        "gesture = play the gesture named in 'detail': " + GESTURE_NAMES + ". "
+        "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
+        "drink, eat, read_book and write_down also work while you sit on a chair, drink_at_table and pass_out only there. "
+        "drunk makes you sway and stagger, also while you walk, until gesture with 'stop'. "
+        "STATE with 'find_gesture' finds the gestures that fit a word (eg drink). "
+    )),
+    (("expression",), (
+        "expression = put a look on your face, named in 'detail': " + EXPRESSION_NAMES + ". A number behind it "
+        "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
+    )),
+    (("say",), (
+        "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
+        "you there. " + SAY_LANGUAGE_NOTE + "One or two sentences at a time. "
+        "With 'loud': true you call it out with a raised voice: for a warning, or when the player is far away. "
+        "With 'quiet': true you say it in a low voice, with a calm face and still hands: while you sneak, or when "
+        "nobody else is to listen. The player hears it less far, so stay close. Your voice only gets quieter, it "
+        "does not whisper. Enemies can hear what you say: said normally it can give you and the player away, called "
+        "out it carries far, in a low voice nobody but the player notices it. So while the player sneaks, or when "
+        "enemies are near and have not noticed you, always speak with 'quiet'. "
+        "target = whom you speak to; nothing = the player. You turn to them and look at them while you speak, and "
+        "afterwards your eyes are free again (or back on what look_at holds; while look_at holds and you name no "
+        "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
+        "To another character you stop, walk over first if they are more than about 5 meters away, turn to them and "
+        "then speak; afterwards you follow the player again if you did before. No wait or face is needed for that. "
+        "manner = how you speak, it moves your hands and face to match for this sentence: " + MANNER_NAMES + ". "
+        "A character you speak to (not the player) looks at you while you speak, and its face answers how you speak: "
+        "startled when you are angry, glad when you joke or are excited, sad or puzzled with you. "
+        "Nothing = neutral, with hands that vary on their own. A look you set with expression stays on your face. "
+        "While you walk or fight you keep moving and only your lips, head and face move. "
+    )),
+    (("sheathe", "draw"), (
+        "sheathe = put your weapon away and keep it away even when the player draws one (otherwise you draw whenever "
+        "the player does). In a fight you draw it all the same. "
+    )),
+    (("draw", "sheathe"), (
+        "draw = draw your weapon, and from then on draw it and "
+        "put it away together with the player again. "
+    )),
+    (("open", "close"), (
+        "open and close = open or close a door that only swings, like the door of a room or a gate. The target is its "
+        "ref_id, without a target it is the door nearest to you. You have to stand within about 5 meters of it; if not, "
+        "the answer names its ref_id for move_to. The doors from 'Doors' lead into another place, those are for 'enter'. "
+    )),
+    (("equip", "unequip", "favorite", "unfavorite", "give", "take"), (
+        "With your things (the target is the ID of an item from an inventory in STATE): "
+    )),
+    (("equip",), (
+        "equip = hold or wear the item, or drink or eat it if it is a potion or food (you play the drinking or eating "
+        "animation with it while you stand around or sit). equip on a spell tome reads it: "
+        "you know its spell from then on and the tome is used up, "
+    )),
+    (("unequip",), (
+        "unequip = put the item away, "
+    )),
+    (("favorite",), (
+        "favorite = mark a weapon, a shield or a piece of armor of yours as a favorite ('detail' on, the default) or "
+        "take the mark off (off). "
+    )),
+    (("unfavorite",), (
+        "unfavorite = take the mark off, the same as favorite with 'detail' off. "
+    )),
+    (("favorite", "unfavorite", "equip"), (
+        "The game hands you the strongest thing you carry on its own. Once you have favorites "
+        "you switch back to them by yourself: a favorite weapon instead of another weapon (one for close combat, one "
+        "for range if you mark both), a favorite shield, a favorite piece of armor per part of the body. So mark "
+        "what you want to fight in, and what you only carry for the player stays baggage. "
+    )),
+    (("give",), (
+        "give = hand the item to the player, "
+    )),
+    (("take",), (
+        "take = take the item out of the player's inventory "
+        "(only when the player wants it). In the player's inventory 'favorite' marks what the player keeps among the "
+        "favorites: ask before you take a weapon or a piece of armor that is one, for potions and food it does not matter. "
+    )),
+    (("give", "take"), (
+        "For give and take 'detail' says how many: a number or 'all', nothing = 1. "
+        "Several items in one go: the IDs in 'target' with commas between them, eg '00013987,000236A5,0002C672', and "
+        "in 'detail' how many of each ('1,1,3'), one number for all of them, or 'all'. You hold out your hand once "
+        f"and the answer lists what changed hands and what did not. At most {consts.HAND_OVER_HIGHEST_ITEMS} kinds of items at a time. "
+    )),
+    (("give",), (
+        f"give with 'detail' '{consts.HAND_OVER_JUNK}' and no target hands the player everything you neither wear, hold nor have "
+        "marked as a favorite, apart from ammunition, potions, food, keys and gold: for handing over loot. "
+    )),
+    (("cast_spell",), (
+        "cast_spell = cast a spell you know: its ID or its exact name in 'detail', and whom you cast it on as the target "
+        "(the player's ref_id to heal the player; no target for a spell on yourself). STATE with inventory 'own' lists "
+        "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
+        "for a tome if you know none. You take the spell into your right hand, cast it with the usual movement and "
+        "hold again what you held before; that takes a few seconds and costs you magicka as it does the player (too "
+        "little magicka = no spell). You turn to the target first. A spell that is held like flames or healing hands "
+        f"runs for {consts.CAST_HOLD_SECONDS} seconds; a number behind the spell sets other seconds (1 to "
+        f"{consts.CAST_HOLD_HIGHEST_SECONDS}), eg 'Flames 6'. In the saddle and on a seat it is cast without the movement, for the same magicka. "
+    )),
+    (("auto_heal",), (
+        "auto_heal = whether you heal by yourself: when the player is below a part of full health (and close and in "
+        "sight) you cast a healing spell on the player, and otherwise on yourself when you are that low. Only with a "
+        "spell you know that heals (one for others, like healing hands, or one for yourself, like healing), and only "
+        "while your magicka lasts. It is on from the start, below "
+        f"{consts.AUTO_HEAL_USUAL_PERCENT}% of health. 'detail': '{consts.AUTO_HEAL_OFF}', '{consts.AUTO_HEAL_ON}', or a number from "
+        f"{consts.AUTO_HEAL_LOWEST_PERCENT} to {consts.AUTO_HEAL_HIGHEST_PERCENT} (on, below that many percent). Each heal is told in your next STATE. "
+    )),
+    (("lead",), (
+        "lead = walk ahead of the player to the target (a character, a door, a place or a quest target, as for move_to, "
+        "with the same 'detail' and 'run'): you stop whenever the player falls more than about 15 meters behind, look "
+        "back, and go on once the player has caught up. When you are there you follow the player again. Use it when "
+        "the player asks you to show the way. Not in the saddle. "
+    )),
+    (("buy", "sell"), (
+        "buy = buy something from a merchant, sell = sell something of yours to one. The target is the "
+        "merchant (its ref_id from 'Nearby'), 'detail' the IDs of the items with commas between them, each with how many "
+        "or 'all' behind it if not one, eg '00034CDF 2, 0003EADD' (one movement of the hand, and the answer lists what "
+        f"was traded for how much and what was not). sell with 'detail' '{consts.HAND_OVER_JUNK}' sells everything the merchant "
+        "buys that you neither wear, hold nor have as a favorite, apart from ammunition, potions, food and keys. The "
+        "items may also stand in 'target' as for give and take: then 'detail' is the merchant, or how many, and "
+        "without a merchant it is the one you looked at or traded with last. "
+        "See what there is and what it costs with STATE and 'merchant' first. You walk over to the "
+        "merchant if you are not there, and your next STATE tells you how it went. You pay with your own gold (the "
+        "player can give you some with the gold's ID 0000000F), the merchant pays with its own. If the gold does not "
+        "last for all of them, nothing is traded and the answer says for how many it lasts. "
+    )),
+    (("claim_horse",), (
+        "claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
+        "the player tells you which horse is yours). The player can still ride it. A horse that belongs to someone "
+        "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
+    )),
+    (("release_horse",), (
+        "release_horse = give your horse back (or, with a target, another horse you once took): it belongs to whom "
+        "it belonged before again. "
+    )),
+    (("mount",), (
+        "mount = walk to your horse, get on and ride after the player; only a horse "
+        "that is too far away to walk to is brought to your side. With a target you take that horse as yours first; "
+        "your own horse can be the target wherever it stands, also far away where nobody sees it. "
+    )),
+    (("dismount",), (
+        "dismount = get off, "
+        "the horse stays where it is; if the game does not let you off, STATE tells you so afterwards. "
+    )),
+    (("ride_lock", "mount", "dismount"), (
+        "When the player mounts or dismounts, you do the same on your "
+        "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
+        "does, until ride_lock 'off'. mount and dismount always work. "
+    )),
+    (("riding", "mount"), (
+        "In the saddle you can speak, look, cast and "
+        "fight, and you can ride somewhere: move_to and move take you there on horseback and you wait there in the "
+        "saddle (run: true = gallop), follow with a target makes you ride after that character, wait makes you stop "
+        "where you are, still in the saddle. What is done on foot (enter, loot, pick_up, sit, open, close, make_room) "
+        "needs dismount first. You cannot ride indoors. "
+    )),
+    (("call_horse",), (
+        "Only one horse can be called at a time: calling another one stops the one that is still on its way. "
+    )),
+    (("call_horse",), (
+        "call_horse = a horse runs to its owner and stays there: your horse comes to you, the horse of the player to the "
+        "player (the target is its ref_id from 'Your horse' or 'Player's horse' in STATE; no target = your horse, or the "
+        "player's if you have none). 'detail' 'player' or 'you' sends it to that one instead. Use it when the player "
+        "calls a horse by its name or asks for it. A horse too far away to run is brought to the side of whom it comes to. "
+        "The horse of the player is known once the player has ridden it. Both horses stay where they are left. "
+    )),
+    (("rename_horse",), (
+        "rename_horse = give a horse a new name, the one in 'detail' (the target is the horse, no target = your horse). "
+        "Use it when the player says what a horse is called from now on. "
+    )),
+    (("sneak",), (
+        "sneak = how you sneak, in 'detail': auto (the way it is unless you change it) = you sneak whenever the player "
+        "sneaks and stand up when the player does, on = you sneak whatever the player does (to wait crouched, or to "
+        "creep ahead on your own), off = you walk upright whatever the player does. on and off hold until sneak with "
+        "'auto'. STATE shows 'sneaking' for the player and for you. Not in the saddle, and in a fight it only takes "
+        "hold afterwards. While you sneak, speak with 'quiet'. "
+    )),
+    (("passive",), (
+        "passive = whether you hold back, in 'detail': on = you follow as always but start no fight of your own accord "
+        "(to pass a wolf by the road, or not to disturb a talk), off = you attack enemies as always. If you or the player "
+        "are attacked you fight back all the same, and attack with a target still works. It holds until passive with "
+        "'off'; STATE shows 'passive on' for you meanwhile. "
+    )),
+    (("passive", "stand_down"), (
+        "stand_down only ends the fight that is going on. "
+    )),
+    (("then", "after_previous", "pause"), (
+        "Commands one after the other: 'then' is a list of up to " + str(MAX_WAITING_STEPS) + " more commands (each with "
+        "action, target, detail and so on) that start one by one, each when you are done with the one before: move_to a "
+        "bard and then gesture dance, sit and then say, say and then mount. 'after_previous': true puts a single command "
+        "behind what you are doing and what waits already. pause = wait the seconds in 'detail' (1 to 60), for such a list. "
+        "A new command that moves you (follow, wait, flee, attack, move_to ...) throws away what waits. say, look_at, "
+        "gesture, expression and what you do with your things run at once and leave it alone. If a step fails, it is "
+        "skipped and the rest goes on. STATE shows what waits ('Queue') and tells afterwards what became of it."
+    )),
+]
+
+STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
+    (("view", "view_size"), (
+        "With 'view' you get a coarse picture of what lies in front of your character: a grid of cells over 120 degrees, "
+        f"{consts.VIEW_USUAL_COLUMNS} wide and {consts.VIEW_USUAL_ROWS} high unless 'view_size' names another size (columns x rows, eg '24x12' for a closer "
+        f"look or '8x5' for a rough one; {consts.VIEW_MIN_COLUMNS} to {consts.VIEW_MAX_COLUMNS} columns, {consts.VIEW_MIN_ROWS} to {consts.VIEW_MAX_ROWS} rows). "
+        "The top row is up, the bottom row the ground at your feet, left is your left. Each cell holds what one ray from "
+        "your eyes meets: a plain number = ground that many meters away, W = a wall or another upright thing, R = a roof "
+        "or ceiling, empty = nothing within 80 meters (the sky, or a drop if it is in the lower rows). C1, C2 ... are "
+        "creatures and O1, O2 ... objects (doors, chests, furniture, things that lie around) with their meters behind a "
+        "colon; the legend below the grid names them with their ref_ids for commands. Several in one cell stand in "
+        "brackets, the nearest first. Meters are counted along the ground from your feet. Below the legend a sentence "
+        "tells where the ground drops away and whether a wall is straight ahead. Water does not show, and very large "
+        "creatures look narrower than they are. It is long, so ask for it only when it matters: before you pick a spot "
+        "to shoot from, to see what stands in front of what, or when the player asks what you see. For a drop or a wall "
+        "alone 'space' is shorter. "
+    )),
+    (("state", "player", "you", "horses"), (
+        "Get the current situation in the game as a few short lines. "
+        "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
+        "(clear, cloudy, rain or snow). "
+        "'Player': health, fighting or not, 'weapon drawn' if so, 'sneaking' if so, 'sitting on' with the piece of furniture, 'riding' with the name of the horse or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
+        "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
+        "'You': your own character with health, where it is, the compass direction it faces, where the player is "
+        "seen from you, 'riding' with the name of the horse, waiting, following (the player, or the character named behind it), "
+        "'sitting on' with the piece of furniture, or walking to someone, "
+        "retreating, whom it fights, 'running' while you run, 'sneaking' while you sneak ('sneak on' or 'sneak off' behind it after the command sneak), 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
+        "If you are not where the player is, the line names the place you are in instead. "
+        "'Player's horse' comes once the player has ridden a horse: its name and ref_id and where it is seen from the player. "
+        "'running to the player' stands behind a horse that was called with call_horse. "
+        "'Your horse' comes once you have one (see claim_horse): its name and ref_id, where it is seen from you, "
+        "and 'ride_lock on' while you do not mount and dismount together with the player. "
+        "Without a follower of the player you have no body. "
+    )),
+    (("nearby", "max"), (
+        "'Nearby': up to 10 lines (more with 'max'), one per character, people and animals, within about 50 meters of the player (outdoors about 200 meters, so that "
+        "archers on a tower and game far off are in it): first the living, hostile "
+        "ones before the others, then the dead (marked 'dead'), each nearest first. "
+        "ref_id, name, distance and direction from the player, after 'from you' the same seen from your own character, "
+        "and 'hostile' if it is hostile to the player. "
+    )),
+    (("traps",), (
+        "'Traps': tripwires, pressure plates, bear traps and other parts of traps within about 15 meters, each with its "
+        "ref_id, distance and direction. The lines only come when there are any, without asking. Warn the player in time: "
+        "a tripwire or a pressure plate sets the trap off for whoever steps on it, you included. "
+    )),
+    (("find",), (
+        "'Found for' only comes when you ask for it with 'find': everything in the loaded area (up to about 300 meters) "
+        "whose name holds the text you gave: characters, doors (by the place they lead to), places of the map and things, "
+        "nearest first, each with its ref_id, distance and direction. Use it when someone or a shop is not in 'Nearby' or 'Doors', "
+        "then walk there with move_to or enter. Names are as the game shows them (in the language of the game), a part of the name "
+        "is enough. A character inside a building is only found from inside: from outside, find the door to the building. "
+    )),
+    (("space", "space_direction", "space_meters", "space_angle"), (
+        "'Space around you' only comes when you ask for it with 'space': what rays from your character find within about "
+        "15 meters in eight directions seen from where you face: a wall or another upright obstacle with its distance, "
+        "ground that rises, a DROP (the ground falls away after that many meters) and the directions that are open. "
+        "The rays go at chest height, so low things like a table or a fence do not show. Ask for it before you walk "
+        "somewhere with the command move, or when the player asks what the place is like. "
+        "You can also look into one direction and further: 'space_direction' (a point of the compass or seen from where you face, "
+        f"like for move), 'space_meters' (up to {consts.SPACE_HIGHEST_METERS}) and 'space_angle' (how wide the rays fan out, "
+        f"{consts.SPACE_DEFAULT_LOOK_DEGREES} degrees if you say nothing, a small angle for a narrow look). Each of them asks for the space by itself. "
+        "Outdoors the game only knows about 120 meters around the player, further out a ray finds nothing. "
+    )),
+    (("things",), (
+        "'Things' only comes when you ask for it with 'things': what stands and lies within about 10 meters of the player, "
+        "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; tables are just called 'Table'), containers such as "
+        "chests and barrels (see the command loot; 'locked' if you cannot open it, 'empty' or how many different items are in it if the game tells) and items that lie around "
+        "(see the command pick_up; arrows that were shot are among them). "
+        "Ask for it when you look for a seat or a chest or the player asks what is around, not every time. "
+    )),
+    (("directions", "nearby"), (
+        "Directions are relative to where the player (after 'from you': your character) faces: "
+        "ahead, ahead-right, right, behind-right, behind, behind-left, left, ahead-left. "
+        "Use the player's view when the player points at someone, and your own view when you talk about where you stand. "
+    )),
+    (("around",), (
+        "With 'around' set to 'you' the game lists what is around your own character instead (characters, things, places "
+        "and quest targets, each with distance and direction 'from you' only). Use that when you are away from the player, "
+        "or when you look for something near yourself. "
+        "Outdoors the list can miss someone, so get STATE once more if a character the player talks about is not in it. "
+    )),
+    (("places", "doors"), (
+        "'Places': the nearest places of the map within about 300 meters of the player (farms, mills, stables, towers, "
+        "caves ...), also ones the player has not discovered yet, with distance and direction from the player. "
+        "'Doors': the nearest doors that lead into a building, a cave or out of town, named by where they lead. "
+        "Use both to say where you are and where to go instead of coordinates. Indoors there are only doors. "
+        "After each name is its ref_id, for the commands move_to and look_at. "
+    )),
+    (("quests",), (
+        "'Quests': the open quests from the player's journal, each with its open objectives. The ones the player "
+        "tracks come first and are marked. 'Miscellaneous' collects the small objectives without a quest name. "
+        "The lines are missing if the game cannot tell the quests. "
+        "Behind an objective of a tracked quest, in brackets, is its target (what the compass of the game points to): "
+        "its name, its ref_id (for move_to and look_at), distance and direction from the player and after 'from you' "
+        "from your character, so you can lead the way. "
+        "'behind the door to ...' means the ref_id, distance and direction are those of the door you have to go through, "
+        "'not in this area' that the target is somewhere else, with the name of that place if the game has one. "
+    )),
+    (("heard",), (
+        "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
+        "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
+        "That covers dialogues and what characters say in passing, but only while both kinds of subtitles are switched on "
+        "in the settings of the game. "
+        "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "
+    )),
+    (("events",), (
+        "'Events': what happened since your last STATE, oldest first, each with how long ago and the time of day in the "
+        "game: who started fighting you or the player and when the player's fight began and ended, who died and who "
+        "killed whom, the hits you and the player took (counted together, with the health they cost), where the player "
+        "went, what the player used (doors, chests, levers), read (with the ID of the book), took, put on, drank and "
+        "cast, whom the player talked to, and when the player started or stopped sneaking. At most 25 lines, none older "
+        "than 10 minutes, each given only once. The urgent ones (a fight begins, someone dies, someone is badly hurt) "
+        "also hang onto the answer of your next COMMAND as 'Meanwhile'. "
+    )),
+    (("menus", "state"), (
+        "While the player is in a menu (trading, the inventory, the map) or at a loading screen, the game stands still "
+        "and answers nothing: STATE then tells for how long it has been silent and shows the last state it knows, and "
+        f"a COMMAND waits up to {int(CompanionCommandQueue.PAUSE_WAIT_SECONDS)} seconds for the game to go on. "
+    )),
+    (("read", "page"), (
+        "With 'read' you read a book or a note: the ID of the book from an inventory (under 'Books'), from 'Things' "
+        "(a book that lies around) or from 'Events' (what the player just read). You get one page of its text, and "
+        "'page' gets you the next ones. Reading this way changes nothing in the game. If you carry the book, you open "
+        "it and read. "
+    )),
+    (("gear", "inventory", "filter"), (
+        "'Gear': what you hold in your hands, your gold and the player's gold. "
+        "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
+        "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
+        "With 'filter' you get a short list instead, which is quick: 'favorites' or 'equipped', each item with its ID and "
+        "what it is (bow, sword, shield, helmet ...). Use that to switch weapons in a fight, eg equip your bow. "
+        "'equipped' marks what is worn or held, 'favorite' what the player has among the favorites and, in your own inventory, what you marked with the command favorite. "
+    )),
+    (("corpse", "loot"), (
+        "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
+    )),
+    (("merchant", "buy", "sell"), (
+        "With 'merchant' you get what a merchant sells, with the price of each thing, how much gold the merchant and "
+        "you have, and what of your things the merchant would buy and for how much: for the commands buy and sell. "
+    )),
+    (("queue", "then"), (
+        "'Queue' comes while commands wait for each other (see 'then' of COMMAND): what you do now and what follows. "
+    )),
+    (("find_gesture", "gesture"), (
+        "With 'find_gesture' you get no state at all, only the gestures whose name has that word, for the command gesture. "
+    )),
+    (("report", "state"), (
+        "'Since your last STATE': what became of a loot, pick_up, move_to, move, enter, make_room or sit you started (what you took, or that you did not get there). "
+    )),
+    (("visible",), (
+        "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
+        "characters in front with no wall in between, living first, then the dead, then the things in front, and only the "
+        "doors and places in front with no wall in between. "
+        "From your own view ('around' you) the characters also hold whom you notice without seeing: 'close' = within about "
+        "2 meters of you wherever they stand, 'heard (not seen)' = someone you hear, of whom your character only knows that "
+        "something is there and roughly where. "
+        "Use it when the talk is about what someone sees, not for an overview. "
+    )),
+    (("stats",), (
+        "With 'stats' you get the level of the player, whether a level-up is waiting, perk points to spend, health, magicka, "
+        "stamina, the weight carried and all skills (highest first), and your own level, health, magicka and stamina."
+    )),
+]
+TOOL_HELP: str = "HELP"
+ARGUMENT_TOPIC: str = "topic"
+MAX_HELP_TOPICS: int = 6
+
+COMMAND_DESCRIPTION: str = (
+    "Make your companion character do something in the game. 'action' is one of the commands below. This is only a "
+    f"list: {TOOL_HELP} with the name of a command as its topic tells all about that command (what 'target' and 'detail' mean "
+    "for it, limits, examples). Read that before you use a command for the first time. Targets are ref_ids from STATE. "
+    "Moving: follow = follow the player (with a target: that character), wait = stay here, move_to = walk to the "
+    "target and wait there, move = walk some meters in a direction ('detail', eg 'north 10'), enter = go through a "
+    "door, lead = walk ahead of the player to the target, make_room = step out of the player's way, face = turn to "
+    "the target or to a point of the compass, sit = sit down on a seat, sneak = on, off or auto. 'run': true makes "
+    "you run (follow, move_to, move, enter, lead). "
+    "Fighting: attack = attack the target, only when the player wants it (you run to it; with 'detail' "
+    f"'{consts.ATTACK_HOLD}' you stay where you stand and fight from there, which needs a bow or a spell), cover = run to a spot "
+    "your enemies cannot see and keep to it, stand_down = stop fighting, flee = retreat without fighting, passive = "
+    "on: start no fight of your own accord, off: as always, sheathe = keep your weapon away, draw = draw it, "
+    "cast_spell = cast a spell you know ('detail': its name or ID), auto_heal = heal by yourself: on, off or a percentage. "
+    "Speaking and showing: say = speak the text in 'detail' aloud in the game, with the voice of your character. "
+    + SAY_LANGUAGE_NOTE +
+    "One or two sentences at a time. 'quiet': true whenever you or the player sneak or enemies are near and have "
+    "not noticed you, 'loud': true to call out, target = whom you speak to (nothing = the player), manner = how you "
+    "speak. look_at = keep your eyes on the target, gesture = play the gesture in 'detail', expression = put a look "
+    "on your face. "
+    "Things: loot = take what a dead character or a container holds, pick_up = take an item that lies around "
+    "(also several, or 'all' around you), open and close = a door that only swings, equip and unequip = hold, wear, "
+    "drink, eat or put away an item of yours (the target is the ID of the item from STATE with 'inventory'), favorite "
+    "and unfavorite = mark what you want to fight in, give and take = hand items to the player or take them (take "
+    "only when the player wants it), buy and sell = trade with a merchant. "
+    "Horses: claim_horse = the target is your horse from now on, release_horse = give it back, mount = get on your "
+    "horse, dismount = get off, ride_lock = on: you no longer mount and dismount together with the player, "
+    "call_horse = a horse runs to its owner, rename_horse = the new name in 'detail'. "
+    "Several commands: 'then' is a list of commands that start one after the other, 'after_previous': true puts one "
+    "command behind what you are doing, pause = wait the seconds in 'detail' in between. A new command that moves "
+    "you throws away what waits."
+)
+
+STATE_DESCRIPTION: str = (
+    "Get the current situation in the game as a few short lines: the place, the time and the weather, the player "
+    "('Player') and your own character ('You') with health, what each is doing and where it faces, the horses, "
+    "the characters around ('Nearby': hostile ones first, each with its ref_id, its distance and direction from the "
+    "player and, after 'from you', from your character), traps, the places and doors around with their ref_ids, "
+    "the open quests with their targets, what was said ('Heard') and what happened ('Events') since your last "
+    "STATE, what you hold ('Gear'), the commands that wait ('Queue') and what became of what you started ('Since "
+    "your last STATE'). Directions are seen from where the player faces, after 'from you' from where you face. "
+    "Without a follower of the player you have no body. While the player is in a menu the game stands still, and "
+    "STATE shows the last state it knows. "
+    "More only comes when you ask for it with an argument: inventory, filter, corpse and merchant (items with their "
+    "IDs), things (furniture, containers and what lies around), find (anything by its name), space (walls and drops "
+    "around you), view (a coarse picture of what lies in front of you), visible (only what can be seen), around (seen "
+    "from your character), stats, read (a book). "
+    f"{TOOL_HELP} with the name of an argument or of a line as its topic (eg 'space', 'events', 'nearby') explains it in full."
+)
+
+HELP_DESCRIPTION: str = (
+    f"The manual for {TOOL_COMMAND} and {TOOL_STATE}. Their descriptions only list what there is; this tells how each "
+    "part works. 'topic' is the name of a command (eg 'attack', 'cover', 'say'), of an argument or a line of STATE (eg "
+    "'space', 'inventory', 'events'), or 'run', 'riding' or 'then'. Several topics go into one call with commas between "
+    f"them, at most {MAX_HELP_TOPICS}. Without a topic you get the list of topics. It asks the game nothing and costs no "
+    "time there. Read the topic of a command before you use it for the first time in a conversation; after that you know it."
+)
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": TOOL_COMMAND,
         "description": (
-            "Make your companion character do something in the game. "
-            "follow = follow the player. With a target (the ref_id of a character) you follow that character instead, "
-            "wherever it goes, until 'follow' without a target or another command that sends you somewhere. "
-            "wait = stay here, "
-            "attack = attack the target (works on peaceful characters too, so only when the player wants it): you run "
-            f"to it. With 'detail' '{consts.ATTACK_HOLD}' you stay where you stand instead and fight from there, eg to shoot from a "
-            "height without jumping down. For that you need something that reaches far (bow, crossbow, staff, spell), best in "
-            "your hands already: without it the game lets you run to the target all the same. You keep to that spot "
-            "after the fight as well, until a command sends you somewhere ('follow' brings you back to the player); "
-            "STATE shows 'holding position' for you meanwhile. "
-            "cover = take cover: you run to the nearest spot around you that none of your enemies can see (no target, "
-            "the game picks the spot) and keep to it like after attack with 'hold'. It helps against archers and mages, "
-            "not against someone who runs at you: for that there is flee. If you are hit in your cover or an enemy that "
-            "sees you comes close, you run to the next cover by yourself and your next STATE tells you so. From your "
-            f"cover attack with '{consts.ATTACK_HOLD}' lets you fight without leaving it. It ends with a command that sends you "
-            "somewhere, like 'follow'; STATE shows 'in cover' for you meanwhile. It fails if no enemy is around or no "
-            "such spot is near. "
-            "stand_down = stop fighting (whoever keeps attacking pulls you back into the fight), "
-            "flee = retreat: you do not fight and run from enemies until your next command, "
-            "move_to = walk to the target and wait there until 'follow'. The target is anything with a ref_id in STATE: "
-            "a character, a thing, a door from 'Doors', a place from 'Places' (only if it is close enough to be loaded) "
-            "or the target of a quest. You stop at a door, you do not go through it. "
-            f"In front of a character you stop about {consts.MOVE_TO_PERSON_METERS} meters away; 'detail' can name another distance in meters "
-            f"(0 to {consts.MOVE_TO_HIGHEST_KEEP_METERS}, also for a thing). If the target is not in your lists, look for it with STATE and 'find'. "
-            "move = walk a number of meters in a direction and wait there until 'follow', for when there is nothing with a "
-            f"ref_id to walk to. 'detail' is the direction and behind it the meters, eg 'north 10' or 'ahead-left 6' "
-            f"(nothing = {consts.MOVE_DEFAULT_METERS}, at most {consts.MOVE_HIGHEST_METERS}). Directions: a point of the compass ({COMPASS_NAMES}) "
-            f"or seen from where you face ({RELATIVE_NAMES}). Look first with STATE and 'space' where walls and drops are. "
-            "Your next STATE tells you if you did not get that far. "
-            "enter = walk to the target, a door from 'Doors', and go through it on your own. You wait on the other side "
-            "until 'follow', which brings you back out. The player stays outside, so the game does not load the place you are in: "
-            "STATE with around 'you' then only shows what the game keeps of it in memory (the characters who live there, the doors), "
-            "not everything that is really there. Say so when you report what is inside. "
-            "run = true: run instead of walk (move_to, move, enter, follow). With move_to, move and enter you run there. "
-            "With follow you keep running after the player until your next command; when you fall more than about 10 meters "
-            "behind the player you run to catch up on your own, also without run. "
-            "make_room = step a few meters out of the way, for when you stand in the player's way. 'detail' says where to: "
-            "back (away from the player, also if you name nothing), left or right (as the player sees it who looks at you), "
-            f"with the meters behind it if you like, eg 'left 5' (nothing = {consts.ROOM_DEFAULT_METERS}, at most {consts.ROOM_HIGHEST_METERS}). "
-            "If that side is blocked you try another one yourself, and your next STATE tells you. "
-            "If you were following the player, you stay at the new spot for a moment and then follow again. "
-            "face = turn your whole body (you turn on the spot as characters do, and the answer comes when you face there) to the target (anything with a ref_id, also a place or a quest target far away) "
-            f"or to the point of the compass in 'detail' ({COMPASS_NAMES}). Do this before you point at something with a gesture. "
-            "Only while you stand: not while you walk, fight or sit. "
-            "loot = walk to the target, a dead character or a container (chest, barrel, sack ...), and take what is in it: "
-            "everything, or only the kind of item whose ID is in 'detail' (see what is in it with STATE and 'corpse' first). "
-            "The walk takes a while. At a body you kneel down, at a container you go through it, and only then you have "
-            "the things; your next STATE tells you what you got. Afterwards you follow or wait as before. "
-            "Containers in a house or a shop belong to someone, so empty those only when the player wants it. "
-            "pick_up = walk to the target, an item that lies around (from 'Things' in STATE, also an arrow that was shot), "
-            "and take it. Your next STATE tells you whether you got it. Afterwards you follow or wait as before. "
-            "Several things in one go: put their ref_ids into 'target' with commas between them. You walk to the nearest, "
-            "take everything of your list that lies within reach there with one bend, and go on to the rest. "
-            "Or 'all' in 'detail' = everything loose around you, or around the one thing in 'target': 'all' (within "
-            f"{consts.PICK_UP_USUAL_METERS} meters), 'all 4' (within 4 meters, at most {consts.PICK_UP_HIGHEST_METERS}), "
-            f"'all 3 potions' (only that kind: {', '.join(consts.PICK_UP_KINDS)}), 'all 3 no clutter' (everything but plates, "
-            "tankards and the like). 'all' leaves out what belongs to someone. "
-            "What lies in a house or a shop belongs to someone, so name that by its ref_id only when the player wants it. "
-            "sit = walk to the piece of furniture that is the target and sit down on it (no target = the seat nearest to you). "
-            "That takes a few seconds, your next STATE says 'sitting' once you sit. "
-            "You stay seated until 'follow' or another command that makes you move. "
-            "look_at = keep your eyes on the target (a character or anything else with a ref_id; the player is 00000014). "
-            "It holds until look_at without a target, which lets you look around freely again. "
-            "gesture = play the gesture named in 'detail': " + GESTURE_NAMES + ". "
-            "Some go on until 'detail' is 'stop' or until you move on. Gestures work best while you stand around. "
-            "drink, eat, read_book and write_down also work while you sit on a chair, drink_at_table and pass_out only there. "
-            "drunk makes you sway and stagger, also while you walk, until gesture with 'stop'. "
-            "STATE with 'find_gesture' finds the gestures that fit a word (eg drink). "
-            "expression = put a look on your face, named in 'detail': " + EXPRESSION_NAMES + ". A number behind it "
-            "(1 to 100) makes it weaker, eg 'happy 50'. It stays until 'detail' is 'none'. "
-            "say = speak the text in 'detail' aloud in the game, with the voice of your character, so that the player hears "
-            "you there. " + SAY_LANGUAGE_NOTE + "One or two sentences at a time. "
-            "With 'loud': true you call it out with a raised voice: for a warning, or when the player is far away. "
-            "With 'quiet': true you say it in a low voice, with a calm face and still hands: while you sneak, or when "
-            "nobody else is to listen. The player hears it less far, so stay close. Your voice only gets quieter, it "
-            "does not whisper. Enemies can hear what you say: said normally it can give you and the player away, called "
-            "out it carries far, in a low voice nobody but the player notices it. So while the player sneaks, or when "
-            "enemies are near and have not noticed you, always speak with 'quiet'. "
-            "target = whom you speak to; nothing = the player. You turn to them and look at them while you speak, and "
-            "afterwards your eyes are free again (or back on what look_at holds; while look_at holds and you name no "
-            "target, your eyes stay there). So name the target whenever you speak to someone other than the player. "
-            "To another character you stop, walk over first if they are more than about 5 meters away, turn to them and "
-            "then speak; afterwards you follow the player again if you did before. No wait or face is needed for that. "
-            "manner = how you speak, it moves your hands and face to match for this sentence: " + MANNER_NAMES + ". "
-            "A character you speak to (not the player) looks at you while you speak, and its face answers how you speak: "
-            "startled when you are angry, glad when you joke or are excited, sad or puzzled with you. "
-            "Nothing = neutral, with hands that vary on their own. A look you set with expression stays on your face. "
-            "While you walk or fight you keep moving and only your lips, head and face move. "
-            "sheathe = put your weapon away and keep it away even when the player draws one (otherwise you draw whenever "
-            "the player does). In a fight you draw it all the same. draw = draw your weapon, and from then on draw it and "
-            "put it away together with the player again. "
-            "open and close = open or close a door that only swings, like the door of a room or a gate. The target is its "
-            "ref_id, without a target it is the door nearest to you. You have to stand within about 5 meters of it; if not, "
-            "the answer names its ref_id for move_to. The doors from 'Doors' lead into another place, those are for 'enter'. "
-            "With your things (the target is the ID of an item from an inventory in STATE): "
-            "equip = hold or wear the item, or drink or eat it if it is a potion or food (you play the drinking or eating "
-            "animation with it while you stand around or sit). equip on a spell tome reads it: "
-            "you know its spell from then on and the tome is used up, "
-            "unequip = put the item away, "
-            "favorite = mark a weapon, a shield or a piece of armor of yours as a favorite ('detail' on, the default) or "
-            "take the mark off (off). unfavorite = take the mark off, the same as favorite with 'detail' off. The game hands you the strongest thing you carry on its own. Once you have favorites "
-            "you switch back to them by yourself: a favorite weapon instead of another weapon (one for close combat, one "
-            "for range if you mark both), a favorite shield, a favorite piece of armor per part of the body. So mark "
-            "what you want to fight in, and what you only carry for the player stays baggage. "
-            "give = hand the item to the player, take = take the item out of the player's inventory "
-            "(only when the player wants it). In the player's inventory 'favorite' marks what the player keeps among the "
-            "favorites: ask before you take a weapon or a piece of armor that is one, for potions and food it does not matter. "
-            "For give and take 'detail' says how many: a number or 'all', nothing = 1. "
-            "Several items in one go: the IDs in 'target' with commas between them, eg '00013987,000236A5,0002C672', and "
-            "in 'detail' how many of each ('1,1,3'), one number for all of them, or 'all'. You hold out your hand once "
-            f"and the answer lists what changed hands and what did not. At most {consts.HAND_OVER_HIGHEST_ITEMS} kinds of items at a time. "
-            f"give with 'detail' '{consts.HAND_OVER_JUNK}' and no target hands the player everything you neither wear, hold nor have "
-            "marked as a favorite, apart from ammunition, potions, food, keys and gold: for handing over loot. "
-            "cast_spell = cast a spell you know: its ID or its exact name in 'detail', and whom you cast it on as the target "
-            "(the player's ref_id to heal the player; no target for a spell on yourself). STATE with inventory 'own' lists "
-            "the spells you know with their IDs. You only know spells you have learned from a spell tome, so ask the player "
-            "for a tome if you know none. You take the spell into your right hand, cast it with the usual movement and "
-            "hold again what you held before; that takes a few seconds and costs you magicka as it does the player (too "
-            "little magicka = no spell). You turn to the target first. A spell that is held like flames or healing hands "
-            f"runs for {consts.CAST_HOLD_SECONDS} seconds; a number behind the spell sets other seconds (1 to "
-            f"{consts.CAST_HOLD_HIGHEST_SECONDS}), eg 'Flames 6'. In the saddle and on a seat it is cast without the movement, for the same magicka. "
-            "auto_heal = whether you heal by yourself: when the player is below a part of full health (and close and in "
-            "sight) you cast a healing spell on the player, and otherwise on yourself when you are that low. Only with a "
-            "spell you know that heals (one for others, like healing hands, or one for yourself, like healing), and only "
-            "while your magicka lasts. It is on from the start, below "
-            f"{consts.AUTO_HEAL_USUAL_PERCENT}% of health. 'detail': '{consts.AUTO_HEAL_OFF}', '{consts.AUTO_HEAL_ON}', or a number from "
-            f"{consts.AUTO_HEAL_LOWEST_PERCENT} to {consts.AUTO_HEAL_HIGHEST_PERCENT} (on, below that many percent). Each heal is told in your next STATE. "
-            "lead = walk ahead of the player to the target (a character, a door, a place or a quest target, as for move_to, "
-            "with the same 'detail' and 'run'): you stop whenever the player falls more than about 15 meters behind, look "
-            "back, and go on once the player has caught up. When you are there you follow the player again. Use it when "
-            "the player asks you to show the way. Not in the saddle. "
-            "Trading: buy = buy something from a merchant, sell = sell something of yours to one. The target is the "
-            "merchant (its ref_id from 'Nearby'), 'detail' the IDs of the items with commas between them, each with how many "
-            "or 'all' behind it if not one, eg '00034CDF 2, 0003EADD' (one movement of the hand, and the answer lists what "
-            f"was traded for how much and what was not). sell with 'detail' '{consts.HAND_OVER_JUNK}' sells everything the merchant "
-            "buys that you neither wear, hold nor have as a favorite, apart from ammunition, potions, food and keys. The "
-            "items may also stand in 'target' as for give and take: then 'detail' is the merchant, or how many, and "
-            "without a merchant it is the one you looked at or traded with last. "
-            "See what there is and what it costs with STATE and 'merchant' first. You walk over to the "
-            "merchant if you are not there, and your next STATE tells you how it went. You pay with your own gold (the "
-            "player can give you some with the gold's ID 0000000F), the merchant pays with its own. If the gold does not "
-            "last for all of them, nothing is traded and the answer says for how many it lasts. "
-            "Riding: claim_horse = the horse that is the target is yours from now on (its ref_id from 'Nearby'; do that when "
-            "the player tells you which horse is yours). The player can still ride it. A horse that belongs to someone "
-            "else is refused: that would be a stolen horse. The horse you had before goes back to whom it belonged to. "
-            "release_horse = give your horse back (or, with a target, another horse you once took): it belongs to whom "
-            "it belonged before again. mount = walk to your horse, get on and ride after the player; only a horse "
-            "that is too far away to walk to is brought to your side. With a target you take that horse as yours first; "
-            "your own horse can be the target wherever it stands, also far away where nobody sees it. dismount = get off, "
-            "the horse stays where it is; if the game does not let you off, STATE tells you so afterwards. When the player mounts or dismounts, you do the same on your "
-            "own. ride_lock with 'detail' 'on' switches that off: you stay in the saddle, or on foot, whatever the player "
-            "does, until ride_lock 'off'. mount and dismount always work. In the saddle you can speak, look, cast and "
-            "fight, and you can ride somewhere: move_to and move take you there on horseback and you wait there in the "
-            "saddle (run: true = gallop), follow with a target makes you ride after that character, wait makes you stop "
-            "where you are, still in the saddle. What is done on foot (enter, loot, pick_up, sit, open, close, make_room) "
-            "needs dismount first. You cannot ride indoors. "
-            "Only one horse can be called at a time: calling another one stops the one that is still on its way. "
-            "call_horse = a horse runs to its owner and stays there: your horse comes to you, the horse of the player to the "
-            "player (the target is its ref_id from 'Your horse' or 'Player's horse' in STATE; no target = your horse, or the "
-            "player's if you have none). 'detail' 'player' or 'you' sends it to that one instead. Use it when the player "
-            "calls a horse by its name or asks for it. A horse too far away to run is brought to the side of whom it comes to. "
-            "The horse of the player is known once the player has ridden it. Both horses stay where they are left. "
-            "rename_horse = give a horse a new name, the one in 'detail' (the target is the horse, no target = your horse). "
-            "Use it when the player says what a horse is called from now on. "
-            "sneak = how you sneak, in 'detail': auto (the way it is unless you change it) = you sneak whenever the player "
-            "sneaks and stand up when the player does, on = you sneak whatever the player does (to wait crouched, or to "
-            "creep ahead on your own), off = you walk upright whatever the player does. on and off hold until sneak with "
-            "'auto'. STATE shows 'sneaking' for the player and for you. Not in the saddle, and in a fight it only takes "
-            "hold afterwards. While you sneak, speak with 'quiet'. "
-            "passive = whether you hold back, in 'detail': on = you follow as always but start no fight of your own accord "
-            "(to pass a wolf by the road, or not to disturb a talk), off = you attack enemies as always. If you or the player "
-            "are attacked you fight back all the same, and attack with a target still works. It holds until passive with "
-            "'off'; STATE shows 'passive on' for you meanwhile. stand_down only ends the fight that is going on. "
-            "Commands one after the other: 'then' is a list of up to " + str(MAX_WAITING_STEPS) + " more commands (each with "
-            "action, target, detail and so on) that start one by one, each when you are done with the one before: move_to a "
-            "bard and then gesture dance, sit and then say, say and then mount. 'after_previous': true puts a single command "
-            "behind what you are doing and what waits already. pause = wait the seconds in 'detail' (1 to 60), for such a list. "
-            "A new command that moves you (follow, wait, flee, attack, move_to ...) throws away what waits. say, look_at, "
-            "gesture, expression and what you do with your things run at once and leave it alone. If a step fails, it is "
-            "skipped and the rest goes on. STATE shows what waits ('Queue') and tells afterwards what became of it."
+            COMMAND_DESCRIPTION
         ),
         "inputSchema": {
             "type": "object",
@@ -305,108 +650,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": TOOL_STATE,
         "description": (
-            "Get the current situation in the game as a few short lines. "
-            "First the place, whether it is indoors or outdoors, the time of day in the game and outdoors the weather "
-            "(clear, cloudy, rain or snow). "
-            "'Player': health, fighting or not, 'weapon drawn' if so, 'sneaking' if so, 'sitting on' with the piece of furniture, 'riding' with the name of the horse or 'lying asleep' if so, the compass direction the player faces, and the position x,y,z "
-            "in game units (about 70 per meter, x grows to the east, y to the north, z upwards). "
-            "'You': your own character with health, where it is, the compass direction it faces, where the player is "
-            "seen from you, 'riding' with the name of the horse, waiting, following (the player, or the character named behind it), "
-            "'sitting on' with the piece of furniture, or walking to someone, "
-            "retreating, whom it fights, 'running' while you run, 'sneaking' while you sneak ('sneak on' or 'sneak off' behind it after the command sneak), 'weapon drawn' if so, 'weapon kept away' after sheathe, the look on its face and what it looks at because of look_at. "
-            "If you are not where the player is, the line names the place you are in instead. "
-            "'Player's horse' comes once the player has ridden a horse: its name and ref_id and where it is seen from the player. "
-            "'running to the player' stands behind a horse that was called with call_horse. "
-            "'Your horse' comes once you have one (see claim_horse): its name and ref_id, where it is seen from you, "
-            "and 'ride_lock on' while you do not mount and dismount together with the player. "
-            "Without a follower of the player you have no body. "
-            "'Nearby': up to 10 lines (more with 'max'), one per character, people and animals, within about 50 meters of the player (outdoors about 200 meters, so that "
-            "archers on a tower and game far off are in it): first the living, hostile "
-            "ones before the others, then the dead (marked 'dead'), each nearest first. "
-            "ref_id, name, distance and direction from the player, after 'from you' the same seen from your own character, "
-            "and 'hostile' if it is hostile to the player. "
-            "'Traps': tripwires, pressure plates, bear traps and other parts of traps within about 15 meters, each with its "
-            "ref_id, distance and direction. The lines only come when there are any, without asking. Warn the player in time: "
-            "a tripwire or a pressure plate sets the trap off for whoever steps on it, you included. "
-            "'Found for' only comes when you ask for it with 'find': everything in the loaded area (up to about 300 meters) "
-            "whose name holds the text you gave: characters, doors (by the place they lead to), places of the map and things, "
-            "nearest first, each with its ref_id, distance and direction. Use it when someone or a shop is not in 'Nearby' or 'Doors', "
-            "then walk there with move_to or enter. Names are as the game shows them (in the language of the game), a part of the name "
-            "is enough. A character inside a building is only found from inside: from outside, find the door to the building. "
-            "'Space around you' only comes when you ask for it with 'space': what rays from your character find within about "
-            "15 meters in eight directions seen from where you face: a wall or another upright obstacle with its distance, "
-            "ground that rises, a DROP (the ground falls away after that many meters) and the directions that are open. "
-            "The rays go at chest height, so low things like a table or a fence do not show. Ask for it before you walk "
-            "somewhere with the command move, or when the player asks what the place is like. "
-            f"You can also look into one direction and further: 'space_direction' (a point of the compass or seen from where you face, "
-            f"like for move), 'space_meters' (up to {consts.SPACE_HIGHEST_METERS}) and 'space_angle' (how wide the rays fan out, "
-            f"{consts.SPACE_DEFAULT_LOOK_DEGREES} degrees if you say nothing, a small angle for a narrow look). Each of them asks for the space by itself. "
-            "Outdoors the game only knows about 120 meters around the player, further out a ray finds nothing. "
-            "'Things' only comes when you ask for it with 'things': what stands and lies within about 10 meters of the player, "
-            "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; tables are just called 'Table'), containers such as "
-            "chests and barrels (see the command loot; 'locked' if you cannot open it, 'empty' or how many different items are in it if the game tells) and items that lie around "
-            "(see the command pick_up; arrows that were shot are among them). "
-            "Ask for it when you look for a seat or a chest or the player asks what is around, not every time. "
-            "Directions are relative to where the player (after 'from you': your character) faces: "
-            "ahead, ahead-right, right, behind-right, behind, behind-left, left, ahead-left. "
-            "Use the player's view when the player points at someone, and your own view when you talk about where you stand. "
-            "With 'around' set to 'you' the game lists what is around your own character instead (characters, things, places "
-            "and quest targets, each with distance and direction 'from you' only). Use that when you are away from the player, "
-            "or when you look for something near yourself. "
-            "Outdoors the list can miss someone, so get STATE once more if a character the player talks about is not in it. "
-            "'Places': the nearest places of the map within about 300 meters of the player (farms, mills, stables, towers, "
-            "caves ...), also ones the player has not discovered yet, with distance and direction from the player. "
-            "'Doors': the nearest doors that lead into a building, a cave or out of town, named by where they lead. "
-            "Use both to say where you are and where to go instead of coordinates. Indoors there are only doors. "
-            "After each name is its ref_id, for the commands move_to and look_at. "
-            "'Quests': the open quests from the player's journal, each with its open objectives. The ones the player "
-            "tracks come first and are marked. 'Miscellaneous' collects the small objectives without a quest name. "
-            "The lines are missing if the game cannot tell the quests. "
-            "Behind an objective of a tracked quest, in brackets, is its target (what the compass of the game points to): "
-            "its name, its ref_id (for move_to and look_at), distance and direction from the player and after 'from you' "
-            "from your character, so you can lead the way. "
-            "'behind the door to ...' means the ref_id, distance and direction are those of the door you have to go through, "
-            "'not in this area' that the target is somewhere else, with the name of that place if the game has one. "
-            "'Heard': what characters near the player said since your last STATE (the subtitles of the game), oldest first, "
-            "each with how long ago. At most 10 lines, none older than 5 minutes, and each line is given only once. "
-            "That covers dialogues and what characters say in passing, but only while both kinds of subtitles are switched on "
-            "in the settings of the game. "
-            "A line under the player's name is what the player picked in a dialogue menu. 'You' is your own character speaking. "
-            "'Events': what happened since your last STATE, oldest first, each with how long ago and the time of day in the "
-            "game: who started fighting you or the player and when the player's fight began and ended, who died and who "
-            "killed whom, the hits you and the player took (counted together, with the health they cost), where the player "
-            "went, what the player used (doors, chests, levers), read (with the ID of the book), took, put on, drank and "
-            "cast, whom the player talked to, and when the player started or stopped sneaking. At most 25 lines, none older "
-            "than 10 minutes, each given only once. The urgent ones (a fight begins, someone dies, someone is badly hurt) "
-            "also hang onto the answer of your next COMMAND as 'Meanwhile'. "
-            "While the player is in a menu (trading, the inventory, the map) or at a loading screen, the game stands still "
-            "and answers nothing: STATE then tells for how long it has been silent and shows the last state it knows, and "
-            f"a COMMAND waits up to {int(CompanionCommandQueue.PAUSE_WAIT_SECONDS)} seconds for the game to go on. "
-            "With 'read' you read a book or a note: the ID of the book from an inventory (under 'Books'), from 'Things' "
-            "(a book that lies around) or from 'Events' (what the player just read). You get one page of its text, and "
-            "'page' gets you the next ones. Reading this way changes nothing in the game. If you carry the book, you open "
-            "it and read. "
-            "'Gear': what you hold in your hands, your gold and the player's gold. "
-            "The whole inventory only comes when you ask for it with 'inventory', because it takes the game a few seconds "
-            "and is long: one line per kind of item, and after each item its ID for the commands equip, unequip, give and take. "
-            "With 'filter' you get a short list instead, which is quick: 'favorites' or 'equipped', each item with its ID and "
-            "what it is (bow, sword, shield, helmet ...). Use that to switch weapons in a fight, eg equip your bow. "
-            "'equipped' marks what is worn or held, 'favorite' what the player has among the favorites and, in your own inventory, what you marked with the command favorite. "
-            "With 'corpse' you get what a dead character carries or a container holds, in the same form, for the command loot. "
-            "With 'merchant' you get what a merchant sells, with the price of each thing, how much gold the merchant and "
-            "you have, and what of your things the merchant would buy and for how much: for the commands buy and sell. "
-            "'Queue' comes while commands wait for each other (see 'then' of COMMAND): what you do now and what follows. "
-            "With 'find_gesture' you get no state at all, only the gestures whose name has that word, for the command gesture. "
-            "'Since your last STATE': what became of a loot, pick_up, move_to, move, enter, make_room or sit you started (what you took, or that you did not get there). "
-            "With 'visible' the lists only hold what can really be seen from where 'around' says (the player by default): "
-            "characters in front with no wall in between, living first, then the dead, then the things in front, and only the "
-            "doors and places in front with no wall in between. "
-            "From your own view ('around' you) the characters also hold whom you notice without seeing: 'close' = within about "
-            "2 meters of you wherever they stand, 'heard (not seen)' = someone you hear, of whom your character only knows that "
-            "something is there and roughly where. "
-            "Use it when the talk is about what someone sees, not for an overview. "
-            "With 'stats' you get the level of the player, whether a level-up is waiting, perk points to spend, health, magicka, "
-            "stamina, the weight carried and all skills (highest first), and your own level, health, magicka and stamina."
+            STATE_DESCRIPTION
         ),
         "inputSchema": {
             "type": "object",
@@ -429,7 +673,22 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_READ: {"type": "string", "description": "The ID of a book or a note (from an inventory, from 'Things' or from 'Events'): also give one page of its text."},
                 ARGUMENT_PAGE: {"type": "integer", "description": "With 'read': which page of the book. Nothing = the first one."},
                 ARGUMENT_DEBUG: {"type": "boolean", "description": "true = all data as JSON with timings. Only for testing, never while playing."},
+                ARGUMENT_VIEW: {"type": "boolean", "description": "true = also give a coarse picture of what lies in front of your character, as a grid of cells. "
+                                "It is long: only when it matters."},
+                ARGUMENT_VIEW_SIZE: {"type": "string", "description": f"The size of that picture as columns x rows, eg '24x12' (nothing = {consts.VIEW_USUAL_COLUMNS}x{consts.VIEW_USUAL_ROWS}). "
+                                     "Asks for the picture by itself."},
                 ARGUMENT_COMPARE: {"type": "boolean", "description": "Only for testing the game mod, never while playing: true = fetch the state twice, built in one go by the plugin and built the old way, and list what differs. The player should stand still meanwhile."},
+            },
+        },
+    },
+    {
+        "name": TOOL_HELP,
+        "description": HELP_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                ARGUMENT_TOPIC: {"type": "string", "description": "What to explain: the name of a command, of an argument or a line of STATE, "
+                                 "several with commas between them. Nothing = the list of topics."},
             },
         },
     },
@@ -510,17 +769,67 @@ async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: Com
     return _error(message_id, -32601, f"Method not found: {method}")
 
 
-def _tools_for(voice: CompanionVoice | None) -> list[dict[str, Any]]:
-    """The tools as the AI gets them: with the language the voice of the companion speaks in the note about say"""
+def _say_note_for(voice: CompanionVoice | None) -> str:
+    """The note about the language to write a sentence for say in: the language the voice of the companion speaks"""
     language = voice.spoken_language if voice is not None else PIPER_LANGUAGE_NAME
     if language == PIPER_LANGUAGE_NAME:
-        return TOOLS
-    note = (f"Write it in {language}: that is the language your voice speaks. "
+        return SAY_LANGUAGE_NOTE
+    return (f"Write it in {language}: that is the language your voice speaks. "
             "Keep it short, the voice needs a few seconds for every sentence. ")
+
+
+def _tools_for(voice: CompanionVoice | None) -> list[dict[str, Any]]:
+    """The tools as the AI gets them: with the language the voice of the companion speaks in the note about say"""
+    note = _say_note_for(voice)
+    if note == SAY_LANGUAGE_NOTE:
+        return TOOLS
     tools = copy.deepcopy(TOOLS)
     for tool in tools:
         tool["description"] = str(tool.get("description", "")).replace(SAY_LANGUAGE_NOTE, note)
     return tools
+
+
+def help_topics(manual: list[tuple[tuple[str, ...], str]]) -> list[str]:
+    """The topics of one half of the manual, in the order in which they first come up there"""
+    topics: list[str] = []
+    for tags, _ in manual:
+        for tag in tags:
+            if tag not in topics:
+                topics.append(tag)
+    return topics
+
+
+def manual_text() -> str:
+    """The whole manual in one piece, for the tests"""
+    return "".join(piece for _, piece in COMMAND_MANUAL + STATE_MANUAL)
+
+
+def describe_help(topic_text: str, say_note: str = SAY_LANGUAGE_NOTE) -> tuple[str, bool]:
+    """HELP: the pieces of the manual for the topics that were asked for, in the order of the manual, each piece once.
+    Returns the text and whether it is an error (nothing of what was asked for is a topic)"""
+    command_topics = help_topics(COMMAND_MANUAL)
+    state_topics = [topic for topic in help_topics(STATE_MANUAL) if topic not in command_topics]
+    topic_list = (f"Topics about {TOOL_COMMAND}: {', '.join(command_topics)}. Topics about {TOOL_STATE}: {', '.join(state_topics)}. "
+                  f"Name one in 'topic', or several with commas between them (at most {MAX_HELP_TOPICS}).")
+    # 'move to' and 'Move-To' mean move_to
+    wanted: list[str] = []
+    for part in re.split(r"[,;]+", topic_text):
+        topic = "_".join(part.strip().strip("'\"").lower().replace("-", " ").split())
+        if topic != "" and topic not in wanted:
+            wanted.append(topic)
+    if len(wanted) == 0:
+        return topic_list, False
+    if len(wanted) > MAX_HELP_TOPICS:
+        return f"At most {MAX_HELP_TOPICS} topics at a time, you named {len(wanted)}. Ask again with fewer.", True
+    known = [topic for topic in wanted if topic in command_topics or topic in state_topics]
+    unknown = [topic for topic in wanted if topic not in known]
+    pieces = [piece for tags, piece in COMMAND_MANUAL + STATE_MANUAL if any(tag in known for tag in tags)]
+    answer = "".join(pieces).replace(SAY_LANGUAGE_NOTE, say_note).rstrip(" ,")
+    if answer != "" and answer[-1] not in ".)":
+        answer += "."
+    if len(unknown) > 0:
+        answer = (f"There is no topic {', '.join(repr(topic) for topic in unknown)}. {topic_list}" + (" " + answer if answer != "" else ""))
+    return answer, len(known) == 0
 
 
 async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
@@ -624,6 +933,21 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
         read_page = arguments.get(ARGUMENT_PAGE)
         if not isinstance(read_page, int) or isinstance(read_page, bool) or read_page < 1:
             read_page = 1
+        view_columns = 0
+        view_rows = 0
+        view_size = str(arguments.get(ARGUMENT_VIEW_SIZE, "") or "").strip().lower()
+        if view_size != "":
+            size_match = re.fullmatch(r"(\d{1,3})\s*[x*,]\s*(\d{1,3})", view_size)
+            if size_match is not None:
+                view_columns = int(size_match.group(1))
+                view_rows = int(size_match.group(2))
+            if (size_match is None or not consts.VIEW_MIN_COLUMNS <= view_columns <= consts.VIEW_MAX_COLUMNS
+                    or not consts.VIEW_MIN_ROWS <= view_rows <= consts.VIEW_MAX_ROWS):
+                return _tool_text(f"'view_size' is columns x rows, eg '24x12': {consts.VIEW_MIN_COLUMNS} to {consts.VIEW_MAX_COLUMNS} columns and "
+                                  f"{consts.VIEW_MIN_ROWS} to {consts.VIEW_MAX_ROWS} rows. Nothing = {consts.VIEW_USUAL_COLUMNS}x{consts.VIEW_USUAL_ROWS}.", True)
+        elif arguments.get(ARGUMENT_VIEW) is True:
+            view_columns = consts.VIEW_USUAL_COLUMNS
+            view_rows = consts.VIEW_USUAL_ROWS
         state_result = await queue.get_state(inventory=inventory, corpse=corpse, things=arguments.get(ARGUMENT_THINGS) is True,
                                              max_lines=max_lines, around_companion=around in AROUND_COMPANION_WORDS,
                                              stats=arguments.get(ARGUMENT_STATS) is True,
@@ -631,7 +955,8 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
                                              space=is_space_wanted, find=find, space_meters=space_meters,
                                              space_degrees=space_degrees, space_from_facing=is_space_from_facing,
                                              space_angle=space_angle, space_direction=space_direction,
-                                             inventory_filter=inventory_filter, read=read, read_page=read_page, merchant=merchant)
+                                             inventory_filter=inventory_filter, read=read, read_page=read_page, merchant=merchant,
+                                             view_columns=view_columns, view_rows=view_rows)
         shown_state = state_result.get("state")
         shown_merchant = shown_state.get("merchant") if isinstance(shown_state, dict) and state_result.get("merchant_wanted") else None
         if isinstance(shown_merchant, dict) and shown_merchant.get("status") != MERCHANT_IS_NONE:
@@ -644,6 +969,10 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
 
     if name == TOOL_COMMAND:
         return await _call_command(arguments, queue, voice)
+
+    if name == TOOL_HELP:
+        help_text, is_help_error = describe_help(str(arguments.get(ARGUMENT_TOPIC, "") or ""), _say_note_for(voice))
+        return _tool_text(help_text, is_help_error)
 
     return _tool_json({"status": consts.STATUS_FAILED, "message": f"Unknown tool '{name}'."}, True)
 

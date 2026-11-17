@@ -52,6 +52,82 @@ def _direction(angle_degrees: float, names: list[str]) -> str:
     return names[step % len(names)]
 
 
+# view: the top of the picture reaches this part of its height above the level of the eyes (see VIEW_PART_ABOVE in the
+# plugin of the game mod), so the row at that part from the top is the one that looks straight ahead
+VIEW_PART_ABOVE: float = 0.4
+VIEW_TERRAIN_LETTERS: dict[str, str] = {"wall": "W", "roof": "R"}
+
+
+def _describe_view_cell(cell: dict[str, Any]) -> str:
+    """One cell of the picture: the nearest characters and things in it, and behind them the ground, wall or ceiling"""
+    parts = [f"{entry['label']}:{entry['meters']}" for entry in cell.get("entries", [])]
+    terrain = cell.get("terrain")
+    meters = cell.get("meters", 0)
+    # What the ray met only counts if it lies behind the last thing in front of it: a door is its own wall
+    if terrain is not None and (len(parts) == 0 or meters > cell["entries"][-1]["meters"]):
+        parts.append(str(meters) if terrain == "ground" else f"{VIEW_TERRAIN_LETTERS.get(terrain, 'W')}:{meters}")
+    if len(parts) > 1:
+        return "(" + ",".join(parts) + ")"
+    return parts[0] if len(parts) == 1 else ""
+
+
+def _describe_view_in_words(view: dict[str, Any]) -> str:
+    """What matters most in the picture, as a sentence: where the ground drops away, and the wall straight ahead"""
+    columns = view["columns"]
+    rows = view["rows"]
+    cells = view["cells"]
+    third = max(columns // 3, 1)
+    sectors = (("to your left", range(0, third)), ("ahead", range(third, columns - third)), ("to your right", range(columns - third, columns)))
+    drops: list[str] = []
+    for words, sector_columns in sectors:
+        nearest: int | None = None
+        for column in sector_columns:
+            ground_before = 0
+            # From the feet upwards: ground, ground, and then nothing or ground far below
+            for row in range(rows - 1, -1, -1):
+                cell = cells[row][column]
+                if cell.get("drop"):
+                    nearest = ground_before if nearest is None else min(nearest, ground_before)
+                    break
+                if cell.get("terrain") != "ground":
+                    break
+                ground_before = cell.get("meters", 0)
+        if nearest is not None:
+            drops.append(f"{words} {'right at your feet' if nearest == 0 else f'about {nearest} m away'}")
+    sentences = [("The ground drops away " + ", ".join(drops) + ".") if len(drops) > 0 else "No drop in view."]
+    level_row = min(rows - 1, int(rows * VIEW_PART_ABOVE))
+    walls = [cells[level_row][column]["meters"] for column in sectors[1][1] if cells[level_row][column].get("terrain") == "wall"]
+    if len(walls) > 0:
+        sentences.append(f"Straight ahead a wall about {min(walls)} m away.")
+    else:
+        sentences.append("Straight ahead no wall at eye level.")
+    return " ".join(sentences)
+
+
+def describe_view(view: Any) -> list[str]:
+    """The picture in front of the companion as lines of text: a line that explains it, one line per row of cells,
+    the legend and a sentence about drops and walls"""
+    if not isinstance(view, dict):
+        return ["View: the game sent none. Its game mod, or the plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version 28), "
+                "is older than this, or your character is not in the loaded area."]
+    lines = [f"View from you ({view['degrees']} degrees wide, {view['columns']}x{view['rows']}): top row = up, bottom row = the ground at your feet, "
+             "left = your left. In a cell a plain number = ground that many meters away, W = wall, R = roof or ceiling, "
+             "C = creature, O = object (see the legend), the number behind a colon = meters from you along the ground, "
+             f"empty = nothing within {view['range_meters']} m, (...) = several in one cell, the nearest first:"]
+    for cells in view["cells"]:
+        lines.append(",".join(_describe_view_cell(cell) for cell in cells))
+    if len(view["legend"]) > 0:
+        lines.append("Legend:")
+    for entry in view["legend"]:
+        if entry["is_creature"]:
+            note = "the player" if entry["player"] else ("dead" if entry["dead"] else ("hostile" if entry["hostile"] else ""))
+        else:
+            note = entry["kind"]
+        lines.append(f"{entry['label']} {entry['name']} {entry['ref_id']}" + (f", {note}" if note != "" else ""))
+    lines.append("In words: " + _describe_view_in_words(view))
+    return lines
+
+
 def describe_state(state_result: dict[str, Any]) -> str:
     """Returns the result of CompanionCommandQueue.get_state as text for the AI"""
     lines: list[str] = []
@@ -168,6 +244,10 @@ def describe_state(state_result: dict[str, Any]) -> str:
                                      state_result.get("space_meters_wanted") or 0))
     elif state_result.get("space_missed"):
         lines.append("The game did not send the space around you in time. Ask again.")
+    if state_result.get("view_wanted"):
+        lines.extend(describe_view(state.get("view")))
+    elif state_result.get("view_missed"):
+        lines.append("The game did not send the view in time. Ask again.")
     if len(nearby) == 0:
         lines.append("Nearby: nobody")
     else:

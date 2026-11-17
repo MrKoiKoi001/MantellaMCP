@@ -348,7 +348,18 @@ class companion_constants:
     # 1 at this place = build the state the old way, question by question, although the plugin could build it in one
     # go. The server compares the two ways with it (STATE with 'compare')
     STATE_OPTION_SLOW: int = 14
-    STATE_OPTION_COUNT: int = 21
+    STATE_OPTION_COUNT: int = 23
+    # view: the picture in front of the companion as a grid of cells. The last two numbers of the list above say how
+    # many columns and rows it is to have (0 = no picture). Game mods from VIEW_PROTOCOL on make it
+    STATE_OPTION_VIEW_COLUMNS: int = 21
+    STATE_OPTION_VIEW_ROWS: int = 22
+    VIEW_USUAL_COLUMNS: int = 16
+    VIEW_USUAL_ROWS: int = 9
+    VIEW_MIN_COLUMNS: int = 4
+    VIEW_MAX_COLUMNS: int = 32
+    VIEW_MIN_ROWS: int = 3
+    VIEW_MAX_ROWS: int = 18
+    VIEW_PROTOCOL: int = 20
     # pick_up with several things in one command. Either 'target' names several ref_ids: then KEY_COMMAND_ITEMS carries
     # VALUES_PER_PICK_UP numbers per thing, the two halves of its ref ID. Or 'detail' starts with PICK_UP_ALL: then
     # KEY_COMMAND_PICK_ALL says within how many meters around the target (or around the companion, without a target)

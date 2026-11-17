@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from companion_main import create_app
 from src.companion.companion_constants import companion_constants as consts
+from src.companion.mcp_route import manual_text
 
 TOKEN = "test-token"
 MCP_ROUTE = consts.ROUTE_MCP_PREFIX + TOKEN
@@ -61,7 +62,7 @@ def test_initialize_and_tools_list():
     assert notification.status_code == 202
 
     tools = rpc(client, "tools/list").json()["result"]["tools"]
-    assert [tool["name"] for tool in tools] == ["COMMAND", "STATE"]
+    assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP"]
 
 
 def test_wrong_token_is_not_found():
@@ -1002,7 +1003,7 @@ def test_look_at_and_gesture():
         assert "not a ref_id" in command({"action": "look_at", "target": "the door"})["message"]
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert {"look_at", "gesture"} <= set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
-        assert "come_this_way" in tools[0]["description"]
+        assert "come_this_way" in manual_text()
 
     # The game gets the ID of the animation in two halves, and the name only for its answer
     with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
@@ -1962,8 +1963,8 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
         assert consts.KEY_COMMAND_LOUD not in received_commands[0]
         # Called out: the game is told so, because enemies hear that further away
         assert consts.KEY_COMMAND_QUIET not in sent and sent[consts.KEY_COMMAND_LOUD] == 1
-        assert "always speak with 'quiet'" in tools[0]["description"]
-        assert "about 200 meters" in tools[1]["description"] and "lying asleep" in tools[1]["description"]
+        assert "always speak with 'quiet'" in manual_text()
+        assert "about 200 meters" in manual_text() and "lying asleep" in manual_text()
     # What Piper was given: the sentence that is called out ends with an exclamation mark, the others stay as written
     said_files = list(tmp_path.glob("**/said.txt")) + list(__import__("pathlib").Path(__import__("tempfile").gettempdir()).glob("companion_voice_*/said.txt"))
     said = "".join(file.read_text(encoding="utf-8") for file in said_files)
@@ -2079,7 +2080,7 @@ def test_run_goes_to_the_game_and_the_state_tells_who_runs():
         assert [(sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_RUN]) for sent in received_commands] == [("follow", 1), ("wait", 0)]
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert tools[0]["inputSchema"]["properties"]["run"]["type"] == "boolean"
-        assert "run instead of walk" in tools[0]["description"] and "only your lips, head and face move" in tools[0]["description"]
+        assert "run instead of walk" in manual_text() and "only your lips, head and face move" in manual_text()
         assert "none" in tools[0]["inputSchema"]["properties"]["manner"]["enum"]
 
 
@@ -2105,7 +2106,7 @@ def test_say_tells_the_game_how_long_the_sentence_is():
     # The game mod needs the length when the companion first walks over or turns to another character
     with TestClient(create_app(TOKEN, hold_seconds=5)) as client:
         tools = rpc(client, "tools/list").json()["result"]["tools"]
-        assert "walk over first" in tools[0]["description"]
+        assert "walk over first" in manual_text()
     from src.companion.command_queue import CompanionCommandQueue
     import inspect
     assert "say_ms" in inspect.signature(CompanionCommandQueue.send_command).parameters
@@ -3547,7 +3548,9 @@ def test_state_asks_with_one_list_and_compare_tells_where_the_two_ways_differ():
         assert len(options) == consts.STATE_OPTION_COUNT
         assert options[:6] == [7, 1, 0, 0, 0, 0] and options[consts.STATE_OPTION_SLOW] == 0
         # No inventory, a text to find, no filter, no book
-        assert options[17:] == [0, 1, 0, 0]
+        assert options[17:21] == [0, 1, 0, 0]
+        # No picture of what lies in front of the companion
+        assert options[consts.STATE_OPTION_VIEW_COLUMNS:] == [0, 0]
         assert received_commands[0][consts.KEY_COMMAND_THINGS] == 1 and received_commands[0][consts.KEY_COMMAND_FIND] == "Warmaiden"
         # compare: once in one go, once the old way
         same = state({"compare": True})
@@ -3672,7 +3675,7 @@ def test_attack_with_hold_keeps_the_companion_at_its_spot_and_the_state_tells_it
         assert command({"action": "attack", "target": enemy, "detail": "HOLD"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
         assert command({"action": "attack", "target": enemy})["status"] == consts.STATUS_GAME_NOT_CONNECTED
         tools = rpc(client, "tools/list").json()["result"]["tools"]
-        assert "'hold'" in tools[0]["description"] and "holding position" in tools[0]["description"]
+        assert "'hold'" in manual_text() and "holding position" in manual_text()
     assert consts.ATTACK_HOLD_PROTOCOL <= game_state.GAME_PROTOCOL
     assert run_command(consts.ACTION_ATTACK, enemy, "")[1] == f"You attack {NEARBY[0]['name']} now."
     assert run_command(consts.ACTION_ATTACK, enemy, "", "", consts.ATTACK_HOLD)[1].startswith("You stay where you stand and attack ")
@@ -3701,7 +3704,7 @@ def test_cover_needs_no_target_and_the_state_tells_it():
         assert answer["status"] == consts.STATUS_GAME_NOT_CONNECTED
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert "cover" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
-        assert "cover = take cover" in tools[0]["description"] and "'in cover'" in tools[0]["description"]
+        assert "cover = take cover" in manual_text() and "'in cover'" in manual_text()
     assert _check_step({"action": "cover"}) == ""
     # It sends the companion somewhere, so commands that wait are dropped like for move_to
     assert consts.ACTION_COVER not in consts.ACTIONS_KEEPING_QUEUE and consts.ACTION_COVER not in consts.ACTIONS_REQUIRING_TARGET
@@ -3718,6 +3721,94 @@ def test_cover_needs_no_target_and_the_state_tells_it():
         assert state["companion"]["in_cover"] is True
         you_line = [line for line in describe_state({"connected": True, "fresh": True, "state": state}).split("\n") if line.startswith("You, ")][0]
         assert ", in cover" in you_line and "holding position" not in you_line
+
+
+def test_help_hands_out_the_manual_and_the_descriptions_stay_short():
+    from src.companion import mcp_route
+    from src.companion.mcp_route import COMMAND_MANUAL, STATE_MANUAL, describe_help, help_topics
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def ask(arguments: dict) -> dict:
+            return rpc(client, "tools/call", {"name": "HELP", "arguments": arguments}).json()["result"]
+
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP"]
+        # An AI is handed all of this with every request, so it must not grow back to what it was (about 37,000 characters)
+        assert sum(len(json.dumps(tool)) for tool in tools) < 16000
+        # Without a topic: the list of topics. It needs no game
+        listed = ask({})
+        assert not listed.get("isError") and "Topics about COMMAND: follow, wait, attack" in listed["content"][0]["text"]
+        attack = ask({"topic": "attack"})["content"][0]["text"]
+        assert attack.startswith("attack = attack the target") and "'hold'" in attack and "cover = " not in attack
+        # Several topics in the order of the manual, each piece once, whatever the spelling
+        both = ask({"topic": "Move To, follow"})["content"][0]["text"]
+        assert both.index("follow = ") < both.index("move_to = ") and both.count("run = true") == 1
+        unknown = ask({"topic": "teleport"})
+        assert unknown["isError"] is True and "no topic 'teleport'" in unknown["content"][0]["text"]
+        half = ask({"topic": "teleport, wait"})
+        assert not half.get("isError") and half["content"][0]["text"].endswith("wait = stay here.")
+        assert ask({"topic": "a,b,c,d,e,f,g"})["isError"] is True
+    # Every command is in the list of the description and has its piece of the manual, and so has every argument of STATE
+    topics = help_topics(COMMAND_MANUAL) + help_topics(STATE_MANUAL)
+    for action in consts.PLAYER_ACTIONS:
+        assert action in topics and action in mcp_route.COMMAND_DESCRIPTION, action
+    for argument in mcp_route.TOOLS[1]["inputSchema"]["properties"]:
+        assert argument in topics or argument in (mcp_route.ARGUMENT_DEBUG, mcp_route.ARGUMENT_COMPARE), argument
+    # The note about the language of the voice is swapped in the manual as it is in the description
+    assert "Write it in German" in describe_help("say", "Write it in German. ")[0]
+    assert "Write it in English" in describe_help("say")[0]
+
+
+def test_view_turns_the_numbers_of_the_plugin_into_a_picture_of_text():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state
+    from src.companion.game_state import read_view
+    from src.companion.mcp_route import describe_help
+    from src.companion.state_text import describe_view
+
+    # 4 columns, 3 rows: sky on top, a wall with the player in front of it and a chest, then ground with a drop on the right
+    nothing = [0, 0, 0, 0, 0, 0, 0]
+    legend = [1, 0x0000, 0x0014, game_state.VIEW_CREATURE_PLAYER, 1, 0x0004, 0xA2B1, game_state.VIEW_CREATURE_HOSTILE, 2, 0xFF00, 0x0EB0, 2]
+    cells = (nothing + nothing + nothing + nothing
+             + [2, 12, 0, 1, 6, 2, 9] + [2, 12, 0, 2, 9, 0, 0] + [2, 5, 0, 3, 5, 0, 0] + [3, 2, 0, 0, 0, 0, 0]
+             + [1, 2, 0, 0, 0, 0, 0] + [1, 2, 0, 0, 0, 0, 0] + [1, 2, 0, 0, 0, 0, 0] + [0, 0, 1, 0, 0, 0, 0])
+    numbers = [1, 4, 3, 120, 80, 3, 4, 7] + legend + cells
+    view = read_view(numbers, ["Koi", "Frost Troll", "Chest"])
+    assert view is not None and [entry["label"] for entry in view["legend"]] == ["C1", "C2", "O1"]
+    assert view["legend"][2]["ref_id"] == "FF000EB0" and view["legend"][2]["kind"] == "container"
+    lines = describe_view(view)
+    assert lines[0].startswith("View from you (120 degrees wide, 4x3)")
+    # Nothing stays empty, ground is a bare number, several in one cell stand in brackets with the nearest first,
+    # and a thing right at the wall it stands at hides that wall
+    assert lines[1:4] == [",,,", "(C1:6,C2:9,W:12),(C2:9,W:12),O1:5,R:2", "2,2,2,"]
+    assert lines[4:8] == ["Legend:", "C1 Koi 00000014, the player", "C2 Frost Troll 0004A2B1, hostile", "O1 Chest FF000EB0, container"]
+    assert lines[8] == "In words: The ground drops away to your right right at your feet. Straight ahead a wall about 5 m away."
+    # What cannot be read is no picture, and the text says so
+    assert read_view([2, 4, 3], []) is None and read_view(numbers[:-1], []) is None and read_view(None, None) is None
+    assert describe_view(None)[0].startswith("View: the game sent none.")
+
+    assert "view" not in game_state.read_game_state(build_state())
+    # In the state the picture only shows when it was asked for, built the old way or in one go
+    from src.companion.fake_game import pack_quick_state
+    from src.companion.state_text import describe_state
+    raw = build_state()
+    raw[game_state.KEY_VIEW] = numbers
+    raw[game_state.KEY_VIEW_NAMES] = ["Koi", "Frost Troll", "Chest"]
+    for sent in (raw, pack_quick_state(raw)):
+        shown = game_state.read_game_state(sent)
+        assert shown["view"]["columns"] == 4
+        assert "View from you" not in describe_state({"connected": True, "fresh": True, "state": shown})
+        asked = describe_state({"connected": True, "fresh": True, "state": shown, "view_wanted": True})
+        assert "View from you (120 degrees wide, 4x3)" in asked and "O1 Chest FF000EB0, container" in asked
+    assert "did not send the view in time" in describe_state({"connected": True, "fresh": False, "state": game_state.read_game_state(build_state()), "view_missed": True, "age_seconds": 3})
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def state(arguments: dict) -> dict:
+            return rpc(client, "tools/call", {"name": "STATE", "arguments": arguments}).json()["result"]
+
+        # A size that makes no sense is told without asking the game
+        assert state({"view_size": "200x3"})["isError"] is True and state({"view_size": "wide"})["isError"] is True
+    assert "With 'view' you get a coarse picture" in describe_help("view")[0] and describe_help("view_size")[1] is False
+    assert consts.VIEW_PROTOCOL <= game_state.GAME_PROTOCOL
 
 
 def test_unfavorite_is_favorite_with_off():

@@ -94,6 +94,22 @@ KEY_SPACE: str = "space"
 # clockwise from there; less: the rays go from the left edge of the angle to the right one), how far they reach in
 # meters, and where the companion faces in degrees
 KEY_SPACE_INFO: str = "space_info"
+# Only when the server asked for it: the picture in front of the companion as numbers (see GetView in the plugin of the
+# game mod): the format, columns, rows, degrees from left to right, how many meters the rays reach, how many entries
+# the legend has, how many numbers each entry and each cell has, then the legend (a character or a thing, the two
+# halves of its ref ID, its flags or kind) and the cells row by row from the top (what the ray met, its meters,
+# whether it found a drop, and the two nearest entries of the legend with their meters). The names of the legend
+# come as texts of their own
+KEY_VIEW: str = "view"
+KEY_VIEW_NAMES: str = "view_names"
+VIEW_FORMAT: int = 1
+VIEW_HEAD_COUNT: int = 8
+VIEW_TERRAINS: dict[int, str] = {1: "ground", 2: "wall", 3: "roof"}
+VIEW_IS_CREATURE: int = 1
+VIEW_CREATURE_HOSTILE: int = 1
+VIEW_CREATURE_DEAD: int = 2
+VIEW_CREATURE_PLAYER: int = 4
+VIEW_THING_KINDS: dict[int, str] = {1: "door", 2: "container", 3: "furniture", 4: "item"}
 SPACE_INFO_COUNT: int = 4
 SPACE_FULL_CIRCLE: int = 360
 # Only when the server asked for a search by name: the text that was looked for, and one text per match, nearest first,
@@ -303,7 +319,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 19
+GAME_PROTOCOL: int = 20
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -549,6 +565,9 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["space"] = space
         if space_look is not None:
             state["space_look"] = space_look
+    view = read_view(raw.get(KEY_VIEW), raw.get(KEY_VIEW_NAMES))
+    if view is not None:
+        state["view"] = view
     _add_view_of_companion(state)
 
     mismatch = raw.get(KEY_PLUGIN_MISMATCH)
@@ -907,6 +926,51 @@ def _read_spells(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
         if name != "":
             spells.append({"id": format_ref_id(form_id & 0xFFFFFFFF), "name": _tidy_name(name), "magicka": magicka})
     return spells
+
+
+def read_view(raw_view: Any, raw_names: Any) -> dict[str, Any] | None:
+    """The picture in front of the companion (see KEY_VIEW), or None if the game sent none or one this server cannot read"""
+    values = _numbers(raw_view)
+    if values is None or len(values) < VIEW_HEAD_COUNT or values[0] != VIEW_FORMAT:
+        return None
+    _, columns, rows, degrees, range_meters, legend_count, per_legend, per_cell = values[:VIEW_HEAD_COUNT]
+    if columns < 1 or rows < 1 or legend_count < 0 or per_legend < 4 or per_cell < 7:
+        return None
+    cells_start = VIEW_HEAD_COUNT + legend_count * per_legend
+    if len(values) < cells_start + columns * rows * per_cell:
+        return None
+    names = raw_names if isinstance(raw_names, list) else []
+    legend: list[dict[str, Any]] = []
+    creature_count = 0
+    thing_count = 0
+    for number in range(legend_count):
+        kind, high, low, flags = values[VIEW_HEAD_COUNT + number * per_legend: VIEW_HEAD_COUNT + number * per_legend + 4]
+        name = str(names[number]).strip() if number < len(names) else ""
+        entry: dict[str, Any] = {"ref_id": format_ref_id(((high & 0xFFFF) << 16) | (low & 0xFFFF)), "name": name or "unknown"}
+        if kind == VIEW_IS_CREATURE:
+            creature_count += 1
+            entry.update({"label": f"C{creature_count}", "is_creature": True, "hostile": flags == VIEW_CREATURE_HOSTILE,
+                          "dead": flags == VIEW_CREATURE_DEAD, "player": flags == VIEW_CREATURE_PLAYER})
+        else:
+            thing_count += 1
+            entry.update({"label": f"O{thing_count}", "is_creature": False, "kind": VIEW_THING_KINDS.get(flags, "thing")})
+        legend.append(entry)
+    grid: list[list[dict[str, Any]]] = []
+    for row in range(rows):
+        cells: list[dict[str, Any]] = []
+        for column in range(columns):
+            start = cells_start + (row * columns + column) * per_cell
+            terrain, meters, is_drop, first, first_meters, second, second_meters = values[start: start + 7]
+            cell: dict[str, Any] = {"drop": is_drop != 0, "entries": []}
+            if terrain in VIEW_TERRAINS:
+                cell["terrain"] = VIEW_TERRAINS[terrain]
+                cell["meters"] = meters
+            for place, entry_meters in ((first, first_meters), (second, second_meters)):
+                if 1 <= place <= len(legend):
+                    cell["entries"].append({"label": legend[place - 1]["label"], "meters": entry_meters})
+            cells.append(cell)
+        grid.append(cells)
+    return {"columns": columns, "rows": rows, "degrees": degrees, "range_meters": range_meters, "legend": legend, "cells": grid}
 
 
 def _read_space_look(raw_info: Any) -> dict[str, int] | None:

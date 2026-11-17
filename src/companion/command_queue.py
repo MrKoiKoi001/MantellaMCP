@@ -364,7 +364,7 @@ class CompanionCommandQueue:
                         space_degrees: int = consts.SPACE_NO_DIRECTION, space_from_facing: bool = False,
                         space_angle: int = consts.SPACE_FULL_CIRCLE_DEGREES, space_direction: str = "",
                         inventory_filter: str = "", read: str = "", read_page: int = 1, merchant: str = "",
-                        slow: bool = False) -> dict[str, Any]:
+                        slow: bool = False, view_columns: int = 0, view_rows: int = 0) -> dict[str, Any]:
         """Returns the game state. If the game is connected, it is asked for a fresh state first
 
         Args:
@@ -419,7 +419,8 @@ class CompanionCommandQueue:
             extra[consts.KEY_COMMAND_STATE_OPTIONS] = [
                 max_lines, int(things), int(around_companion), int(stats), int(visible), int(space), space_meters, space_degrees,
                 int(space_from_facing), space_angle, read_high, read_low, read_page, int(self.mutes_game_lines), int(slow),
-                target_high, target_low, int(inventory != ""), int(find != ""), int(inventory_filter != ""), int(read != "")]
+                target_high, target_low, int(inventory != ""), int(find != ""), int(inventory_filter != ""), int(read != ""),
+                view_columns, view_rows]
             request = await self.send_command(consts.ACTION_REPORT_STATE, target=corpse or merchant, detail=inventory, count=max_lines, things=things,
                                               around_companion=around_companion, stats=stats, visible=visible, space=space,
                                               find=find, space_meters=space_meters, space_degrees=space_degrees,
@@ -466,6 +467,9 @@ class CompanionCommandQueue:
                 # The kept state may still carry the surroundings from an earlier question, and the companion has moved since
                 "space_wanted": space and is_fresh,
                 "space_missed": space and not is_fresh,
+                # The kept state may still carry the picture from an earlier question, and the companion has moved since
+                "view_wanted": view_columns > 0 and is_fresh,
+                "view_missed": view_columns > 0 and not is_fresh,
                 # How the AI wanted the rays to look. How they did look is in the state itself ('space_look')
                 "space_direction_wanted": space_direction,
                 "space_meters_wanted": space_meters,
