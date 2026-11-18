@@ -931,7 +931,7 @@ def _describe_thing(thing: dict[str, Any], is_from_companion: bool = False) -> s
     """A piece of furniture, a container or an item that lies around, as a line of the list 'Things'"""
     kind = thing.get("kind")
     if kind == THING_FURNITURE:
-        label = "seat" if thing.get("seat") else "furniture"
+        label = "seat" if thing.get("seat") else ("bed" if thing.get("bed") else "furniture")
     elif kind == THING_CONTAINER:
         label = "container, locked" if thing.get("locked") else "container" + _describe_item_count(thing)
     else:

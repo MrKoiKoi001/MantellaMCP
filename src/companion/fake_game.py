@@ -60,6 +60,8 @@ THINGS: list[list[str]] = [
     ["2", "0005A410", "2", "60", "0", "Iron Dagger"],
 ]
 SEAT_REF_ID: str = "0005A3F1"
+# A bed the companion can sleep in. It is not among THINGS, so that the lists of the tests stay as they are
+BED_REF_ID: str = "0005A3F5"
 ITEM_REF_ID: str = "0005A410"
 # The state in one go (see pack_quick_state): how many numbers come before the first block, and the texts that are
 # no lists
@@ -578,6 +580,14 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if target != MERCHANT_REF_ID:
             return False, f"{name_of(target) or target} is no merchant.", target_ref_id
         return True, f"Fake game did '{action}' with the item {item_id} at {name_of(target)}.", target_ref_id
+    if action == consts.ACTION_SLEEP:
+        if target == BED_REF_ID:
+            return True, ("You walk to Bed and lie down to sleep. You are told once you sleep, or if you could not lie down. "
+                          "'follow' gets you up and makes you come along again."), target_ref_id
+        for kind, ref_id, distance, angle, flag, name in THINGS:
+            if ref_id == target:
+                return False, f"{name} is no bed. Take the ref_id of a bed from 'Things' in STATE (argument 'things').", target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_COVER:
         return True, ("You run to cover about 5 meters away, out of sight of the 1 enemies around, and keep to it until a command sends you "
                       "somewhere ('follow' brings you back to the player)."), target_ref_id

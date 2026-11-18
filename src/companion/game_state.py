@@ -111,6 +111,8 @@ KEY_SIGHT: str = "sight"
 # of the game mod): two numbers each, the ref ID and the whole meters above the feet of the viewer (negative = below).
 # Only what stands at least 2 meters higher or lower is in it
 KEY_HEIGHTS: str = "heights"
+FURNITURE_IS_SEAT: int = 1
+FURNITURE_IS_BED: int = 2
 VALUES_PER_HEIGHT: int = 2
 # The lists of a state whose entries can carry a height
 LISTS_WITH_HEIGHTS: tuple[str, ...] = ("nearby", "things", "traps", "found")
@@ -336,7 +338,7 @@ CONTAINER_COUNT_STEP: int = 2
 PLUGIN_VERSION_WITH_SIGHT: int = 15
 # Goes up whenever the lists of numbers in the state change their length or meaning, together with ProtocolNumber
 # in KI_MCP_Gefaehrte_Loop.psc of the game mod. A game mod that sends another number (or none: 0) does not fit this server
-GAME_PROTOCOL: int = 21
+GAME_PROTOCOL: int = 22
 CORPSE_VALUE_COUNT: int = 3
 CORPSE_VALUE_COUNT_WITHOUT_KIND: int = 1
 # Older game mods send fewer numbers: only the weather and the time before there were quests,
@@ -836,7 +838,10 @@ def _read_things(raw_things: Any) -> list[dict[str, Any]]:
         thing: dict[str, Any] = {"kind": THING_KINDS[kind_number], "ref_id": format_ref_id(form_id), "name": _tidy_name(name),
                                  "distance_meters": distance, "angle_degrees": angle}
         if thing["kind"] == THING_FURNITURE:
-            thing["seat"] = flag != 0
+            # 1 = a character can sit on it, 2 = it can sleep on it (a newer plugin of the game mod tells that)
+            thing["seat"] = flag == FURNITURE_IS_SEAT
+            if flag == FURNITURE_IS_BED:
+                thing["bed"] = True
         elif thing["kind"] == THING_CONTAINER:
             # 1 = locked. A newer plugin of the game mod also tells how many different items an open one holds:
             # 2 x (that number + 1), so 2 = empty. 0 = it does not tell

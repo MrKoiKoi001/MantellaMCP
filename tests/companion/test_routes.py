@@ -3893,6 +3893,32 @@ def test_heights_tell_who_stands_above_or_below_the_viewer():
     assert "8 m above" in describe_help("directions")[0]
 
 
+def test_sleep_lays_the_companion_down_in_a_bed():
+    from src.companion import game_state
+    from src.companion.fake_game import BED_REF_ID, SEAT_REF_ID, run_command
+    from src.companion.game_state import _read_things
+    from src.companion.mcp_route import describe_help
+    from src.companion.state_text import _describe_thing
+
+    assert consts.ACTION_SLEEP in consts.PLAYER_ACTIONS and consts.ACTION_SLEEP in consts.ACTIONS_REQUIRING_TARGET
+    assert consts.ACTION_SLEEP not in consts.ACTIONS_KEEPING_QUEUE and consts.SLEEP_PROTOCOL <= game_state.GAME_PROTOCOL
+    # The plugin tells which furniture is a bed
+    bed, bench, table = _read_things(["0\t00093BDC\t3\t10\t2\tBed", "0\t0005A3F1\t3\t-90\t1\tWooden Bench", "0\t0005A3F2\t6\t120\t0\tTable"])
+    assert bed["bed"] is True and bed["seat"] is False and bench["seat"] is True and "bed" not in bench
+    assert table["seat"] is False and "bed" not in table
+    assert _describe_thing(bed).startswith("00093BDC Bed, bed, ") and ", seat, " in _describe_thing(bench) and ", furniture, " in _describe_thing(table)
+    # The fake game answers like the game mod
+    assert run_command(consts.ACTION_SLEEP, BED_REF_ID, "")[0] is True
+    assert "is no bed" in run_command(consts.ACTION_SLEEP, SEAT_REF_ID, "")[1]
+    assert "sleep = walk to the bed" in describe_help("sleep")[0]
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "sleep"}}))
+        assert answer["status"] == consts.STATUS_FAILED and "needs a target" in answer["message"]
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "sleep", "target": BED_REF_ID}}))
+        assert answer["status"] == consts.STATUS_GAME_NOT_CONNECTED
+
+
 def test_unfavorite_is_favorite_with_off():
     from src.companion.mcp_route import _check_step
 

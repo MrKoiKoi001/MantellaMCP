@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.57"
+SERVER_VERSION: str = "0.58"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -195,6 +195,13 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "sit = walk to the piece of furniture that is the target and sit down on it (no target = the seat nearest to you). "
         "That takes a few seconds, your next STATE says 'sitting' once you sit. "
         "You stay seated until 'follow' or another command that makes you move. "
+    )),
+    (("sleep",), (
+        "sleep = walk to the bed that is the target and lie down to sleep in it (a 'bed' from 'Things' in STATE). "
+        "That takes a while; 'Since your last STATE' tells you once you sleep, or that you could not lie down "
+        "(the game may not let you use a bed that belongs to someone else). "
+        "You stay in bed until 'follow' or another command that makes you move; wait and stand_down leave you there. "
+        "sit does not work on a bed. "
     )),
     (("look_at",), (
         "look_at = keep your eyes on the target (a character or anything else with a ref_id; the player is 00000014). "
@@ -471,7 +478,7 @@ STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
     )),
     (("things",), (
         "'Things' only comes when you ask for it with 'things': what stands and lies within about 10 meters of the player, "
-        "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; tables are just called 'Table'), containers such as "
+        "one per line with its ref_id: furniture ('seat' if you can sit on it, see the command sit; 'bed' if you can sleep in it, see the command sleep; tables are just called 'Table'), containers such as "
         "chests and barrels (see the command loot; 'locked' if you cannot open it, 'empty' or how many different items are in it if the game tells) and items that lie around "
         "(see the command pick_up; arrows that were shot are among them). "
         "Ask for it when you look for a seat or a chest or the player asks what is around, not every time. "
@@ -583,7 +590,7 @@ COMMAND_DESCRIPTION: str = (
     "Moving: follow = follow the player (with a target: that character), wait = stay here, move_to = walk to the "
     "target and wait there, move = walk some meters in a direction ('detail', eg 'north 10'), enter = go through a "
     "door, lead = walk ahead of the player to the target, make_room = step out of the player's way, face = turn to "
-    "the target or to a point of the compass, sit = sit down on a seat, sneak = on, off or auto. 'run': true makes "
+    "the target or to a point of the compass, sit = sit down on a seat, sleep = lie down in a bed, sneak = on, off or auto. 'run': true makes "
     "you run (follow, move_to, move, enter, lead). "
     "Fighting: attack = attack the target, only when the player wants it (you run to it; with 'detail' "
     f"'{consts.ATTACK_HOLD}' you stay where you stand and fight from there, which needs a bow or a spell), cover = run to a spot "
@@ -1261,6 +1268,14 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
                 if not isinstance(protocol, int) or protocol < consts.ATTACK_HOLD_PROTOCOL:
                     return {"status": consts.STATUS_FAILED, "message": f"attack with '{consts.ATTACK_HOLD}' needs a newer game mod than the one that is running "
                             "(build and install it again with build.py --install). Nothing was attacked. Without 'detail' you run to the target as before."}, True
+    if action == consts.ACTION_SLEEP:
+        # A game mod from before this does not know the command
+        state = await queue.peek_state()
+        if isinstance(state, dict):
+            protocol = state.get("protocol")
+            if not isinstance(protocol, int) or protocol < consts.SLEEP_PROTOCOL:
+                return {"status": consts.STATUS_FAILED, "message": "sleep needs a newer game mod than the one that is running "
+                        "(build and install it again with build.py --install). You stay as you are."}, True
     if action == consts.ACTION_COVER:
         target = ""
         detail = ""

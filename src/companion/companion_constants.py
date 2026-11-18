@@ -162,6 +162,9 @@ class companion_constants:
     ACTION_PICK_UP: str = "pick_up"
     ACTION_LOOT: str = "loot"
     ACTION_SIT: str = "sit"
+    # sleep: the companion walks to the bed that is the target and lies down to sleep. Game mods from SLEEP_PROTOCOL on know it
+    ACTION_SLEEP: str = "sleep"
+    SLEEP_PROTOCOL: int = 22
     ACTION_LOOK_AT: str = "look_at"
     ACTION_GESTURE: str = "gesture"
     # For gesture: what 'detail' says to end a gesture that goes on and on
@@ -410,6 +413,7 @@ class companion_constants:
         ACTION_LOOT,
         ACTION_PICK_UP,
         ACTION_SIT,
+        ACTION_SLEEP,
         ACTION_LOOK_AT,
         ACTION_GESTURE,
         ACTION_EXPRESSION,
@@ -453,7 +457,7 @@ class companion_constants:
     # These take 'run': the companion runs instead of walking
     ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW, ACTION_LEAD]
     ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE,
-                                           ACTION_LEAD] + ITEM_ACTIONS
+                                           ACTION_LEAD, ACTION_SLEEP] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"
