@@ -214,6 +214,9 @@ def describe_state(state_result: dict[str, Any]) -> str:
     gear_line = _describe_gear(state.get("player"), state.get("companion"))
     if gear_line != "":
         lines.append(gear_line)
+    speaking_seconds = state_result.get("speaking_seconds")
+    if isinstance(speaking_seconds, int) and not isinstance(speaking_seconds, bool) and speaking_seconds > 0:
+        lines.append(f"You are still speaking in the game, for about {speaking_seconds} s: say nothing to the player until that is over.")
     reports = state_result.get("reports")
     if isinstance(reports, list) and len(reports) > 0:
         lines.append("Since your last STATE: " + " ".join(str(report) for report in reports))
@@ -436,7 +439,17 @@ def _describe_gear(player: Any, companion: Any) -> str:
         parts.append(f"the player's gold {player['gold']}")
     if len(parts) == 0:
         return ""
-    return "Gear: " + ", ".join(parts)
+    return "Gear: " + ", ".join(parts) + _describe_hands(companion)
+
+
+def _describe_hands(companion: Any) -> str:
+    """A measurement for the companion that boxes although it holds its bow (see KEY_COMPANION_HANDS), as a line of its own"""
+    hands = companion.get("hands") if isinstance(companion, dict) else None
+    if not isinstance(hands, dict):
+        return ""
+    return (f"\nHands (test): the game has {hands['equipped_right']} right and {hands['equipped_left']} left (7 = bow, 12 = crossbow, 0 = nothing), "
+            f"the animation shows {hands['shown_right']} right and {hands['shown_left']} left, weapon {'drawn' if hands['drawn'] else 'not drawn'}. "
+            "If you box although you hold your bow, tell the player these numbers.")
 
 
 def _describe_spells(spells: Any) -> list[str]:
@@ -478,7 +491,7 @@ def _describe_filtered_items(owner: str, inventory: Any, item_filter: str) -> st
         texts.append(text)
     if len(texts) == 0:
         if item_filter == consts.FILTER_FAVORITES and is_own:
-            return f"{title}: none. Mark a weapon, a shield or a piece of armor of yours with the command favorite."
+            return f"{title}: none. Mark a weapon, a shield, a piece of armor or your arrows with the command favorite."
         return f"{title}: nothing."
     return f"{title}: {', '.join(texts)}"
 
@@ -587,6 +600,43 @@ def _describe_heard(heard: Any, companion: Any) -> list[str]:
         speaker = "You" if own_ref_id is not None and line.get("ref_id") == own_ref_id else line.get("name")
         lines.append(f"- {_describe_age(line.get('seconds_ago', 0))}, {speaker}: {line.get('text')}")
     return lines
+
+
+def describe_wait(result: dict[str, Any], tool_name: str) -> str:
+    """The answer to WAIT_FOR_EVENT: whether something woke the AI, what happened and was said since it asked the last
+    time, and what to do next (see CompanionCommandQueue.wait_for_event for the entries of the result)"""
+    waited = round(float(result.get("waited_seconds") or 0.0))
+    if result.get("taken_over"):
+        return (f"This {tool_name} is over after {waited} s without news for you: a newer {tool_name} of yours has taken over and waits now. "
+                f"Say nothing about this, and do not call {tool_name} again because of this answer.")
+    state = result.get("state")
+    reports = result.get("reports")
+    report_lines = ["What became of what you started: " + " ".join(str(report) for report in reports)] if isinstance(reports, list) and len(reports) > 0 else []
+    speaking_seconds = result.get("speaking_seconds")
+    speech_lines: list[str] = []
+    if result.get("speech_over"):
+        speech_lines.append("You have finished speaking in the game: now you can talk to the player again.")
+    elif isinstance(speaking_seconds, int) and speaking_seconds > 0:
+        speech_lines.append(f"You are still speaking in the game, for about {speaking_seconds} s: say nothing to the player until that is over.")
+    news = (report_lines + _describe_events(result.get("events"))
+            + _describe_heard(result.get("heard"), state.get("companion") if isinstance(state, dict) else None))
+    if result.get("woken") and len(news) > 0:
+        head = f"Something happened (after {waited} s of waiting)."
+    elif result.get("woken"):
+        head = f"Your sentence is over (after {waited} s of waiting)."
+    elif len(news) > 0:
+        head = f"Nothing that needs you happened in {waited} s. What went on meanwhile, for you to know:"
+    else:
+        head = f"Nothing happened in {waited} s."
+    if not result.get("connected"):
+        head += " The game is not connected right now (not running, in a menu or at a loading screen)."
+    if result.get("woken") and len(news) > 0:
+        tail = f"React as your character if this is worth a word or a deed, then call {tool_name} again."
+    elif result.get("woken"):
+        tail = f"Go on with what you wanted to tell the player, if anything, then call {tool_name} again."
+    else:
+        tail = f"Say nothing about this and call {tool_name} again."
+    return "\n".join([head] + speech_lines + news + [tail])
 
 
 def _describe_events(events: Any) -> list[str]:
@@ -762,7 +812,7 @@ def _describe_companion(companion: Any, nearby: list[dict[str, Any]]) -> str:
         parts.append(f"sneak {companion['sneak_mode']}")
     # The command passive: the companion starts no fight of its own accord
     if companion.get("passive"):
-        parts.append("passive on")
+        parts.append("passive full (you do not fight at all)" if companion.get("no_fight") else "passive on")
     # attack with 'hold': the companion keeps to its spot in a fight until a command sends it somewhere
     # cover: the spot it keeps to is one its enemies could not see when it took it
     if companion.get("in_cover"):

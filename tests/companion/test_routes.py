@@ -62,7 +62,7 @@ def test_initialize_and_tools_list():
     assert notification.status_code == 202
 
     tools = rpc(client, "tools/list").json()["result"]["tools"]
-    assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP"]
+    assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP", "WAIT_FOR_EVENT"]
 
 
 def test_wrong_token_is_not_found():
@@ -1124,7 +1124,9 @@ def test_say_makes_the_sound_and_tells_the_game_which_line_to_speak(tmp_path):
 
         threading.Thread(target=game, daemon=True).start()
         time.sleep(0.3)
-        assert command(client, {"action": "say", "detail": "Watch out!"}) == {"status": consts.STATUS_DONE, "message": "You say it aloud."}
+        said = command(client, {"action": "say", "detail": "Watch out!"})
+        # The answer tells how long the sentence takes, so that the AI does not talk into it
+        assert said["status"] == consts.STATUS_DONE and said["message"].startswith("You say it aloud. You speak for about ") and "WAIT_FOR_EVENT" in said["message"]
         sent = received_commands[0]
         # The text goes along for the subtitle of the line
         assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_DETAIL]) == ("say", "Watch out!")
@@ -1945,7 +1947,7 @@ def test_sheathe_doors_loud_voice_and_what_the_player_does(tmp_path):
         threading.Thread(target=game, daemon=True).start()
         time.sleep(0.3)
         answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "say", "detail": "Archers on the tower.", "loud": True}}))
-        assert answer == {"status": consts.STATUS_DONE, "message": "You say it aloud."}
+        assert answer["status"] == consts.STATUS_DONE and answer["message"].startswith("You say it aloud.")
         sent = received_commands[0]
         assert sent[consts.KEY_COMMAND_TALK] in consts.TALK_ANIMATIONS and sent[consts.KEY_COMMAND_DETAIL] == "Archers on the tower."
         tools = rpc(client, "tools/list").json()["result"]["tools"]
@@ -2736,7 +2738,7 @@ def test_inventory_filter_gives_a_short_list():
     plain = game_state.read_game_state(build_state(inventory=consts.INVENTORY_OWN))
     none = describe_state({"connected": True, "fresh": True, "state_age_seconds": 0.0, "state": plain,
                            "inventory_wanted": consts.INVENTORY_OWN, "inventory_filter": consts.FILTER_FAVORITES})
-    assert "Your favorites: none. Mark a weapon" in none
+    assert "Your favorites: none. Mark a weapon" in none and "your arrows" in none
 
     # The game is told the filter, so that it only collects that part
     async def request(**wanted: str) -> dict:
@@ -3184,7 +3186,7 @@ def test_the_log_tells_silence_and_what_became_of_commands():
     line_with("COMMAND", "follow", "not sent, no game has asked")
     line_with("GAME first request")
     line_with("GAME sent its state (number 1)")
-    line_with("GAME sent 1 urgent events: A fight began.")
+    line_with("GAME sent 1 events: A fight began.")
     line_with("GAME says the companion is busy.")
     # The game stood still after a request that ran out, then it worked on a command
     assert "nothing, its request had run out" in line_with("GAME back after", "of silence")
@@ -3635,10 +3637,11 @@ def test_passive_holds_the_companion_back_and_the_state_tells_it():
         def command(arguments: dict) -> dict:
             return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
 
-        assert "passive needs 'on' or 'off'" in command({"action": "passive"})["message"]
-        assert "passive needs 'on' or 'off'" in command({"action": "passive", "detail": "maybe"})["message"]
+        assert "passive needs 'on', 'full' or 'off'" in command({"action": "passive"})["message"]
+        assert "passive needs 'on', 'full' or 'off'" in command({"action": "passive", "detail": "maybe"})["message"]
         # What is fine is refused only because no game is there
         assert command({"action": "passive", "detail": "ON"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+        assert command({"action": "passive", "detail": "Full"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert "passive" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
     # Holding back leaves waiting commands alone, like sneak does
@@ -3655,6 +3658,16 @@ def test_passive_holds_the_companion_back_and_the_state_tells_it():
         assert state["companion"]["passive"] is True
         you_line = [line for line in describe_state({"connected": True, "fresh": True, "state": state}).split("\n") if line.startswith("You, ")][0]
         assert ", passive on" in you_line
+    # passive with 'full': the companion does not fight at all, and the state tells that apart
+    assert consts.PASSIVE_FULL_PROTOCOL <= game_state.GAME_PROTOCOL
+    assert run_command(consts.ACTION_PASSIVE, "", "", "", consts.PASSIVE_FULL)[1].startswith("You do not fight at all now")
+    raw[game_state.KEY_COMPANION_PASSIVE] = 2
+    for sent in (raw, pack_quick_state(raw)):
+        state = read_game_state(sent)
+        assert state["companion"]["passive"] is True and state["companion"]["no_fight"] is True
+        assert ", passive full (you do not fight at all)" in describe_state({"connected": True, "fresh": True, "state": state})
+    from src.companion.mcp_route import describe_help
+    assert "full = you do not fight at all" in describe_help("passive")[0]
 
 
 def test_attack_with_hold_keeps_the_companion_at_its_spot_and_the_state_tells_it():
@@ -3732,7 +3745,7 @@ def test_help_hands_out_the_manual_and_the_descriptions_stay_short():
             return rpc(client, "tools/call", {"name": "HELP", "arguments": arguments}).json()["result"]
 
         tools = rpc(client, "tools/list").json()["result"]["tools"]
-        assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP"]
+        assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP", "WAIT_FOR_EVENT"]
         # An AI is handed all of this with every request, so it must not grow back to what it was (about 37,000 characters)
         assert sum(len(json.dumps(tool)) for tool in tools) < 16000
         # Without a topic: the list of topics. It needs no game
@@ -3917,6 +3930,266 @@ def test_sleep_lays_the_companion_down_in_a_bed():
         assert answer["status"] == consts.STATUS_FAILED and "needs a target" in answer["message"]
         answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "sleep", "target": BED_REF_ID}}))
         assert answer["status"] == consts.STATUS_GAME_NOT_CONNECTED
+
+
+def test_hands_of_a_companion_that_fights_with_a_bow_are_shown_for_testing():
+    from src.companion import game_state
+    from src.companion.fake_game import build_state, pack_quick_state
+    from src.companion.game_state import read_game_state
+    from src.companion.mcp_route import describe_help
+    from src.companion.state_text import describe_state
+
+    raw = build_state()
+    assert "Hands (test)" not in describe_state({"connected": True, "fresh": True, "state": read_game_state(raw)})
+    raw[game_state.KEY_COMPANION_HANDS] = [7, 7, 0, 0, 1]
+    for sent in (raw, pack_quick_state(raw)):
+        shown = read_game_state(sent)
+        assert shown["companion"]["hands"] == {"equipped_right": 7, "equipped_left": 7, "shown_right": 0, "shown_left": 0, "drawn": True}
+        text = describe_state({"connected": True, "fresh": True, "state": shown})
+        assert "Hands (test): the game has 7 right and 7 left" in text and "the animation shows 0 right and 0 left, weapon drawn." in text
+    # A list of another length is left out
+    raw[game_state.KEY_COMPANION_HANDS] = [7, 7]
+    assert "hands" not in read_game_state(raw)["companion"]
+    assert "in hand anew" in describe_help("equip")[0] and "arrows or bolts" in describe_help("favorite")[0]
+
+
+def test_drop_lets_items_of_the_companion_fall_to_the_ground():
+    from src.companion import game_state
+    from src.companion.fake_game import hand_over, run_command
+    from src.companion.mcp_route import describe_help
+    from src.companion.ref_ids import parse_ref_id, split_form_id
+
+    def halves(item_id: str) -> list[int]:
+        return list(split_form_id(parse_ref_id(item_id)))
+
+    assert consts.ACTION_DROP in consts.PLAYER_ACTIONS and consts.ACTION_DROP in consts.ACTIONS_REQUIRING_TARGET
+    assert consts.ACTION_DROP in consts.ACTIONS_WITH_COUNT and consts.ACTION_DROP in consts.ACTIONS_KEEPING_QUEUE
+    assert consts.DROP_PROTOCOL <= game_state.GAME_PROTOCOL
+    # The fake game answers like the game mod: one item, and several with what fell and what did not
+    assert run_command(consts.ACTION_DROP, "0001397D", "")[0] is True
+    assert run_command(consts.ACTION_DROP, "0000BEEF", "")[0] is False
+    is_ok, message = hand_over(consts.ACTION_DROP, halves("0001397D") + [5] + halves("0000BEEF") + [2])
+    assert is_ok is True
+    assert message == "You drop: 5 Iron Arrow. It lies on the ground where you stand. Not dropped: number 2 of your list (no such item)."
+    assert hand_over(consts.ACTION_DROP, halves("0000BEEF") + [1])[1].startswith("Nothing was dropped.")
+    assert "drop = let an item of yours fall" in describe_help("drop")[0] and "For give, take and drop 'detail' says how many" in describe_help("drop")[0]
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def command(arguments: dict) -> dict:
+            return tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": arguments}))
+
+        assert "needs a target" in command({"action": "drop"})["message"]
+        assert "name the items" in command({"action": "drop", "detail": "junk"})["message"]
+        assert "is not how many" in command({"action": "drop", "target": "000318FA,00067180", "detail": "2,x"})["message"]
+        assert "'detail' is how many" in command({"action": "drop", "target": "000318FA", "detail": "many"})["message"]
+        assert command({"action": "drop", "target": "000318FA", "detail": "2"})["status"] == consts.STATUS_GAME_NOT_CONNECTED
+
+
+def test_wait_for_event_wakes_for_what_matters_and_keeps_the_rest_ready():
+    from src.companion.command_queue import CompanionCommandQueue, wakes_the_ai
+
+    def event(text: str, is_urgent: bool = False, seconds_ago: int = 0) -> dict:
+        return {"seconds_ago": seconds_ago, "game_time": "14:35", "urgent": is_urgent, "text": text}
+
+    # What wakes: everything urgent, fights, the player going somewhere else, talks and quests. The rest lies ready
+    for text in ("You started fighting Wolf.", "The fight of the player is over.", "The player entered Riverwood.", "The player left Riverwood.",
+                 "The player used the door to Sleeping Giant Inn.", "The player started talking to Orgnar.", "Quest Before the Storm. Objective done: Talk to Alvor.",
+                 "New quest: The Golden Claw. Objective: Find the claw.", "Objective done: Talk to Alvor."):
+        assert wakes_the_ai(event(text)), text
+    for text in ("The player opened Chest.", "The player used the door 'Wooden Door'.", "The player took 3 Iron Arrow.", "The player started sneaking.",
+                 "The player stopped talking to Orgnar."):
+        assert not wakes_the_ai(event(text)), text
+    assert wakes_the_ai(event("Bandit killed Lydia.", True))
+
+    async def scenario():
+        queue = CompanionCommandQueue(hold_seconds=0.05)
+        queue.WAKE_GAP_SECONDS = 0.4
+
+        async def game(events=None, heard=None, report=None):
+            await queue.poll(None, None, events=events, heard=heard, waiting_report=report)
+
+        # Nothing happens: the call comes back empty when its time is up, and the game is told meanwhile that someone waits
+        assert queue.is_watched is False
+        waiting = asyncio.ensure_future(queue.wait_for_event(0.3))
+        await asyncio.sleep(0.05)
+        assert queue.is_watched is True
+        empty = await waiting
+        assert empty["woken"] is False and empty["taken_over"] is False and empty["events"] == [] and 0.25 <= empty["waited_seconds"] < 1.0
+        assert queue.is_watched is False
+
+        # What does not wake lies ready and comes along when the time is up
+        await game(events=[event("The player took 3 Iron Arrow.")], heard=[{"seconds_ago": 1, "ref_id": "00013BA1", "name": "Orgnar", "text": "Need a room?"}])
+        ready = await queue.wait_for_event(0.2)
+        assert ready["woken"] is False and [entry["text"] for entry in ready["events"]] == ["The player took 3 Iron Arrow."]
+        assert [line["text"] for line in ready["heard"]] == ["Need a room?"]
+
+        # What matters wakes at once, and the answer carries everything since the last one
+        waiting = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await game(events=[event("The player opened Chest."), event("The player entered Riverwood.")])
+        woken = await asyncio.wait_for(waiting, 1.0)
+        assert woken["woken"] is True and woken["waited_seconds"] < 1.0
+        assert [entry["text"] for entry in woken["events"]] == ["The player opened Chest.", "The player entered Riverwood."]
+        # It was taken: the next STATE does not tell it again
+        assert (await queue.wait_for_event(0))["events"] == []
+
+        # Two wake-ups lie apart, so what happens in a row comes together
+        started = time.monotonic()
+        await game(events=[event("Wolf started fighting the player.", True)])
+        waiting = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await game(events=[event("The player is in a fight now.", True)])
+        together = await asyncio.wait_for(waiting, 2.0)
+        assert together["woken"] is True and len(together["events"]) == 2 and time.monotonic() - started >= 0.25
+
+        # Something the companion started came to an end: that wakes as well
+        await asyncio.sleep(0.45)
+        await game(report="You could not sit down on Bench.")
+        told = await asyncio.wait_for(queue.wait_for_event(5.0), 1.0)
+        assert told["woken"] is True and told["reports"] == ["You could not sit down on Bench."]
+
+        # While the companion speaks nothing wakes. The end of its sentence does, and brings along what happened meanwhile
+        await asyncio.sleep(0.45)
+        await queue.note_speech(0.5)
+        assert (await queue.wait_for_event(0))["speaking_seconds"] >= 1
+        await game(events=[event("Bandit killed Lydia.", True)])
+        started = time.monotonic()
+        spoken = await asyncio.wait_for(queue.wait_for_event(5.0), 2.0)
+        assert spoken["woken"] is True and spoken["speech_over"] is True and spoken["speaking_seconds"] == 0
+        assert time.monotonic() - started >= 0.4 and [entry["text"] for entry in spoken["events"]] == ["Bandit killed Lydia."]
+        # A call that ends while the sentence still runs tells how long it goes on
+        await queue.note_speech(5.0)
+        early = await queue.wait_for_event(0.1)
+        assert early["woken"] is False and early["speech_over"] is False and early["speaking_seconds"] >= 4
+        await queue.note_speech(0.0)
+        assert (await queue.wait_for_event(1.0))["speech_over"] is True
+
+        # A newer call takes over: the older one waits on silently and tells so at its end, without taking anything
+        await asyncio.sleep(0.45)
+        older = asyncio.ensure_future(queue.wait_for_event(0.6))
+        await asyncio.sleep(0.05)
+        newer = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await game(events=[event("The player left Riverwood.")])
+        newest = await asyncio.wait_for(newer, 1.0)
+        assert newest["woken"] is True and len(newest["events"]) == 1
+        old = await asyncio.wait_for(older, 2.0)
+        assert old["taken_over"] is True and old["woken"] is False and old["events"] == []
+        assert queue.is_watched is False
+
+        # While someone waits, a request of the game is not held open for long, so that the game tells soon what happens
+        slow_queue = CompanionCommandQueue(hold_seconds=5.0)
+        slow_queue.WATCH_HOLD_SECONDS = 0.2
+        waiting = asyncio.ensure_future(slow_queue.wait_for_event(2.0))
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        await slow_queue.poll(None, None)
+        assert time.monotonic() - started < 1.0
+        waiting.cancel()
+        try:
+            await waiting
+        except asyncio.CancelledError:
+            pass
+        # A call the AI gave up no longer counts as waiting
+        assert slow_queue.is_watched is False
+
+    asyncio.run(scenario())
+
+
+def test_wait_for_event_as_a_tool_and_as_a_stream():
+    from src.companion import game_state
+    from src.companion.mcp_route import SERVER_INSTRUCTIONS, describe_help
+    from src.companion.state_text import describe_wait
+
+    def line(seconds_ago: int, minutes: int, is_urgent: bool, text: str) -> str:
+        return "\t".join([str(seconds_ago), str(minutes), "1" if is_urgent else "0", text])
+
+    assert consts.WATCH_PROTOCOL <= game_state.GAME_PROTOCOL
+    assert "WAIT_FOR_EVENT" in SERVER_INSTRUCTIONS and "last thing of every turn" in SERVER_INSTRUCTIONS
+    assert "keeps watch for you" in describe_help("wait_for_event")[0]
+
+    # The texts of the answer
+    nothing = {"taken_over": False, "woken": False, "waited_seconds": 50.2, "connected": True, "state": None, "speech_over": False,
+               "speaking_seconds": 0, "heard": [], "events": [], "reports": []}
+    assert describe_wait(nothing, "WAIT_FOR_EVENT") == "Nothing happened in 50 s.\nSay nothing about this and call WAIT_FOR_EVENT again."
+    assert "has taken over" in describe_wait(dict(nothing, taken_over=True), "WAIT_FOR_EVENT")
+    happened = dict(nothing, woken=True, waited_seconds=12.0, speech_over=True, reports=["You changed your cover."],
+                    events=[{"seconds_ago": 2, "game_time": "14:35", "urgent": False, "text": "The player entered Riverwood."}],
+                    heard=[{"seconds_ago": 4, "ref_id": "00013BA1", "name": "Orgnar", "text": "Need a room?"}])
+    text = describe_wait(happened, "WAIT_FOR_EVENT")
+    assert text.startswith("Something happened (after 12 s of waiting).\nYou have finished speaking in the game")
+    assert "What became of what you started: You changed your cover." in text and "- 2 s ago (14:35): The player entered Riverwood." in text
+    assert "- 4 s ago, Orgnar: Need a room?" in text and text.endswith("then call WAIT_FOR_EVENT again.")
+    assert describe_wait(dict(nothing, woken=True, speech_over=True), "WAIT_FOR_EVENT").startswith("Your sentence is over")
+    assert "still speaking in the game, for about 3 s" in describe_wait(dict(nothing, speaking_seconds=3), "WAIT_FOR_EVENT")
+    assert "The game is not connected right now" in describe_wait(dict(nothing, connected=False), "WAIT_FOR_EVENT")
+    # STATE tells as well while the companion still speaks
+    from src.companion.fake_game import build_state
+    from src.companion.state_text import describe_state
+    shown = {"connected": True, "fresh": True, "state": game_state.read_game_state(build_state())}
+    assert "still speaking" not in describe_state(dict(shown, speaking_seconds=0))
+    assert "You are still speaking in the game, for about 3 s" in describe_state(dict(shown, speaking_seconds=3))
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        def wait(seconds, headers: dict | None = None):
+            return client.post(MCP_ROUTE, headers=headers or {}, json={"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                                                       "params": {"name": "WAIT_FOR_EVENT", "arguments": {"max_wait_seconds": seconds}}})
+
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert tools[3]["name"] == "WAIT_FOR_EVENT" and "max_wait_seconds" in tools[3]["inputSchema"]["properties"]
+        # Without a game it does not fail, it tells so
+        answer = tool_text(wait(0))
+        assert answer.startswith("Nothing happened in 0 s. The game is not connected right now")
+
+        # The game is told that someone waits, sends what happens with its next request, and that wakes the call
+        answers: list[str] = []
+        watcher = threading.Thread(target=lambda: answers.append(tool_text(wait(5))))
+        watcher.start()
+        time.sleep(0.3)
+        assert client.post(consts.ROUTE_GAME, json={consts.KEY_POLL_ID: 1}).json()[consts.KEY_WATCH] == 1
+        client.post(consts.ROUTE_GAME, json={consts.KEY_POLL_ID: 2, consts.KEY_EVENTS: [line(1, 875, False, "The player entered Riverwood.")],
+                                             consts.KEY_HEARD: ["3\t00013BA1\tOrgnar\tNeed a room?"],
+                                             consts.KEY_REPORT: "You changed your cover."})
+        watcher.join(timeout=4)
+        assert len(answers) == 1 and answers[0].startswith("Something happened")
+        assert "The player entered Riverwood." in answers[0] and "Orgnar: Need a room?" in answers[0] and "You changed your cover." in answers[0]
+        # Nobody waits any more
+        assert consts.KEY_WATCH not in client.post(consts.ROUTE_GAME, json={consts.KEY_POLL_ID: 3}).json()
+
+        # An AI app that takes a stream gets the answer as one, so that a long wait is not dropped on the way
+        response = wait(0, {"Accept": "application/json, text/event-stream"})
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = [part for part in response.text.split("\n\n") if part.strip() != ""]
+        assert events[-1].startswith("event: message\ndata: ")
+        payload = json.loads(events[-1].split("data: ", 1)[1])
+        assert payload["id"] == 7 and payload["result"]["content"][0]["text"].startswith("Nothing happened in 0 s.")
+        # Every other call answers as plain JSON, as before
+        assert rpc(client, "tools/list").headers["content-type"].startswith("application/json")
+
+
+def test_wait_stream_sends_signs_of_life_while_it_waits():
+    from src.companion import mcp_route
+    from src.companion.command_queue import CompanionCommandQueue
+
+    async def collect(message: dict) -> list[str]:
+        queue = CompanionCommandQueue(hold_seconds=0.05)
+        return [part async for part in mcp_route._stream_reply(message, queue, None)]
+
+    old_beat, old_check = mcp_route.STREAM_BEAT_SECONDS, mcp_route.STREAM_CHECK_SECONDS
+    mcp_route.STREAM_BEAT_SECONDS, mcp_route.STREAM_CHECK_SECONDS = 0.2, 0.05
+    try:
+        call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "WAIT_FOR_EVENT", "arguments": {"max_wait_seconds": 0.7}}}
+        parts = asyncio.run(collect(call))
+        assert parts[:-1] != [] and all(part == ": waiting\n\n" for part in parts[:-1])
+        assert json.loads(parts[-1].split("data: ", 1)[1])["result"]["content"][0]["text"].startswith("Nothing happened in 1 s.")
+        # An AI app that asked to hear of progress gets it as notifications that count up
+        call["params"]["_meta"] = {"progressToken": "abc"}
+        parts = asyncio.run(collect(call))
+        notes = [json.loads(part.split("data: ", 1)[1]) for part in parts[:-1]]
+        assert len(notes) >= 1 and all(note["method"] == "notifications/progress" and note["params"]["progressToken"] == "abc" for note in notes)
+        assert [note["params"]["progress"] for note in notes] == list(range(1, len(notes) + 1))
+    finally:
+        mcp_route.STREAM_BEAT_SECONDS, mcp_route.STREAM_CHECK_SECONDS = old_beat, old_check
 
 
 def test_unfavorite_is_favorite_with_off():

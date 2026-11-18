@@ -594,6 +594,10 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
     if action == consts.ACTION_PASSIVE:
         if detail == consts.PASSIVE_OFF:
             return True, "You attack enemies of your own accord again.", target_ref_id
+        if detail == consts.PASSIVE_FULL:
+            return True, ("You do not fight at all now: you start no fight and you do not fight back either, not even when you are hit. "
+                          "In a fight you keep close to the player. This holds until passive with 'on' (you defend yourself again) or 'off', "
+                          "or until you are told to attack."), target_ref_id
         return True, ("You hold back now: you follow as always, but start no fight of your own accord. If you or the player are attacked, "
                       "you fight back, and 'attack' with a target still works. This holds until passive with 'off'."), target_ref_id
     if action == consts.ACTION_SNEAK:
@@ -690,6 +694,13 @@ def hand_over(action: str, numbers: list[int]) -> tuple[bool, str]:
             continue
         count, name = found[0]
         done.append(f"{min(wanted_count, count) if wanted_count > 0 else count} {name}")
+    if action == consts.ACTION_DROP:
+        message = "Nothing was dropped."
+        if len(done) > 0:
+            message = "You drop: " + ", ".join(done) + ". It lies on the ground where you stand."
+        if len(failed) > 0:
+            message += " Not dropped: " + ", ".join(failed) + "."
+        return len(done) > 0, message
     message = "Nothing changed hands."
     if len(done) > 0:
         message = ("You take from the player: " if action == consts.ACTION_TAKE else "You give the player: ") + ", ".join(done) + "."

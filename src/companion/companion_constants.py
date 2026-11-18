@@ -24,6 +24,11 @@ class companion_constants:
     KEY_EVENTS: str = PREFIX + "events"
     # Which menus were open in the game since its request before (see game_state.read_menus). Only for the log
     KEY_MENUS: str = PREFIX + "menus"
+    # Only while the AI waits for something to happen (see KEY_WATCH), with every request that carries no state:
+    # KEY_EVENTS then holds all events, not only the urgent ones, KEY_HEARD what the characters around said (built like
+    # 'heard' of a state) and KEY_REPORT what became of what the companion started, as one text
+    KEY_HEARD: str = PREFIX + "heard"
+    KEY_REPORT: str = PREFIX + "report"
     KEY_RESULT_OK: str = PREFIX + "ok"
     KEY_RESULT_MESSAGE: str = PREFIX + "message"
 
@@ -31,6 +36,20 @@ class companion_constants:
     KEY_REPLY_TYPE: str = PREFIX + "reply_type"
     REPLY_TYPE_IDLE: str = PREFIX + "idle"
     REPLY_TYPE_COMMANDS: str = PREFIX + "commands"
+    # 1 in every reply while the AI waits with WAIT_FOR_EVENT, left out otherwise. Game mods from WATCH_PROTOCOL on
+    # then send everything that happens with every request (see KEY_HEARD). An older one only sends the urgent events
+    KEY_WATCH: str = PREFIX + "watch"
+    WATCH_PROTOCOL: int = 25
+    # WAIT_FOR_EVENT: what wakes the AI. Every urgent event does (a fight begins, someone dies or goes down, a hit
+    # that leaves little health, an enemy or a trap in sight), and the events whose text begins like this, as the
+    # plugin of the game mod writes them: a fight that begins or ends, the player going somewhere else, the player
+    # starting to talk to someone, and what happens to quests. Everything else only lies ready for the next answer
+    WAKE_EVENT_STARTS: tuple[str, ...] = (
+        "You started fighting", "You stopped fighting", "The fight of the player is over",
+        "The player entered ", "The player left ", "The player used the door to ",
+        "The player started talking to ", "The player started a conversation",
+        "Quest ", "New quest:", "New objective:", "Objective done:", "Objective failed:", "An objective failed",
+    )
     KEY_COMMANDS: str = PREFIX + "commands"
     KEY_COMMAND_ID: str = PREFIX + "command_id"
     KEY_COMMAND_ACTION: str = PREFIX + "action"
@@ -269,6 +288,10 @@ class companion_constants:
     ACTION_UNFAVORITE: str = "unfavorite"
     ACTION_GIVE: str = "give"
     ACTION_TAKE: str = "take"
+    # drop: the companion lets items of its own fall to the ground where it stands. One item or several, like give.
+    # Game mods from DROP_PROTOCOL on know it
+    ACTION_DROP: str = "drop"
+    DROP_PROTOCOL: int = 23
     # give and take with several items in one command: a list of numbers, VALUES_PER_HAND_OVER per item: the two
     # halves of its ID and how many (COUNT_ALL = all of them). Game mods from HAND_OVER_PROTOCOL on know it.
     # The game mod moves its hand once and answers with what changed hands and what did not
@@ -311,6 +334,10 @@ class companion_constants:
     ACTION_PASSIVE: str = "passive"
     PASSIVE_ON: str = "on"
     PASSIVE_OFF: str = "off"
+    # passive with this in 'detail': the companion does not fight at all, not even when it is hit. Game mods from
+    # PASSIVE_FULL_PROTOCOL on know it. An older one would take the word for 'on'
+    PASSIVE_FULL: str = "full"
+    PASSIVE_FULL_PROTOCOL: int = 24
     # attack with 'detail' hold: the companion stays where it stands and fights from there, and keeps to that spot
     # until a command sends it somewhere. Game mods from ATTACK_HOLD_PROTOCOL on know it. An older one would not
     # read the word and let the companion run to its target
@@ -425,6 +452,7 @@ class companion_constants:
         ACTION_FAVORITE,
         ACTION_GIVE,
         ACTION_TAKE,
+        ACTION_DROP,
         ACTION_CAST_SPELL,
         ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
@@ -446,14 +474,14 @@ class companion_constants:
     # These run at once and leave the commands alone that wait in a chain. Every other command throws them away
     ACTIONS_KEEPING_QUEUE: list[str] = [
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
-        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
+        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_DROP, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
         ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL, ACTION_PASSIVE, ACTION_UNFAVORITE,
     ]
     # Their target is the ID of an item from an inventory instead of the ref_id of a character
-    ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE]
+    ITEM_ACTIONS: list[str] = [ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_DROP]
     # 'detail' says how many
-    ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE]
+    ACTIONS_WITH_COUNT: list[str] = [ACTION_GIVE, ACTION_TAKE, ACTION_DROP]
     # These take 'run': the companion runs instead of walking
     ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW, ACTION_LEAD]
     ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE,

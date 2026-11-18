@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from src.companion.command_queue import CompanionCommandQueue
 from src.companion.companion_constants import companion_constants as consts
@@ -16,11 +16,11 @@ from src.companion.game_state import KEY_INVENTORY_OWN, MERCHANT_IS_CLOSED, MERC
 from src.companion.gestures import GESTURE_NAMES as ALL_GESTURE_NAMES, pick_gesture
 from src.companion.ref_ids import format_ref_id, parse_ref_id, split_form_id
 from src.companion.server_log import log, shorten
-from src.companion.state_text import describe_state
+from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.58"
+SERVER_VERSION: str = "0.62"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -36,6 +36,9 @@ TOOL_COMMAND: str = "COMMAND"
 # is swapped for the language that voice speaks, see _tools_for
 SAY_LANGUAGE_NOTE: str = "Write it in English: the voice cannot pronounce other languages. "
 TOOL_STATE: str = "STATE"
+# Waits until something happens in the game (see WAIT_DESCRIPTION and CompanionCommandQueue.wait_for_event)
+TOOL_WAIT: str = "WAIT_FOR_EVENT"
+ARGUMENT_MAX_WAIT: str = "max_wait_seconds"
 ARGUMENT_DEBUG: str = "debug"
 ARGUMENT_COMPARE: str = "compare"
 # What differs by itself between a state built in one go and one built the old way: the mark of the first, and how
@@ -96,7 +99,17 @@ SERVER_INSTRUCTIONS: str = (
     "With say you speak as the character in the game. Say there only what the character itself can see or know: "
     "nothing behind its back, behind walls or too far away to see. What you know from STATE but the character cannot, "
     "tell the player outside the game instead: in the chat, as a narrator in the third person "
-    "(eg 'to the left of our hero a wolf lies in wait')."
+    "(eg 'to the left of our hero a wolf lies in wait'). "
+    "Keeping watch: the game cannot call you, so in a spoken conversation you keep watch yourself with WAIT_FOR_EVENT. "
+    "It waits until something happens in the game (a fight begins or ends, someone dies, the player goes through a "
+    "door or into another place, a quest moves on, someone starts talking to the player, something you started comes "
+    "to an end) and then tells you. As a ground rule call it as the very last thing of every turn: after you answered "
+    "the player, after everything you did, and again after each of its own answers, so that one call is always "
+    "waiting. When it comes back with nothing, say nothing and call it again. When the player speaks, answer as "
+    "always and call it again afterwards. In a written chat call it only when the player asks you to keep watch, "
+    "because there it holds your answer open. "
+    "While your character speaks a sentence of say in the game, do not talk to the player: WAIT_FOR_EVENT tells you "
+    "when the sentence is over."
 )
 
 # The manual. All of this used to stand in the descriptions of the two tools, and an AI is handed the descriptions of
@@ -257,13 +270,15 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
     (("equip",), (
         "equip = hold or wear the item, or drink or eat it if it is a potion or food (you play the drinking or eating "
         "animation with it while you stand around or sit). equip on a spell tome reads it: "
-        "you know its spell from then on and the tome is used up, "
+        "you know its spell from then on and the tome is used up. equip on a weapon you hold already puts it away "
+        "and takes it in hand anew: do that with your bow if you box in a fight although you hold it (if that does "
+        "not help in the fight: stand_down, equip on the bow, then attack again), "
     )),
     (("unequip",), (
         "unequip = put the item away, "
     )),
     (("favorite",), (
-        "favorite = mark a weapon, a shield or a piece of armor of yours as a favorite ('detail' on, the default) or "
+        "favorite = mark a weapon, a shield, a piece of armor or arrows or bolts of yours as a favorite ('detail' on, the default) or "
         "take the mark off (off). "
     )),
     (("unfavorite",), (
@@ -272,7 +287,8 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
     (("favorite", "unfavorite", "equip"), (
         "The game hands you the strongest thing you carry on its own. Once you have favorites "
         "you switch back to them by yourself: a favorite weapon instead of another weapon (one for close combat, one "
-        "for range if you mark both), a favorite shield, a favorite piece of armor per part of the body. So mark "
+        "for range if you mark both), a favorite shield, a favorite piece of armor per part of the body, and with a bow or a "
+        "crossbow in your hands your favorite arrows or bolts, as long as you carry some. So mark "
         "what you want to fight in, and what you only carry for the player stays baggage. "
     )),
     (("give",), (
@@ -283,8 +299,13 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "(only when the player wants it). In the player's inventory 'favorite' marks what the player keeps among the "
         "favorites: ask before you take a weapon or a piece of armor that is one, for potions and food it does not matter. "
     )),
-    (("give", "take"), (
-        "For give and take 'detail' says how many: a number or 'all', nothing = 1. "
+    (("drop",), (
+        "drop = let an item of yours fall to the ground where you stand, to get rid of weight you carry for nothing "
+        "(a pot, a broom). What you wear or hold is not dropped: put it away with unequip first. What lies on the ground "
+        "anyone can take, and pick_up gets it back. Drop only what the player wants gone or what is plainly ballast. "
+    )),
+    (("give", "take", "drop"), (
+        "For give, take and drop 'detail' says how many: a number or 'all', nothing = 1. "
         "Several items in one go: the IDs in 'target' with commas between them, eg '00013987,000236A5,0002C672', and "
         "in 'detail' how many of each ('1,1,3'), one number for all of them, or 'all'. You hold out your hand once "
         f"and the answer lists what changed hands and what did not. At most {consts.HAND_OVER_HIGHEST_ITEMS} kinds of items at a time. "
@@ -386,6 +407,10 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "(to pass a wolf by the road, or not to disturb a talk), off = you attack enemies as always. If you or the player "
         "are attacked you fight back all the same, and attack with a target still works. It holds until passive with "
         "'off'; STATE shows 'passive on' for you meanwhile. "
+        "full = you do not fight at all: you start no fight and you do not fight back either, not even when you are hit; "
+        "in a fight you keep close to the player. Use it when the player wants you out of every fight. It holds until "
+        "passive with 'on' (you defend yourself again) or 'off', and attack with a target ends it: after that you fight "
+        "as always. STATE shows 'passive full' meanwhile. "
     )),
     (("passive", "stand_down"), (
         "stand_down only ends the fight that is going on. "
@@ -530,6 +555,25 @@ STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "than 10 minutes, each given only once. The urgent ones (a fight begins, someone dies, someone is badly hurt) "
         "also hang onto the answer of your next COMMAND as 'Meanwhile'. "
     )),
+    (("wait_for_event", "waiting", "events"), (
+        f"{TOOL_WAIT} keeps watch for you: the game cannot call you, so this call stays open until something happens that "
+        "you should hear of at once, or until 'max_wait_seconds' are over (nothing = 20 minutes, 0 = do not wait). "
+        "What wakes you: a fight that begins or ends, someone who dies or goes down, a hit that leaves you or the player "
+        "with little health, an enemy or a trap in sight, the player entering or leaving a place or using a door to "
+        "another place, the player starting to talk to someone, a quest that begins, moves on or ends, something you "
+        "started coming to an end (a walk, sitting down, a cover you changed), and the end of a sentence you speak with say. "
+        "What does not wake you but comes along with the next answer: what the player takes, puts on, drinks, reads, casts "
+        "and uses, sneaking, and what people around say ('Heard'; the game cannot tell whether a sentence was meant for "
+        "the player). The answer lists 'Events' and 'Heard' like STATE does, and takes them out of the next STATE. "
+        "Wake-ups lie a few seconds apart, so that what happens in a row comes in one answer. While your character speaks "
+        "nothing wakes you; the end of the sentence does, and until then you say nothing to the player. "
+        "How to use it in a spoken conversation: call it as the last thing of every turn. When it wakes you, react as your "
+        "character if it is worth it (say, a command, a word to the player), then call it again. When it comes back with "
+        "nothing, say nothing at all and call it again. When the player speaks, answer as always and call it again. If you "
+        "call it while an older call still waits, the older one ends quietly; its answer tells you so and needs nothing "
+        "from you. It asks the game for no fresh state and costs the game next to nothing. In a written chat it holds your "
+        "answer open, so use it there only when the player asks you to keep watch. "
+    )),
     (("menus", "state"), (
         "While the player is in a menu (trading, the inventory, the map) or at a loading screen, the game stands still "
         "and answers nothing: STATE then tells for how long it has been silent and shows the last state it knows, and "
@@ -595,7 +639,7 @@ COMMAND_DESCRIPTION: str = (
     "Fighting: attack = attack the target, only when the player wants it (you run to it; with 'detail' "
     f"'{consts.ATTACK_HOLD}' you stay where you stand and fight from there, which needs a bow or a spell), cover = run to a spot "
     "your enemies cannot see and keep to it, stand_down = stop fighting, flee = retreat without fighting, passive = "
-    "on: start no fight of your own accord, off: as always, sheathe = keep your weapon away, draw = draw it, "
+    "on: start no fight of your own accord, full: do not fight at all, off: as always, sheathe = keep your weapon away, draw = draw it, "
     "cast_spell = cast a spell you know ('detail': its name or ID), auto_heal = heal by yourself: on, off or a percentage. "
     "Speaking and showing: say = speak the text in 'detail' aloud in the game, with the voice of your character. "
     + SAY_LANGUAGE_NOTE +
@@ -606,7 +650,7 @@ COMMAND_DESCRIPTION: str = (
     "Things: loot = take what a dead character or a container holds, pick_up = take an item that lies around "
     "(also several, or 'all' around you), open and close = a door that only swings, equip and unequip = hold, wear, "
     "drink, eat or put away an item of yours (the target is the ID of the item from STATE with 'inventory'), favorite "
-    "and unfavorite = mark what you want to fight in, give and take = hand items to the player or take them (take "
+    "and unfavorite = mark what you want to fight in, drop = let items of yours fall to the ground, give and take = hand items to the player or take them (take "
     "only when the player wants it), buy and sell = trade with a merchant. "
     "Horses: claim_horse = the target is your horse from now on, release_horse = give it back, mount = get on your "
     "horse, dismount = get off, ride_lock = on: you no longer mount and dismount together with the player, "
@@ -631,6 +675,24 @@ STATE_DESCRIPTION: str = (
     "around you), view (a coarse picture of what lies in front of you), visible (only what can be seen), around (seen "
     "from your character), stats, read (a book). "
     f"{TOOL_HELP} with the name of an argument or of a line as its topic (eg 'space', 'events', 'nearby') explains it in full."
+)
+
+# Without a stream that keeps the connection alive (see _stream_reply) a call must not hang for long: what lies between
+# the AI and this server (a tunnel) drops a request that stays silent for too long
+WAIT_SECONDS_WITHOUT_STREAM: float = 50.0
+# How often a call that waits sends a sign of life over its stream, and how often it looks whether it is done
+STREAM_BEAT_SECONDS: float = 15.0
+STREAM_CHECK_SECONDS: float = 1.0
+WAIT_DESCRIPTION: str = (
+    "Keep watch: wait until something happens in the game that you should hear of at once, and get what happened and "
+    "what was said since you asked the last time. It wakes you when a fight begins or ends, someone dies or goes down, "
+    "you or the player are badly hurt, an enemy or a trap comes into sight, the player goes through a door or into "
+    "another place, the player starts talking to someone, a quest moves on, something you started comes to an end, "
+    "and when your character has finished a sentence of say. What the player takes, uses or reads and what people "
+    "around say does not wake you; it comes along with the next answer. If nothing happens it comes back empty after "
+    "the time is up: then say nothing and call it again. In a spoken conversation call it as the last thing of every "
+    f"turn, so that one call is always waiting. It asks the game for no fresh state: use {TOOL_STATE} for that. "
+    f"{TOOL_HELP} with the topic 'wait_for_event' tells more."
 )
 
 HELP_DESCRIPTION: str = (
@@ -714,6 +776,18 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": TOOL_WAIT,
+        "description": WAIT_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                ARGUMENT_MAX_WAIT: {"type": "integer", "description": "How long to wait at the most, in seconds. Nothing = "
+                                    f"{round(CompanionCommandQueue.WATCH_LONGEST_SECONDS)} (the longest). 0 = do not wait, only "
+                                    "give what happened since you asked the last time."},
+            },
+        },
+    },
 ]
 
 
@@ -743,6 +817,11 @@ def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str, voice:
                 return Response(status_code=202)
             return JSONResponse(content=replies)
 
+        if _is_wait_call(body) and "text/event-stream" in request.headers.get("accept", "").lower():
+            # A call that may wait for minutes answers as a stream, with signs of life in between
+            return StreamingResponse(_stream_reply(body, queue, voice), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
         reply = await _handle_message(body, queue, voice)
         if reply is None:
             return Response(status_code=202)
@@ -758,8 +837,53 @@ def add_mcp_route(app: FastAPI, queue: CompanionCommandQueue, token: str, voice:
         return Response(status_code=405, headers={"Allow": "POST"})
 
 
-async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any] | None:
-    """Handles one JSON-RPC message. Returns None for notifications (they get no reply)"""
+def _is_wait_call(message: Any) -> bool:
+    """Whether this message calls the tool that may wait for minutes"""
+    if not isinstance(message, dict) or message.get("method") != "tools/call" or "id" not in message:
+        return False
+    params = message.get("params")
+    return isinstance(params, dict) and params.get("name") == TOOL_WAIT
+
+
+async def _stream_reply(message: dict[str, Any], queue: CompanionCommandQueue, voice: CompanionVoice | None):
+    """The answer to one message as a stream of server-sent events (the MCP standard allows that for every request):
+    signs of life while the tool waits, then the answer itself. What lies between the AI and this server would drop a
+    request that stays silent for minutes. If the AI goes away, the framework ends this and the waiting ends with it"""
+    params = message.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
+    task = asyncio.ensure_future(_handle_message(message, queue, voice, can_wait_long=True))
+    last_beat = time.monotonic()
+    beats = 0
+    try:
+        while True:
+            await asyncio.wait({task}, timeout=STREAM_CHECK_SECONDS)
+            if task.done():
+                break
+            if time.monotonic() - last_beat >= STREAM_BEAT_SECONDS:
+                last_beat = time.monotonic()
+                beats += 1
+                if isinstance(progress_token, (str, int)) and not isinstance(progress_token, bool):
+                    # An AI app that asked to be told about progress may count this as a reason to go on waiting
+                    note = {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": progress_token, "progress": beats}}
+                    yield f"event: message\ndata: {json.dumps(note, ensure_ascii=False)}\n\n"
+                else:
+                    yield ": waiting\n\n"
+        try:
+            reply = task.result()
+        except Exception:
+            reply = _error(message.get("id"), -32603, "Internal error")
+        if reply is not None:
+            yield f"event: message\ndata: {json.dumps(reply, ensure_ascii=False)}\n\n"
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None,
+                          can_wait_long: bool = False) -> dict[str, Any] | None:
+    """Handles one JSON-RPC message. Returns None for notifications (they get no reply).
+    can_wait_long: the answer goes out as a stream that keeps the connection alive (see _stream_reply)"""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _error(None, -32600, "Invalid request")
 
@@ -787,7 +911,7 @@ async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: Com
     if method == "tools/list":
         return _result(message_id, {"tools": _tools_for(voice)})
     if method == "tools/call":
-        return _result(message_id, await _call_tool(params.get("name"), params.get("arguments"), queue, voice))
+        return _result(message_id, await _call_tool(params.get("name"), params.get("arguments"), queue, voice, can_wait_long))
     return _error(message_id, -32601, f"Method not found: {method}")
 
 
@@ -854,12 +978,13 @@ def describe_help(topic_text: str, say_note: str = SAY_LANGUAGE_NOTE) -> tuple[s
     return answer, len(known) == 0
 
 
-async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
+async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None,
+                     can_wait_long: bool = False) -> dict[str, Any]:
     """One call of a tool by the AI. What was asked, how long it took and how the answer begins go into the log file"""
     started = time.monotonic()
     log.info("AI -> %s %s", name, shorten(json.dumps(arguments, ensure_ascii=False, default=str)))
     try:
-        result = await _run_tool(name, arguments, queue, voice)
+        result = await _run_tool(name, arguments, queue, voice, can_wait_long)
     except Exception:
         log.exception("AI <- %s broke off after %.1f s with an error of the server.", name, time.monotonic() - started)
         raise
@@ -872,9 +997,31 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
     return result
 
 
-async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None) -> dict[str, Any]:
+async def _wait_for_event(arguments: dict[str, Any], queue: CompanionCommandQueue, can_wait_long: bool) -> dict[str, Any]:
+    """WAIT_FOR_EVENT: waits until something happens in the game or the time is up (see CompanionCommandQueue.wait_for_event)"""
+    seconds = CompanionCommandQueue.WATCH_LONGEST_SECONDS
+    wanted = arguments.get(ARGUMENT_MAX_WAIT)
+    if isinstance(wanted, (int, float)) and not isinstance(wanted, bool):
+        seconds = min(max(float(wanted), 0.0), CompanionCommandQueue.WATCH_LONGEST_SECONDS)
+    if not can_wait_long:
+        seconds = min(seconds, WAIT_SECONDS_WITHOUT_STREAM)
+    result = await queue.wait_for_event(seconds)
+    text = describe_wait(result, TOOL_WAIT)
+    state = result.get("state")
+    protocol = state.get("protocol") if isinstance(state, dict) else None
+    if not result.get("taken_over") and isinstance(protocol, int) and protocol < consts.WATCH_PROTOCOL:
+        text += (" (The game mod that is running is older than this server: while you wait only fights, deaths and dangers reach you, "
+                 f"the rest comes with your next {TOOL_STATE}.)")
+    return _tool_text(text, False)
+
+
+async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None = None,
+                    can_wait_long: bool = False) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         arguments = {}
+
+    if name == TOOL_WAIT:
+        return await _wait_for_event(arguments, queue, can_wait_long)
 
     if name == TOOL_STATE:
         find_gesture = " ".join(str(arguments.get(ARGUMENT_FIND_GESTURE, "") or "").split())[:MAX_FIND_LENGTH]
@@ -1023,6 +1170,14 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     is_junk_wanted = action in consts.ACTIONS_WITH_COUNT and detail.lower() == consts.HAND_OVER_JUNK
     if action in consts.ACTIONS_REQUIRING_TARGET and target == "" and not is_junk_wanted:
         return {"status": consts.STATUS_FAILED, "message": f"Action '{action}' needs a target (ref_id from STATE)."}, True
+    if action == consts.ACTION_DROP:
+        # A game mod from before this does not know the command
+        state = await queue.peek_state()
+        if isinstance(state, dict):
+            protocol = state.get("protocol")
+            if not isinstance(protocol, int) or protocol < consts.DROP_PROTOCOL:
+                return {"status": consts.STATUS_FAILED, "message": "drop needs a newer game mod than the one that is running "
+                        "(build and install it again with build.py --install). Nothing was dropped."}, True
     if action in consts.ACTIONS_WITH_COUNT:
         # Several items in one command, or everything that is junk
         problem, hand_over, note = await _read_hand_over(action, target, detail, queue)
@@ -1128,6 +1283,12 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
                                           say_number=number, face=consts.EXPRESSIONS.get(face_name, consts.FACE_NONE),
                                           say_ms=int(seconds * 1000), extra=say_extra if len(say_extra) > 0 else None)
         is_said = result["status"] in (consts.STATUS_DONE, consts.STATUS_DELIVERED)
+        if is_said and seconds > 0:
+            # The AI is told when the sentence is over (see WAIT_FOR_EVENT), so that it does not talk into it
+            await queue.note_speech(seconds + consts.SAY_END_EXTRA_SECONDS)
+            result = dict(result)
+            result["message"] = (str(result.get("message", "")) + f" You speak for about {max(1, round(seconds))} s: say nothing to the player "
+                                 f"until then, {TOOL_WAIT} tells you when you are done.").strip()
         state = await queue.peek_state()
         protocol = state.get("protocol") if isinstance(state, dict) else 0
         if is_said and isinstance(protocol, int) and protocol >= consts.SAY_END_PROTOCOL:
@@ -1289,9 +1450,18 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
     if action == consts.ACTION_PASSIVE:
         target = ""
         detail = detail.lower()
-        if detail not in (consts.PASSIVE_ON, consts.PASSIVE_OFF):
-            return {"status": consts.STATUS_FAILED, "message": f"passive needs '{consts.PASSIVE_ON}' or '{consts.PASSIVE_OFF}' in 'detail': "
-                               f"'{consts.PASSIVE_ON}' = you start no fight of your own accord, '{consts.PASSIVE_OFF}' = you attack enemies as always."}, True
+        if detail not in (consts.PASSIVE_ON, consts.PASSIVE_FULL, consts.PASSIVE_OFF):
+            return {"status": consts.STATUS_FAILED, "message": f"passive needs '{consts.PASSIVE_ON}', '{consts.PASSIVE_FULL}' or '{consts.PASSIVE_OFF}' in 'detail': "
+                               f"'{consts.PASSIVE_ON}' = you start no fight of your own accord, '{consts.PASSIVE_FULL}' = you do not fight at all, "
+                               f"not even when you are hit, '{consts.PASSIVE_OFF}' = you attack enemies as always."}, True
+        if detail == consts.PASSIVE_FULL:
+            # A game mod from before this would take the word for 'on'
+            state = await queue.peek_state()
+            if isinstance(state, dict):
+                protocol = state.get("protocol")
+                if not isinstance(protocol, int) or protocol < consts.PASSIVE_FULL_PROTOCOL:
+                    return {"status": consts.STATUS_FAILED, "message": f"passive with '{consts.PASSIVE_FULL}' needs a newer game mod than the one that is running "
+                            f"(build and install it again with build.py --install). Nothing changed. passive with '{consts.PASSIVE_ON}' works as before."}, True
     if action == consts.ACTION_RENAME_HORSE:
         # One line without the breaks and double blanks a name does not have
         detail = " ".join(detail.split())
@@ -1577,7 +1747,7 @@ async def _read_hand_over(action: str, target: str, detail: str, queue: Companio
     """
     if detail.lower() == consts.HAND_OVER_JUNK:
         if action != consts.ACTION_GIVE:
-            return f"Only give knows '{consts.HAND_OVER_JUNK}'. For take, name the items.", [], ""
+            return f"Only give knows '{consts.HAND_OVER_JUNK}'. For {action}, name the items.", [], ""
         # The server works out itself what is junk, from the inventory of the companion
         state_result = await queue.get_state(inventory=consts.INVENTORY_OWN, is_for_the_ai=False)
         state = state_result.get("state")

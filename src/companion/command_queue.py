@@ -35,6 +35,11 @@ def describe_silence(silent_seconds: float) -> str:
             "or at a loading screen) or was closed.")
 
 
+def wakes_the_ai(event: dict[str, Any]) -> bool:
+    """WAIT_FOR_EVENT: whether the AI should hear of this event at once (see consts.WAKE_EVENT_STARTS)"""
+    return bool(event.get("urgent")) or str(event.get("text", "")).startswith(consts.WAKE_EVENT_STARTS)
+
+
 class CompanionCommandQueue:
     """Hands commands from the MCP side (the AI) to the game side (Skyrim).
 
@@ -73,6 +78,15 @@ class CompanionCommandQueue:
     MAX_EVENT_AGE_SECONDS: float = 600.0
     MAX_URGENT_EVENTS: int = 5
     MAX_STORED_EVENTS: int = 60
+    # WAIT_FOR_EVENT: while the AI waits for something to happen, the request of the game is only held open this long,
+    # so that the game tells within about that time what happened
+    WATCH_HOLD_SECONDS: float = 2.0
+    # The longest one call of WAIT_FOR_EVENT waits
+    WATCH_LONGEST_SECONDS: float = 1200.0
+    # Two wake-ups lie at least this far apart, so that what happens in a row comes in one answer
+    WAKE_GAP_SECONDS: float = 6.0
+    # While nothing wakes by the clock, a waiting call looks again this often at the latest
+    WATCH_LOOK_SECONDS: float = 30.0
     # While commands wait in a chain (see command_chain.py) the request of the game is only held open this long,
     # so that the game asks again every second and tells whether the companion is still busy
     QUICK_HOLD_SECONDS: float = 1.0
@@ -118,6 +132,14 @@ class CompanionCommandQueue:
         self.__fail_count: int = 0
         self.__has_quick_polls: bool = False
         self.__releases_open_poll: bool = False
+        # WAIT_FOR_EVENT: the number of the call that was started last (only that one wakes and takes what happened),
+        # how many calls are open, and when the AI was woken last
+        self.__watch_generation: int = 0
+        self.__watcher_count: int = 0
+        self.__last_wake_time: float = float("-inf")
+        # say: until when the companion speaks in the game, and whether the AI has been told that it is done
+        self.__speech_end_time: float = 0.0
+        self.__is_speech_end_told: bool = True
         # The merchant the AI looked at or traded with last (its ref_id), for buy and sell that name no merchant
         self.last_merchant: str = ""
         # The folder of the game, for reading its animations (see idle_search.py). Empty = not known
@@ -129,7 +151,8 @@ class CompanionCommandQueue:
 
     async def poll(self, state: dict[str, Any] | None, results: list[dict[str, Any]] | None,
                    busy: Any = None, fails: Any = None, events: list[dict[str, Any]] | None = None,
-                   menus: list[tuple[str, float]] | None = None) -> list[dict[str, Any]]:
+                   menus: list[tuple[str, float]] | None = None, heard: list[dict[str, Any]] | None = None,
+                   waiting_report: Any = None) -> list[dict[str, Any]]:
         """Called for every long polling request of the game.
 
         Args:
@@ -137,7 +160,10 @@ class CompanionCommandQueue:
             results: Results of commands the game has executed since its last request
             busy: 1 if the companion is in the middle of something that takes time, 0 if not, None if the game mod does not tell
             fails: How many things the companion started have failed so far, None if the game mod does not tell
-            events: The urgent events since the request before (see game_state.read_events), or None
+            events: The urgent events since the request before (see game_state.read_events), or None. While the AI
+                waits with WAIT_FOR_EVENT a newer game mod sends all events here, not only the urgent ones
+            heard: Only while the AI waits: what the characters around said since the request before (see game_state.read_heard)
+            waiting_report: Only while the AI waits: what became of what the companion started, as one text
             menus: The menus that were open since the request before (see game_state.read_menus), or None. Only logged
 
         Returns:
@@ -184,7 +210,11 @@ class CompanionCommandQueue:
                              self.__state_version, state.get("build_ms", "?"), state.get("scan_ms", "?"))
             self.__keep_events(events)
             if isinstance(events, list) and len(events) > 0:
-                log.info("GAME sent %d urgent events: %s", len(events), shorten(" | ".join(str(event.get("text", "")) for event in events if isinstance(event, dict))))
+                log.info("GAME sent %d events: %s", len(events), shorten(" | ".join(str(event.get("text", "")) for event in events if isinstance(event, dict))))
+            self.__keep_heard(heard)
+            if isinstance(waiting_report, str) and waiting_report.strip() != "":
+                log.info("GAME reports: %s", shorten(waiting_report.strip()))
+                self.__reports = (self.__reports + [waiting_report.strip()])[-self.MAX_REPORTS:]
             self.__store_results(results)
             if isinstance(results, list):
                 for result in results:
@@ -206,7 +236,7 @@ class CompanionCommandQueue:
             try:
                 await self.__wait_until(
                     lambda: len(self.__pending_commands) > 0 or self.__poll_generation != own_generation or self.__releases_open_poll,
-                    self.QUICK_HOLD_SECONDS if self.__has_quick_polls else self.__hold_seconds)
+                    self.__poll_hold_seconds())
                 if self.__poll_generation != own_generation:
                     # A newer request arrived (eg after loading a save). The newer one gets the commands.
                     return []
@@ -482,6 +512,8 @@ class CompanionCommandQueue:
                 "heard": self.__take_heard() if is_for_the_ai else [],
                 "events": self.__take_events() if is_for_the_ai else [],
                 "reports": self.__take_reports() if is_for_the_ai else [],
+                # For how long the companion still speaks a sentence of say (0 = it is silent)
+                "speaking_seconds": self.__speaking_seconds_left(time.monotonic()),
             }
 
     @property
@@ -502,6 +534,113 @@ class CompanionCommandQueue:
             if is_wanted:
                 self.__releases_open_poll = True
             self.__changed.notify_all()
+
+    # ------------------------------------------------------------- waiting for events
+
+    @property
+    def is_watched(self) -> bool:
+        """Whether the AI waits for something to happen right now (WAIT_FOR_EVENT). The game is told with every reply"""
+        return self.__watcher_count > 0
+
+    async def note_speech(self, seconds: float) -> None:
+        """say: the companion speaks for this long from now on. Until then nothing wakes the AI, and the end of the
+        sentence does (see wait_for_event), so that the AI does not talk while its character speaks"""
+        async with self.__changed:
+            self.__speech_end_time = time.monotonic() + max(seconds, 0.0)
+            self.__is_speech_end_told = False
+            self.__changed.notify_all()
+
+    async def wait_for_event(self, max_wait_seconds: float) -> dict[str, Any]:
+        """WAIT_FOR_EVENT: waits until something happens in the game that the AI should hear of at once (see
+        __wake_reason), or until the time is up. Meanwhile the game asks every WATCH_HOLD_SECONDS and sends all that
+        happens (see is_watched). If a newer call starts while this one waits, only the newer one wakes and takes what
+        happened; this one waits on silently and returns with 'taken_over'
+
+        Returns:
+            A dictionary with 'taken_over', 'woken' (False = the time was up), 'waited_seconds', 'connected', 'state' (the
+            last state the game sent, not a fresh one), 'speech_over' (the companion finished a sentence of say meanwhile),
+            'speaking_seconds' (how long it still speaks), and 'heard', 'events' and 'reports' as get_state gives them:
+            everything since the AI asked the last time, which is forgotten afterwards
+        """
+        async with self.__changed:
+            self.__watch_generation += 1
+            own_generation = self.__watch_generation
+            self.__watcher_count += 1
+            # A request of the game that is open is answered at once, so that the game learns that someone waits
+            self.__releases_open_poll = True
+            self.__changed.notify_all()
+            started = time.monotonic()
+            deadline = started + min(max(max_wait_seconds, 0.0), self.WATCH_LONGEST_SECONDS)
+            is_awake = False
+            try:
+                while True:
+                    now = time.monotonic()
+                    is_awake = self.__watch_generation == own_generation and self.__wake_reason(now) != ""
+                    if is_awake or now >= deadline:
+                        break
+                    # What wakes by the clock (a sentence that ends, the gap after the last wake-up) comes with no
+                    # request of the game, so the call looks again by itself when that is due
+                    await self.__wait_until(lambda: self.__watch_generation == own_generation and self.__wake_reason(time.monotonic()) != "",
+                                            min(deadline - now, self.__seconds_to_next_look(now)))
+            finally:
+                self.__watcher_count -= 1
+                self.__changed.notify_all()
+            now = time.monotonic()
+            result: dict[str, Any] = {"taken_over": self.__watch_generation != own_generation, "woken": is_awake,
+                                      "waited_seconds": now - started, "connected": self.__is_game_connected(), "state": self.__state,
+                                      "speech_over": False, "speaking_seconds": 0, "heard": [], "events": [], "reports": []}
+            if result["taken_over"]:
+                return result
+            if is_awake:
+                self.__last_wake_time = now
+            if not self.__is_speech_end_told and now >= self.__speech_end_time:
+                self.__is_speech_end_told = True
+                result["speech_over"] = True
+            result["speaking_seconds"] = self.__speaking_seconds_left(now)
+            result["heard"] = self.__take_heard()
+            result["events"] = self.__take_events()
+            result["reports"] = self.__take_reports()
+            log.info("WAIT_FOR_EVENT ends after %.1f s: %s, %d events, %d lines heard, %d reports.", result["waited_seconds"],
+                     "woken" if is_awake else "the time was up", len(result["events"]), len(result["heard"]), len(result["reports"]))
+            return result
+
+    def __speaking_seconds_left(self, now: float) -> int:
+        if self.__is_speech_end_told or now >= self.__speech_end_time:
+            return 0
+        return max(1, round(self.__speech_end_time - now))
+
+    def __wake_reason(self, now: float) -> str:
+        """Why the AI is to be woken now: 'speech' (its character finished a sentence), 'report' (something it started
+        came to an end), 'event' (see wakes_the_ai), or an empty text for nothing. While the character speaks nothing
+        wakes, and two wake-ups lie WAKE_GAP_SECONDS apart; the end of a sentence wakes at once"""
+        if not self.__is_speech_end_told:
+            return "speech" if now >= self.__speech_end_time else ""
+        if now - self.__last_wake_time < self.WAKE_GAP_SECONDS:
+            return ""
+        if len(self.__reports) > 0:
+            return "report"
+        for event in self.__events:
+            if now - event["time"] <= self.MAX_EVENT_AGE_SECONDS and wakes_the_ai(event):
+                return "event"
+        return ""
+
+    def __seconds_to_next_look(self, now: float) -> float:
+        """In how many seconds a waiting call has to look again by itself, because the clock may wake it then"""
+        seconds = self.WATCH_LOOK_SECONDS
+        if not self.__is_speech_end_told and self.__speech_end_time > now:
+            seconds = min(seconds, self.__speech_end_time - now)
+        gap_left = self.__last_wake_time + self.WAKE_GAP_SECONDS - now
+        if gap_left > 0:
+            seconds = min(seconds, gap_left)
+        return max(seconds, 0.05)
+
+    def __poll_hold_seconds(self) -> float:
+        """For how long a request of the game is held open at the most"""
+        if self.__has_quick_polls:
+            return self.QUICK_HOLD_SECONDS
+        if self.__watcher_count > 0:
+            return min(self.WATCH_HOLD_SECONDS, self.__hold_seconds)
+        return self.__hold_seconds
 
     async def wait_until_idle(self, timeout_seconds: float) -> bool:
         """Waits until the game says that the companion is not busy any more. What the game said counts only if it
