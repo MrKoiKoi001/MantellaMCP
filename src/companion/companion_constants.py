@@ -49,7 +49,27 @@ class companion_constants:
         "The player entered ", "The player left ", "The player used the door to ",
         "The player started talking to ", "The player started a conversation",
         "Quest ", "New quest:", "New objective:", "Objective done:", "Objective failed:", "An objective failed",
+        "The player is back from ",
+        # What the plugin of the game mod watches over since interface version 38
+        "You have fallen behind", "You are stuck", "You are low on ", "You are out of ",
+        "The player reached level ", "The player got a bounty", "The player now follows the quest ",
     )
+    # Menus: the game stands still while one is open and tells afterwards which were open and for how long (see
+    # KEY_MENUS). The server makes events of that. One that was open for at least MENU_WAKE_SECONDS wakes the AI
+    # ('The player is back from ...'), a shorter one only lies ready, and one below MENU_LEAST_SECONDS is left out
+    MENU_WAKE_SECONDS: float = 5.0
+    MENU_LEAST_SECONDS: float = 1.0
+    # What the AI is told for the names the game gives its menus. A menu that is not here goes by its own name
+    MENU_TEXTS: dict[str, str] = {
+        "InventoryMenu": "the inventory", "MagicMenu": "the magic menu", "MapMenu": "the map", "StatsMenu": "the skills menu",
+        "Journal Menu": "the journal or the system menu", "BarterMenu": "trading", "ContainerMenu": "a container or a body",
+        "GiftMenu": "the gift menu", "Crafting Menu": "a workbench", "Lockpicking Menu": "picking a lock", "Book Menu": "a book",
+        "Loading Menu": "a loading screen", "Sleep/Wait Menu": "waiting or sleeping", "Training Menu": "training",
+        "FavoritesMenu": "the favorites", "LevelUp Menu": "the level-up menu", "RaceSex Menu": "the character menu",
+    }
+    # These tell nothing of their own: a talk has its own events, the wheel between the menus comes with every menu,
+    # and the console and message boxes are no business of the companion
+    MENUS_LEFT_OUT: tuple[str, ...] = ("Dialogue Menu", "TweenMenu", "Console", "Console Native UI Menu", "MessageBoxMenu", "Tutorial Menu")
     KEY_COMMANDS: str = PREFIX + "commands"
     KEY_COMMAND_ID: str = PREFIX + "command_id"
     KEY_COMMAND_ACTION: str = PREFIX + "action"

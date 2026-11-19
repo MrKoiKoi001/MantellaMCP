@@ -35,6 +35,18 @@ def describe_silence(silent_seconds: float) -> str:
             "or at a loading screen) or was closed.")
 
 
+def menu_event(name: str, open_seconds: float) -> dict[str, Any] | None:
+    """The event a menu that was open in the game becomes (see consts.MENU_WAKE_SECONDS), or None if it tells nothing"""
+    if name in consts.MENUS_LEFT_OUT or open_seconds < consts.MENU_LEAST_SECONDS:
+        return None
+    what = consts.MENU_TEXTS.get(name, name)
+    if open_seconds >= consts.MENU_WAKE_SECONDS:
+        text = f"The player is back from {what} (open for {round(open_seconds)} s)."
+    else:
+        text = f"The player looked into {what} for {round(open_seconds)} s."
+    return {"seconds_ago": 0, "game_time": "", "urgent": False, "text": text}
+
+
 def wakes_the_ai(event: dict[str, Any]) -> bool:
     """WAIT_FOR_EVENT: whether the AI should hear of this event at once (see consts.WAKE_EVENT_STARTS)"""
     return bool(event.get("urgent")) or str(event.get("text", "")).startswith(consts.WAKE_EVENT_STARTS)
@@ -181,6 +193,8 @@ class CompanionCommandQueue:
             if menus:
                 # Newer game mods tell which menus were open in the meantime, so a silence explains itself
                 log.info("GAME says these menus were open: %s", ", ".join(describe_menu(name, seconds) for name, seconds in menus))
+                # The game stood still meanwhile. Coming back from a menu is news for an AI that waits (see menu_event)
+                self.__keep_events([event for event in (menu_event(name, seconds) for name, seconds in menus) if event is not None])
             self.__poll_generation += 1
             own_generation = self.__poll_generation
             self.__is_poll_open = True

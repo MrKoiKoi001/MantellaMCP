@@ -4000,6 +4000,12 @@ def test_wait_for_event_wakes_for_what_matters_and_keeps_the_rest_ready():
                  "The player stopped talking to Orgnar."):
         assert not wakes_the_ai(event(text)), text
     assert wakes_the_ai(event("Bandit killed Lydia.", True))
+    # What the plugin watches over by itself
+    for text in ("You have fallen behind: the player is about 45 m away from you.", "You have fallen behind: you are no longer where the player is.",
+                 "You are stuck: you have been walking for some seconds without getting anywhere.", "You are low on arrows: 20 left.",
+                 "You are low on healing potions: 1 left.", "You are out of magicka potions.", "The player reached level 12.",
+                 "The player got a bounty of 40 gold with Whiterun (40 in all there).", "The player now follows the quest The Golden Claw."):
+        assert wakes_the_ai(event(text)), text
 
     async def scenario():
         queue = CompanionCommandQueue(hold_seconds=0.05)
@@ -4092,6 +4098,32 @@ def test_wait_for_event_wakes_for_what_matters_and_keeps_the_rest_ready():
             pass
         # A call the AI gave up no longer counts as waiting
         assert slow_queue.is_watched is False
+
+    asyncio.run(scenario())
+
+
+def test_coming_back_from_a_menu_is_an_event_and_wakes_after_a_long_one():
+    from src.companion.command_queue import CompanionCommandQueue, menu_event, wakes_the_ai
+
+    long_one = menu_event("MapMenu", 40.2)
+    assert long_one["text"] == "The player is back from the map (open for 40 s)." and wakes_the_ai(long_one)
+    short_one = menu_event("ContainerMenu", 2.4)
+    assert short_one["text"] == "The player looked into a container or a body for 2 s." and not wakes_the_ai(short_one)
+    assert menu_event("Loading Menu", 12.0)["text"] == "The player is back from a loading screen (open for 12 s)."
+    # A menu the server has no words for goes by the name of the game
+    assert menu_event("Some Mod Menu", 9.0)["text"] == "The player is back from Some Mod Menu (open for 9 s)."
+    # Too short to tell, or nothing of its own
+    assert menu_event("InventoryMenu", 0.6) is None and menu_event("Dialogue Menu", 30.0) is None and menu_event("TweenMenu", 30.0) is None
+
+    async def scenario():
+        queue = CompanionCommandQueue(hold_seconds=0.05)
+        waiting = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await queue.poll(None, None, menus=[("TweenMenu", 21.0), ("ContainerMenu", 2.0), ("InventoryMenu", 20.0)])
+        woken = await asyncio.wait_for(waiting, 1.0)
+        assert woken["woken"] is True
+        assert [event["text"] for event in woken["events"]] == ["The player looked into a container or a body for 2 s.",
+                                                                "The player is back from the inventory (open for 20 s)."]
 
     asyncio.run(scenario())
 

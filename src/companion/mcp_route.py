@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.62"
+SERVER_VERSION: str = "0.64"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -560,8 +560,12 @@ STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "you should hear of at once, or until 'max_wait_seconds' are over (nothing = 20 minutes, 0 = do not wait). "
         "What wakes you: a fight that begins or ends, someone who dies or goes down, a hit that leaves you or the player "
         "with little health, an enemy or a trap in sight, the player entering or leaving a place or using a door to "
-        "another place, the player starting to talk to someone, a quest that begins, moves on or ends, something you "
-        "started coming to an end (a walk, sitting down, a cover you changed), and the end of a sentence you speak with say. "
+        "another place, the player starting to talk to someone, a quest that begins, moves on or ends or that the player "
+        "picks to follow, you falling behind the player or getting stuck, your arrows or potions running low, your horse "
+        "or the player's being attacked, the player getting a bounty or reaching a level, something you "
+        "started coming to an end (a walk, sitting down, a cover you changed), the player coming back from a menu or a "
+        "loading screen that was open for more than a few seconds (the game stands still meanwhile, so you hear of it "
+        "afterwards, with how long it was open), and the end of a sentence you speak with say. "
         "What does not wake you but comes along with the next answer: what the player takes, puts on, drinks, reads, casts "
         "and uses, sneaking, and what people around say ('Heard'; the game cannot tell whether a sentence was meant for "
         "the player). The answer lists 'Events' and 'Heard' like STATE does, and takes them out of the next STATE. "
