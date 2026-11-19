@@ -631,7 +631,8 @@ def describe_wait(result: dict[str, Any], tool_name: str) -> str:
     if not result.get("connected"):
         head += " The game is not connected right now (not running, in a menu or at a loading screen)."
     if result.get("woken") and len(news) > 0:
-        tail = f"React as your character if this is worth a word or a deed, then call {tool_name} again."
+        tail = (f"React as your character if this is worth a word or a deed (a command goes into 'command' of your next {tool_name}, "
+                f"not into a call of its own), then call {tool_name} again.")
     elif result.get("woken"):
         tail = f"Go on with what you wanted to tell the player, if anything, then call {tool_name} again."
     else:

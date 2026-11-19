@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.66"
+SERVER_VERSION: str = "0.67"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -39,6 +39,12 @@ TOOL_STATE: str = "STATE"
 # Waits until something happens in the game (see WAIT_DESCRIPTION and CompanionCommandQueue.wait_for_event)
 TOOL_WAIT: str = "WAIT_FOR_EVENT"
 ARGUMENT_MAX_WAIT: str = "max_wait_seconds"
+# WAIT_FOR_EVENT: a command to carry out before the waiting, with the arguments of COMMAND. So an AI that acts and
+# then keeps watch needs one call instead of two. Two calls in the same turn made the voice app of the AI ask the
+# player for an approval now and then (see freigabe-abfrage-sprachclient.md in the notes)
+ARGUMENT_COMMAND: str = "command"
+# How the answer to a COMMAND begins to tell the urgent things that happened while it ran
+MEANWHILE_START: str = "Meanwhile: "
 ARGUMENT_DEBUG: str = "debug"
 ARGUMENT_COMPARE: str = "compare"
 # What differs by itself between a state built in one go and one built the old way: the mark of the first, and how
@@ -104,9 +110,15 @@ SERVER_INSTRUCTIONS: str = (
     "It waits until something happens in the game (a fight begins or ends, someone dies, the player goes through a "
     "door or into another place, a quest moves on, someone starts talking to the player, something you started comes "
     "to an end) and then tells you. As a ground rule call it as the very last thing of every turn: after you answered "
-    "the player, after everything you did, and again after each of its own answers, so that one call is always "
-    "waiting. When it comes back with nothing, say nothing and call it again. When the player speaks, answer as "
-    "always and call it again afterwards. Waiting is the normal state: never tell the player that you wait, that "
+    "the player, and again after each of its own answers, so that one call is always waiting. "
+    "Send one call at a time, never two in the same turn. When you want to act and go on keeping watch (nearly "
+    "always), do not call COMMAND and then WAIT_FOR_EVENT: put the command into WAIT_FOR_EVENT as 'command', with the "
+    "same fields as COMMAND. It is carried out first, and the same call then waits. "
+    "Call COMMAND by itself only while a WAIT_FOR_EVENT of yours is still open and has not answered yet (the player "
+    "asks for something in between): then act with COMMAND and start no second WAIT_FOR_EVENT, the open one goes on "
+    "waiting. "
+    "When it comes back with nothing, say nothing and call it again. When the player speaks, answer as "
+    "always and make sure one call is waiting afterwards. Waiting is the normal state: never tell the player that you wait, that "
     "something is running or that it takes a while, also when you are asked to tell that a tool takes long. "
     "What hangs onto the answer of a COMMAND as 'Meanwhile' happened while no call was waiting: it is the same as a "
     "wake-up, so react to it as you would to one. "
@@ -586,7 +598,14 @@ STATE_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "How to use it in a spoken conversation: call it as the last thing of every turn. When it wakes you, react as your "
         "character if it is worth it (say, a command, a word to the player), then call it again. When it comes back with "
         "nothing, say nothing at all and call it again. Never tell the player that you wait or that it takes a while. "
-        "When the player speaks, answer as always and call it again. If you "
+        f"'command': a command to carry out before the waiting, as an object with the fields of {TOOL_COMMAND} (action, "
+        "target, detail, loud, quiet, run, manner, then, after_previous), eg {\"command\": {\"action\": \"say\", "
+        "\"detail\": \"Wolves!\"}}. Use it whenever you act and then go on keeping watch: it is one call instead of two, "
+        "and two calls in the same turn make the app ask the player for an approval now and then. The answer begins with "
+        "'Your command' and what became of it, then tells what woke you. If the command fails, or something urgent "
+        "happened while it ran ('Meanwhile'), the call does not wait and tells you so at once. "
+        f"While a {TOOL_WAIT} of yours is still open, act with {TOOL_COMMAND} by itself and start no second {TOOL_WAIT}. "
+        "When the player speaks, answer as always and make sure one call is waiting afterwards. If you "
         "call it while an older call still waits, the older one ends quietly; its answer tells you so and needs nothing "
         "from you. It asks the game for no fresh state and costs the game next to nothing. In a written chat it holds your "
         "answer open, so use it there only when the player asks you to keep watch. "
@@ -708,7 +727,9 @@ WAIT_DESCRIPTION: str = (
     "and when your character has finished a sentence of say. What the player takes, uses or reads and what people "
     "around say does not wake you; it comes along with the next answer. If nothing happens it comes back empty after "
     "the time is up: then say nothing and call it again. In a spoken conversation call it as the last thing of every "
-    "turn, so that one call is always waiting. Never tell the player that you are waiting or that this takes long: "
+    "turn, so that one call is always waiting. When you also want to act, put the command into 'command' instead of "
+    f"calling {TOOL_COMMAND} next to it: one call at a time, never two in the same turn. "
+    "Never tell the player that you are waiting or that this takes long: "
     f"waiting is the normal state. It asks the game for no fresh state: use {TOOL_STATE} for that. "
     f"{TOOL_HELP} with the topic 'wait_for_event' tells more."
 )
@@ -803,6 +824,18 @@ TOOLS: list[dict[str, Any]] = [
                 ARGUMENT_MAX_WAIT: {"type": "integer", "description": "How long to wait at the most, in seconds. Nothing = "
                                     f"{round(CompanionCommandQueue.WATCH_LONGEST_SECONDS)} (the longest). 0 = do not wait, only "
                                     "give what happened since you asked the last time."},
+                ARGUMENT_COMMAND: {"type": "object",
+                                   "description": f"A command to carry out first, with the same fields as {TOOL_COMMAND}: this call "
+                                                  "does it and then waits. Use it instead of a call of its own whenever you act "
+                                                  "and go on keeping watch.",
+                                   "properties": {
+                                       "action": {"type": "string", "enum": consts.PLAYER_ACTIONS},
+                                       "target": {"type": "string"}, "detail": {"type": "string"}, "loud": {"type": "boolean"},
+                                       "quiet": {"type": "boolean"}, "run": {"type": "boolean"},
+                                       "manner": {"type": "string", "enum": list(consts.MANNERS)},
+                                       ARGUMENT_THEN: {"type": "array", "maxItems": MAX_WAITING_STEPS, "items": {"type": "object"}},
+                                       ARGUMENT_AFTER_PREVIOUS: {"type": "boolean"}},
+                                   "required": ["action"]},
             },
         },
     },
@@ -1015,8 +1048,50 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
     return result
 
 
-async def _wait_for_event(arguments: dict[str, Any], queue: CompanionCommandQueue, can_wait_long: bool) -> dict[str, Any]:
-    """WAIT_FOR_EVENT: waits until something happens in the game or the time is up (see CompanionCommandQueue.wait_for_event)"""
+async def _run_command_of_wait(command: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None) -> tuple[str, bool, bool]:
+    """WAIT_FOR_EVENT with 'command': carries out the command the way COMMAND does. Returns what to tell the AI about
+    it, whether it failed, and whether the call may go on to wait (not after a failure, and not if something urgent
+    happened meanwhile: that is the wake-up already)"""
+    if isinstance(command, str):
+        # Some apps hand an object over as its JSON text
+        try:
+            command = json.loads(command)
+        except ValueError:
+            command = None
+    if not isinstance(command, dict) or not isinstance(command.get("action"), str) or command.get("action", "").strip() == "":
+        return (f"'{ARGUMENT_COMMAND}' has to be a command like the ones of {TOOL_COMMAND}, with at least an 'action'. "
+                f"Nothing was done, and this call did not wait. Call {TOOL_WAIT} again.", True, False)
+    result = await _call_command(command, queue, voice)
+    is_error = bool(result.get("isError"))
+    content = result.get("content")
+    answer = str(content[0].get("text", "")) if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict) else ""
+    message = answer
+    try:
+        payload = json.loads(answer)
+        if isinstance(payload, dict) and "message" in payload:
+            message = str(payload["message"])
+    except ValueError:
+        pass
+    text = f"Your command ({command['action'].strip()}): {message}"
+    log.info("AI <- %s: its command %s: %s", TOOL_WAIT, "failed" if is_error else "is done", shorten(message))
+    if is_error:
+        return text + f"\nIt failed, so this call did not wait. React to that, then call {TOOL_WAIT} again.", True, False
+    if MEANWHILE_START in message:
+        return (text + "\nSomething urgent happened while it ran (see 'Meanwhile'), so this call did not wait. React as your "
+                f"character if this is worth a word or a deed, then call {TOOL_WAIT} again."), False, False
+    return text, False, True
+
+
+async def _wait_for_event(arguments: dict[str, Any], queue: CompanionCommandQueue, can_wait_long: bool,
+                          voice: CompanionVoice | None = None) -> dict[str, Any]:
+    """WAIT_FOR_EVENT: carries out its 'command' if it has one, then waits until something happens in the game or the
+    time is up (see CompanionCommandQueue.wait_for_event)"""
+    command_text = ""
+    if arguments.get(ARGUMENT_COMMAND) is not None:
+        command_text, is_command_error, can_wait = await _run_command_of_wait(arguments.get(ARGUMENT_COMMAND), queue, voice)
+        if not can_wait:
+            return _tool_text(command_text, is_command_error)
+        command_text += "\n"
     seconds = CompanionCommandQueue.WATCH_LONGEST_SECONDS
     wanted = arguments.get(ARGUMENT_MAX_WAIT)
     if isinstance(wanted, (int, float)) and not isinstance(wanted, bool):
@@ -1024,7 +1099,7 @@ async def _wait_for_event(arguments: dict[str, Any], queue: CompanionCommandQueu
     if not can_wait_long:
         seconds = min(seconds, WAIT_SECONDS_WITHOUT_STREAM)
     result = await queue.wait_for_event(seconds)
-    text = describe_wait(result, TOOL_WAIT)
+    text = command_text + describe_wait(result, TOOL_WAIT)
     state = result.get("state")
     protocol = state.get("protocol") if isinstance(state, dict) else None
     if not result.get("taken_over") and isinstance(protocol, int) and protocol < consts.WATCH_PROTOCOL:
@@ -1039,7 +1114,7 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
         arguments = {}
 
     if name == TOOL_WAIT:
-        return await _wait_for_event(arguments, queue, can_wait_long)
+        return await _wait_for_event(arguments, queue, can_wait_long, voice)
 
     if name == TOOL_STATE:
         find_gesture = " ".join(str(arguments.get(ARGUMENT_FIND_GESTURE, "") or "").split())[:MAX_FIND_LENGTH]
@@ -1912,7 +1987,7 @@ async def _call_command(arguments: dict[str, Any], queue: CompanionCommandQueue,
     # What cannot wait until the next STATE: a fight that began, someone who died (see 'Events' of STATE)
     urgent_events = await queue.take_urgent_events()
     if len(urgent_events) > 0:
-        notes.append("Meanwhile: " + " ".join(f"{event['text']} ({event['seconds_ago']} s ago)" for event in urgent_events))
+        notes.append(MEANWHILE_START + " ".join(f"{event['text']} ({event['seconds_ago']} s ago)" for event in urgent_events))
     if len(notes) > 0:
         payload = dict(payload)
         payload["message"] = " ".join([str(payload.get("message", ""))] + notes).strip()

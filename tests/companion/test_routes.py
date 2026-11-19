@@ -4270,6 +4270,62 @@ def test_wait_for_event_as_a_tool_and_as_a_stream():
         assert rpc(client, "tools/list").headers["content-type"].startswith("application/json")
 
 
+def test_wait_for_event_carries_out_a_command_and_then_waits():
+    from src.companion.mcp_route import SERVER_INSTRUCTIONS, describe_help
+
+    assert "never two in the same turn" in SERVER_INSTRUCTIONS and "as 'command'" in SERVER_INSTRUCTIONS
+    assert "'command': a command to carry out before the waiting" in describe_help("wait_for_event")[0]
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.2)) as client:
+        def wait(arguments: dict):
+            return rpc(client, "tools/call", {"name": "WAIT_FOR_EVENT", "arguments": arguments})
+
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        schema = tools[3]["inputSchema"]["properties"]["command"]
+        assert schema["required"] == ["action"] and "follow" in schema["properties"]["action"]["enum"] and "then" in schema["properties"]
+
+        # Something that is no command is refused, and the call does not wait
+        started = time.monotonic()
+        refused = wait({"command": {"detail": "no action"}, "max_wait_seconds": 30})
+        assert refused.json()["result"]["isError"] is True and "has to be a command" in tool_text(refused) and time.monotonic() - started < 2.0
+        # A command that fails (here: no game) is told at once as well
+        failed = wait({"command": {"action": "follow"}, "max_wait_seconds": 30})
+        assert failed.json()["result"]["isError"] is True and time.monotonic() - started < 15.0
+        assert tool_text(failed).startswith("Your command (follow): ") and "It failed, so this call did not wait." in tool_text(failed)
+
+        received: list[dict] = []
+        stop = {"now": False, "events": []}
+
+        def game_loop():
+            results: list[dict] = []
+            while not stop["now"]:
+                events, stop["events"] = stop["events"], []
+                reply = client.post(consts.ROUTE_GAME, json={consts.KEY_RESULTS: results, consts.KEY_EVENTS: events}).json()
+                received.extend(reply.get(consts.KEY_COMMANDS, []))
+                results = [{consts.KEY_COMMAND_ID: sent[consts.KEY_COMMAND_ID], consts.KEY_RESULT_OK: True, consts.KEY_RESULT_MESSAGE: "You follow the player now."}
+                           for sent in reply.get(consts.KEY_COMMANDS, [])]
+
+        game = threading.Thread(target=game_loop, daemon=True)
+        game.start()
+        time.sleep(0.4)
+        # The command is carried out, then the same call waits and comes back when its time is up
+        text = tool_text(wait({"command": {"action": "follow"}, "max_wait_seconds": 1}))
+        assert [sent[consts.KEY_COMMAND_ACTION] for sent in received] == ["follow"]
+        lines = text.split("\n")
+        assert lines[0] == "Your command (follow): You follow the player now." and lines[1].startswith("Nothing happened in 1 s")
+        # An object that comes as JSON text is read as well
+        text = tool_text(wait({"command": json.dumps({"action": "follow"}), "max_wait_seconds": 0}))
+        assert text.startswith("Your command (follow): You follow the player now.\n") and len(received) == 2
+        # Something urgent that happened while the command ran is the wake-up already: the call does not wait
+        stop["events"] = ["\t".join(["0", "875", "1", "Wolf started fighting the player."])]
+        time.sleep(0.5)
+        started = time.monotonic()
+        text = tool_text(wait({"command": {"action": "follow"}, "max_wait_seconds": 30}))
+        assert "Meanwhile: Wolf started fighting the player." in text and "so this call did not wait" in text and time.monotonic() - started < 10.0
+        stop["now"] = True
+        game.join(2.0)
+
+
 def test_wait_stream_sends_signs_of_life_while_it_waits():
     from src.companion import mcp_route
     from src.companion.command_queue import CompanionCommandQueue
