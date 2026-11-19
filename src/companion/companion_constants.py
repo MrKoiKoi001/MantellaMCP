@@ -46,20 +46,31 @@ class companion_constants:
     # starting to talk to someone, and what happens to quests. Everything else only lies ready for the next answer
     WAKE_EVENT_STARTS: tuple[str, ...] = (
         "You started fighting", "You stopped fighting", "The fight of the player is over",
-        "The player entered ", "The player left ", "The player used the door to ",
+        "The player entered ", "The player used the door to ",
         "The player started talking to ", "The player started a conversation",
         "Quest ", "New quest:", "New objective:", "Objective done:", "Objective failed:", "An objective failed",
         "The player is back from ",
         # What the plugin of the game mod watches over since interface version 38
         "You have fallen behind", "You are stuck", "You are low on ", "You are out of ",
         "The player reached level ", "The player got a bounty", "The player now follows the quest ",
+        # Since interface version 39
+        "The player rides and you are on foot",
     )
+    # The player crossing the border of a place of the map (no door): riding past a mine does that several times
+    # within seconds. Leaving a place does not wake at all, and entering one only wakes if the AI was not told of
+    # such a change a moment ago (see CompanionCommandQueue.AREA_QUIET_SECONDS). What does not wake lies ready
+    AREA_EVENT_STARTS: tuple[str, ...] = ("The player entered ", "The player left ")
+    # What became of something the companion started wakes the AI, but not this: every command of a chain went
+    # through, so there is nothing to do. It comes along with the next answer (see command_chain.py for the text)
+    QUIET_REPORT_STARTS: tuple[str, ...] = ("Queue: all done",)
     # Menus: the game stands still while one is open and tells afterwards which were open and for how long (see
     # KEY_MENUS). The server makes events of that. One that was open for at least MENU_WAKE_SECONDS wakes the AI
     # ('The player is back from ...'), a shorter one only lies ready, and one below MENU_LEAST_SECONDS is left out
     MENU_WAKE_SECONDS: float = 5.0
     MENU_LEAST_SECONDS: float = 1.0
-    # What the AI is told for the names the game gives its menus. A menu that is not here goes by its own name
+    # What the AI is told for the names the game gives its menus. A menu that is not here tells nothing: what mods
+    # show on the screen all the time (BTPS, TrueHUD) counts as a menu for the game and closes with every loading
+    # screen, which came as three lines 'The player is back from ...' with every door
     MENU_TEXTS: dict[str, str] = {
         "InventoryMenu": "the inventory", "MagicMenu": "the magic menu", "MapMenu": "the map", "StatsMenu": "the skills menu",
         "Journal Menu": "the journal or the system menu", "BarterMenu": "trading", "ContainerMenu": "a container or a body",

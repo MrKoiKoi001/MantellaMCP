@@ -37,9 +37,9 @@ def describe_silence(silent_seconds: float) -> str:
 
 def menu_event(name: str, open_seconds: float) -> dict[str, Any] | None:
     """The event a menu that was open in the game becomes (see consts.MENU_WAKE_SECONDS), or None if it tells nothing"""
-    if name in consts.MENUS_LEFT_OUT or open_seconds < consts.MENU_LEAST_SECONDS:
+    if name in consts.MENUS_LEFT_OUT or name not in consts.MENU_TEXTS or open_seconds < consts.MENU_LEAST_SECONDS:
         return None
-    what = consts.MENU_TEXTS.get(name, name)
+    what = consts.MENU_TEXTS[name]
     if open_seconds >= consts.MENU_WAKE_SECONDS:
         text = f"The player is back from {what} (open for {round(open_seconds)} s)."
     else:
@@ -50,6 +50,11 @@ def menu_event(name: str, open_seconds: float) -> dict[str, Any] | None:
 def wakes_the_ai(event: dict[str, Any]) -> bool:
     """WAIT_FOR_EVENT: whether the AI should hear of this event at once (see consts.WAKE_EVENT_STARTS)"""
     return bool(event.get("urgent")) or str(event.get("text", "")).startswith(consts.WAKE_EVENT_STARTS)
+
+
+def is_area_event(event: dict[str, Any]) -> bool:
+    """Whether this event tells that the player crossed the border of a place of the map (see consts.AREA_EVENT_STARTS)"""
+    return str(event.get("text", "")).startswith(consts.AREA_EVENT_STARTS)
 
 
 class CompanionCommandQueue:
@@ -97,6 +102,9 @@ class CompanionCommandQueue:
     WATCH_LONGEST_SECONDS: float = 1200.0
     # Two wake-ups lie at least this far apart, so that what happens in a row comes in one answer
     WAKE_GAP_SECONDS: float = 6.0
+    # The player entering a place only wakes the AI if it happened at least this long after the AI was told of a
+    # change of place the last time (see consts.AREA_EVENT_STARTS)
+    AREA_QUIET_SECONDS: float = 30.0
     # While nothing wakes by the clock, a waiting call looks again this often at the latest
     WATCH_LOOK_SECONDS: float = 30.0
     # While commands wait in a chain (see command_chain.py) the request of the game is only held open this long,
@@ -149,6 +157,8 @@ class CompanionCommandQueue:
         self.__watch_generation: int = 0
         self.__watcher_count: int = 0
         self.__last_wake_time: float = float("-inf")
+        # When the AI was told last that the player entered or left a place (see AREA_QUIET_SECONDS)
+        self.__last_area_told_time: float = float("-inf")
         # say: until when the companion speaks in the game, and whether the AI has been told that it is done
         self.__speech_end_time: float = 0.0
         self.__is_speech_end_told: bool = True
@@ -626,16 +636,21 @@ class CompanionCommandQueue:
     def __wake_reason(self, now: float) -> str:
         """Why the AI is to be woken now: 'speech' (its character finished a sentence), 'report' (something it started
         came to an end), 'event' (see wakes_the_ai), or an empty text for nothing. While the character speaks nothing
-        wakes, and two wake-ups lie WAKE_GAP_SECONDS apart; the end of a sentence wakes at once"""
+        wakes, and two wake-ups lie WAKE_GAP_SECONDS apart; the end of a sentence wakes at once. The player entering
+        a place does not wake shortly after the AI was told of a change of place (see AREA_QUIET_SECONDS)"""
         if not self.__is_speech_end_told:
             return "speech" if now >= self.__speech_end_time else ""
         if now - self.__last_wake_time < self.WAKE_GAP_SECONDS:
             return ""
-        if len(self.__reports) > 0:
+        if any(not report.startswith(consts.QUIET_REPORT_STARTS) for report in self.__reports):
             return "report"
         for event in self.__events:
-            if now - event["time"] <= self.MAX_EVENT_AGE_SECONDS and wakes_the_ai(event):
-                return "event"
+            if now - event["time"] > self.MAX_EVENT_AGE_SECONDS or not wakes_the_ai(event):
+                continue
+            if is_area_event(event) and event["time"] - self.__last_area_told_time < self.AREA_QUIET_SECONDS:
+                # The AI has just heard of a change of place: this one only lies ready
+                continue
+            return "event"
         return ""
 
     def __seconds_to_next_look(self, now: float) -> float:
@@ -773,7 +788,10 @@ class CompanionCommandQueue:
         now = time.monotonic()
         events = [event for event in self.__events if now - event["time"] <= self.MAX_EVENT_AGE_SECONDS]
         self.__events = []
-        return [self.__describe_event(event, now) for event in events[-self.MAX_EVENT_LINES:]]
+        told = events[-self.MAX_EVENT_LINES:]
+        if any(is_area_event(event) for event in told):
+            self.__last_area_told_time = now
+        return [self.__describe_event(event, now) for event in told]
 
     @staticmethod
     def __describe_event(event: dict[str, Any], now: float) -> dict[str, Any]:

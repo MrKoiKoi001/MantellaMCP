@@ -3992,12 +3992,14 @@ def test_wait_for_event_wakes_for_what_matters_and_keeps_the_rest_ready():
         return {"seconds_ago": seconds_ago, "game_time": "14:35", "urgent": is_urgent, "text": text}
 
     # What wakes: everything urgent, fights, the player going somewhere else, talks and quests. The rest lies ready
-    for text in ("You started fighting Wolf.", "The fight of the player is over.", "The player entered Riverwood.", "The player left Riverwood.",
+    for text in ("You started fighting Wolf.", "The fight of the player is over.", "The player entered Riverwood.",
+                 "The player rides and you are on foot: your horse is about 120 m away from you.",
+                 "You have fallen behind: the player went on without you (through a door, or far ahead), and you are no longer where the player is.",
                  "The player used the door to Sleeping Giant Inn.", "The player started talking to Orgnar.", "Quest Before the Storm. Objective done: Talk to Alvor.",
                  "New quest: The Golden Claw. Objective: Find the claw.", "Objective done: Talk to Alvor."):
         assert wakes_the_ai(event(text)), text
     for text in ("The player opened Chest.", "The player used the door 'Wooden Door'.", "The player took 3 Iron Arrow.", "The player started sneaking.",
-                 "The player stopped talking to Orgnar."):
+                 "The player stopped talking to Orgnar.", "The player left Riverwood."):
         assert not wakes_the_ai(event(text)), text
     assert wakes_the_ai(event("Bandit killed Lydia.", True))
     # What the plugin watches over by itself
@@ -4076,7 +4078,7 @@ def test_wait_for_event_wakes_for_what_matters_and_keeps_the_rest_ready():
         await asyncio.sleep(0.05)
         newer = asyncio.ensure_future(queue.wait_for_event(5.0))
         await asyncio.sleep(0.05)
-        await game(events=[event("The player left Riverwood.")])
+        await game(events=[event("The player used the door to Sleeping Giant Inn.")])
         newest = await asyncio.wait_for(newer, 1.0)
         assert newest["woken"] is True and len(newest["events"]) == 1
         old = await asyncio.wait_for(older, 2.0)
@@ -4102,6 +4104,75 @@ def test_wait_for_event_wakes_for_what_matters_and_keeps_the_rest_ready():
     asyncio.run(scenario())
 
 
+def test_a_queue_that_went_through_does_not_wake_by_itself():
+    from src.companion.command_queue import CompanionCommandQueue
+
+    async def scenario():
+        queue = CompanionCommandQueue(hold_seconds=0.05)
+        queue.WAKE_GAP_SECONDS = 0.0
+        await queue.add_report("Queue: all done (follow).")
+        ready = await queue.wait_for_event(0.2)
+        assert ready["woken"] is False and ready["reports"] == ["Queue: all done (follow)."]
+        # A queue that did not go through wakes, and so does everything else the companion started
+        await queue.add_report("Queue: finished. Done: say.")
+        assert (await asyncio.wait_for(queue.wait_for_event(5.0), 1.0))["woken"] is True
+        await queue.add_report("You could not sit down on Bench.")
+        assert (await asyncio.wait_for(queue.wait_for_event(5.0), 1.0))["woken"] is True
+
+    asyncio.run(scenario())
+
+
+def test_changes_of_place_wake_only_now_and_then():
+    from src.companion.command_queue import CompanionCommandQueue, is_area_event
+
+    def event(text: str) -> dict:
+        return {"seconds_ago": 0, "game_time": "14:35", "urgent": False, "text": text}
+
+    assert is_area_event(event("The player entered Whistling Mine.")) and is_area_event(event("The player left Whistling Mine."))
+    assert not is_area_event(event("The player used the door to Whistling Mine."))
+
+    async def scenario():
+        queue = CompanionCommandQueue(hold_seconds=0.05)
+        queue.WAKE_GAP_SECONDS = 0.0
+        queue.AREA_QUIET_SECONDS = 0.6
+
+        async def game(events):
+            await queue.poll(None, None, events=events)
+
+        # Entering a place wakes
+        waiting = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await game([event("The player entered Whistling Mine.")])
+        assert (await asyncio.wait_for(waiting, 1.0))["woken"] is True
+
+        # Riding past: right after that, leaving it and entering it again only lie ready
+        await game([event("The player left Whistling Mine."), event("The player entered Whistling Mine.")])
+        ready = await queue.wait_for_event(0.2)
+        assert ready["woken"] is False and len(ready["events"]) == 2
+
+        # A door always wakes, and brings along the place behind it
+        waiting = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await game([event("The player used the door to Whistling Mine."), event("The player entered Whistling Mine.")])
+        through = await asyncio.wait_for(waiting, 1.0)
+        assert through["woken"] is True and len(through["events"]) == 2
+
+        # Leaving a place never wakes by itself, however long ago the last change of place was told
+        await asyncio.sleep(0.7)
+        await game([event("The player left Whistling Mine.")])
+        left = await queue.wait_for_event(0.2)
+        assert left["woken"] is False and [entry["text"] for entry in left["events"]] == ["The player left Whistling Mine."]
+
+        # A while after the AI heard of a place the last time, entering one wakes again
+        await asyncio.sleep(0.7)
+        waiting = asyncio.ensure_future(queue.wait_for_event(5.0))
+        await asyncio.sleep(0.05)
+        await game([event("The player entered Riverwood.")])
+        assert (await asyncio.wait_for(waiting, 1.0))["woken"] is True
+
+    asyncio.run(scenario())
+
+
 def test_coming_back_from_a_menu_is_an_event_and_wakes_after_a_long_one():
     from src.companion.command_queue import CompanionCommandQueue, menu_event, wakes_the_ai
 
@@ -4110,8 +4181,8 @@ def test_coming_back_from_a_menu_is_an_event_and_wakes_after_a_long_one():
     short_one = menu_event("ContainerMenu", 2.4)
     assert short_one["text"] == "The player looked into a container or a body for 2 s." and not wakes_the_ai(short_one)
     assert menu_event("Loading Menu", 12.0)["text"] == "The player is back from a loading screen (open for 12 s)."
-    # A menu the server has no words for goes by the name of the game
-    assert menu_event("Some Mod Menu", 9.0)["text"] == "The player is back from Some Mod Menu (open for 9 s)."
+    # A menu the server has no words for tells nothing: what mods show on the screen closes with every loading screen
+    assert menu_event("Some Mod Menu", 9.0) is None and menu_event("BTPS Ovelay Menu", 625.0) is None and menu_event("TrueHUD", 625.0) is None
     # Too short to tell, or nothing of its own
     assert menu_event("InventoryMenu", 0.6) is None and menu_event("Dialogue Menu", 30.0) is None and menu_event("TweenMenu", 30.0) is None
 
