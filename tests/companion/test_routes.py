@@ -4399,3 +4399,95 @@ def test_unfavorite_is_favorite_with_off():
         assert (sent[consts.KEY_COMMAND_ACTION], sent[consts.KEY_COMMAND_COUNT], sent[consts.KEY_COMMAND_TARGET]) == (consts.ACTION_FAVORITE, 0, "00013985")
         tools = rpc(client, "tools/list").json()["result"]["tools"]
         assert "unfavorite" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+
+
+def test_memory_comes_once_with_the_first_answer_of_a_session(tmp_path):
+    folder = str(tmp_path / "memory")
+    client = TestClient(create_app(TOKEN, hold_seconds=0.1, memory_folder=folder))
+    tools = rpc(client, "tools/list").json()["result"]["tools"]
+    assert [tool["name"] for tool in tools] == ["COMMAND", "STATE", "HELP", "WAIT_FOR_EVENT", "MEMORY"]
+    rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}})
+    first = tool_text(rpc(client, "tools/call", {"name": "HELP", "arguments": {"topic": "say"}}))
+    assert first.startswith("YOUR MEMORY")
+    # The personality and the important topics come whole, the normal ones only with their line in the list
+    assert "Aela die Jägerin" in first and "Hochwodka" in first and "Poldi" in first and "Der Held heißt Koi" in first
+    assert "- ausruestung [normal]" in first and "Alter Nordkriegshammer" not in first
+    second = tool_text(rpc(client, "tools/call", {"name": "HELP", "arguments": {"topic": "say"}}))
+    assert "YOUR MEMORY" not in second
+    # A server without a memory offers no tool MEMORY
+    plain = TestClient(create_app(TOKEN, hold_seconds=0.1))
+    assert "MEMORY" not in [tool["name"] for tool in rpc(plain, "tools/list").json()["result"]["tools"]]
+
+
+def test_memory_keeps_reads_and_forgets_topics(tmp_path):
+    import os
+    folder = str(tmp_path / "memory")
+    client = TestClient(create_app(TOKEN, hold_seconds=0.1, memory_folder=folder))
+
+    def memory(arguments: dict):
+        return rpc(client, "tools/call", {"name": "MEMORY", "arguments": arguments}).json()["result"]
+
+    kept = memory({"action": "write", "topic": "Jarl Balgruuf", "text": "Der Jarl von Weißlauf. Mag keine Drachen.",
+                   "summary": "Jarl von Weißlauf", "importance": "important"})
+    assert not kept.get("isError") and "jarl-balgruuf" in kept["content"][0]["text"]
+    assert "- jarl-balgruuf [important] Jarl Balgruuf: Jarl von Weißlauf" in memory({"action": "index"})["content"][0]["text"]
+    assert "Mag keine Drachen" in memory({"action": "read", "topic": "jarl-balgruuf"})["content"][0]["text"]
+    with open(os.path.join(folder, "index.md"), encoding="utf-8") as file:
+        assert "jarl-balgruuf" in file.read()
+    too_long = memory({"action": "write", "topic": "lang", "text": "x" * 2501})
+    assert too_long["isError"] is True
+    assert memory({"action": "forget", "topic": "jarl-balgruuf"}).get("isError") is not True
+    assert memory({"action": "read", "topic": "jarl-balgruuf"})["isError"] is True
+    assert os.path.isfile(os.path.join(folder, "vergessen", "jarl-balgruuf.md"))
+
+
+def test_memory_forgets_what_was_not_used_for_long_in_the_game(tmp_path):
+    import os
+    from src.companion.memory import CompanionMemory
+
+    folder = str(tmp_path / "memory")
+    memory = CompanionMemory(folder)
+    memory.write("alter kram", "Etwas Altes.", "", "unimportant", 100)
+    memory.write("normales", "Etwas Normales.", "", "normal", 100)
+    memory.write("wichtiges", "Etwas Wichtiges.", "", "important", 100)
+    # An older save (game day before the one of the last use) forgets nothing
+    memory.note_session_start()
+    memory.take_start_text(50)
+    assert os.path.isfile(os.path.join(folder, "alter-kram.md"))
+    memory.note_session_start()
+    start = memory.take_start_text(110)
+    assert not os.path.isfile(os.path.join(folder, "alter-kram.md"))
+    assert os.path.isfile(os.path.join(folder, "vergessen", "alter-kram.md"))
+    assert os.path.isfile(os.path.join(folder, "normales.md"))
+    assert "alter-kram" not in start
+    assert os.path.isfile(os.path.join(folder, "wichtiges.md"))
+    # Personality and essential topics are never forgotten, important ones after 60 game days
+    memory.note_session_start()
+    memory.take_start_text(100000)
+    assert os.path.isfile(os.path.join(folder, "aela.md")) and os.path.isfile(os.path.join(folder, "pferde.md"))
+    assert os.path.isfile(os.path.join(folder, "koi.md"))
+    assert not os.path.isfile(os.path.join(folder, "normales.md")) and not os.path.isfile(os.path.join(folder, "wichtiges.md"))
+    # A topic without a game day (the starting ones) cannot be told old, so it stays until it is used once
+    assert os.path.isfile(os.path.join(folder, "running-gags.md"))
+
+
+def test_memory_keeps_what_happened_last_over_a_new_start(tmp_path):
+    from src.companion.memory import CompanionMemory
+
+    folder = str(tmp_path / "memory")
+    memory = CompanionMemory(folder)
+    for number in range(35):
+        memory.note_recent("event", f"Ereignis {number}", "19:00")
+    memory.note_recent("said", "Hochwodka für alle!")
+    again = CompanionMemory(folder)
+    again.note_session_start()
+    start = again.take_start_text(None)
+    assert "Recently" in start and "You said: Hochwodka für alle!" in start
+    assert "Ereignis 34" in start and "Ereignis 5 " not in start and "Ereignis 5\n" not in start
+    assert again.take_start_text(None) == ""
+
+
+def test_the_state_tells_the_game_day():
+    from src.companion import game_state
+    assert game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0, 26, 0, 0, 312]})["game_day"] == 312
+    assert "game_day" not in game_state.read_game_state({game_state.KEY_WORLD_VALUES: [0, 600, 2, 0, 26, 0, 0]})

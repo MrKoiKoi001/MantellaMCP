@@ -168,6 +168,8 @@ class CompanionCommandQueue:
         self.game_folder: str = ""
         # The chain of commands that wait for each other (command_chain.CompanionChain), made by the MCP side when needed
         self.chain: Any = None
+        # The memory of the companion (memory.CompanionMemory), which also keeps what happened last. None = no memory
+        self.memory: Any = None
 
     # ------------------------------------------------------------------ game side
 
@@ -755,6 +757,8 @@ class CompanionCommandQueue:
                 previous["time"] = heard_time
                 continue
             self.__heard.append({"ref_id": line.get("ref_id"), "name": line.get("name"), "text": text, "time": heard_time})
+            if self.memory is not None:
+                self.memory.note_recent("heard", f"{line.get('name')}: {text}")
         # Bounded even if the AI never asks
         self.__heard = self.__heard[-self.MAX_STORED_RESULTS:]
 
@@ -779,6 +783,8 @@ class CompanionCommandQueue:
                 continue
             self.__events.append({"time": now - float(event.get("seconds_ago", 0)), "game_time": str(event.get("game_time", "")),
                                   "urgent": bool(event.get("urgent", False)), "text": str(event.get("text", ""))})
+            if self.memory is not None:
+                self.memory.note_recent("event", str(event.get("text", "")), str(event.get("game_time", "")))
         # Urgent ones come with an earlier request than what happened before them, so the order is put right here.
         # Bounded even if the AI never asks
         self.__events = sorted(self.__events, key=lambda event: event["time"])[-self.MAX_STORED_EVENTS:]

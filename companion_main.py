@@ -23,6 +23,7 @@ from src.companion.mcp_route import SERVER_VERSION, add_mcp_route
 from src.companion.game_state import GAME_PROTOCOL
 from src.companion.server_log import log, start_log_file
 from src.companion.lips import LipSync
+from src.companion.memory import MEMORY_FOLDER, CompanionMemory
 from src.companion.settings import SETTINGS_FILE, VOICE_XTTS, load_settings
 from src.companion.voice import CompanionVoice
 from src.companion.xtts import XttsVoice
@@ -47,18 +48,21 @@ def load_or_create_token(token_file: str) -> str:
 
 def create_app(token: str, hold_seconds: float = DEFAULT_HOLD_SECONDS, voice: CompanionVoice | None = None,
                mutes_game_lines: bool = False, game_folder: str = "",
-               pause_wait_seconds: float = CompanionCommandQueue.PAUSE_WAIT_SECONDS) -> FastAPI:
+               pause_wait_seconds: float = CompanionCommandQueue.PAUSE_WAIT_SECONDS, memory_folder: str = "") -> FastAPI:
     """
     Args:
         pause_wait_seconds: How long a command waits for a game that stands still (a menu) to go on
         game_folder: The folder of the game, for finding its animations by a word (find_gesture). Empty = not known
         voice: Makes the sound for the command say (see src/companion/voice.py). Without it the companion cannot speak
         mutes_game_lines: Whether the game mod is to cut off the sentences the game lets the companion say on its own
+        memory_folder: The folder of the memory of the companion (see memory.py). Empty = no memory, no tool MEMORY
     """
     app = FastAPI()
     queue = CompanionCommandQueue(hold_seconds=hold_seconds, pause_wait_seconds=pause_wait_seconds)
     queue.mutes_game_lines = mutes_game_lines
     queue.game_folder = game_folder
+    if memory_folder != "":
+        queue.memory = CompanionMemory(memory_folder)
     add_game_route(app, queue)
     add_mcp_route(app, queue, token, voice)
     return app
@@ -82,7 +86,7 @@ def main():
     voice = CompanionVoice(game_folder, args.piper_folder or settings.piper_folder, lips=lips, xtts=xtts,
                            volume_percent=settings.voice_volume, talk_gestures=settings.talk_gestures, piper_voice=settings.piper_voice)
     lip_files_change = voice.prepare_lip_files()
-    app = create_app(token, args.hold_seconds, voice, settings.mute_game_lines, game_folder)
+    app = create_app(token, args.hold_seconds, voice, settings.mute_game_lines, game_folder, memory_folder=MEMORY_FOLDER)
     log_file = start_log_file()
     log.info("SERVER started: version %s, protocol %d, port %d, a request of the game is held for %.0f s.", SERVER_VERSION, GAME_PROTOCOL, args.port, args.hold_seconds)
 
@@ -93,6 +97,7 @@ def main():
     print(f"  For the AI app, put the tunnel address in front: https://<tunnel-address>{consts.ROUTE_MCP_PREFIX}{token}")
     print(f"  Settings: {settings_source}")
     print(f"  Log file: {log_file}")
+    print(f"  Memory of the companion: {os.path.abspath(MEMORY_FOLDER)}")
     if xtts_start != "":
         print(f"  XTTS server: {xtts_start}")
     print(f"  Voice of the companion (command say): {voice.describe_setup()}")

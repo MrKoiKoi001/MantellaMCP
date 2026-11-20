@@ -333,10 +333,13 @@ NEARBY_LINE_PART_COUNT: int = 5
 SIT_STATES_SEATED: tuple[int, ...] = (3, 4)
 # What the game calls sleeping (Actor.GetSleepState): 3 = asleep, 4 = asleep and about to wake up
 SLEEP_STATES_ASLEEP: tuple[int, ...] = (3, 4)
-WORLD_VALUE_COUNT: int = 7
+WORLD_VALUE_COUNT: int = 8
 WORLD_PLACE_OF_PROTOCOL: int = 4
 WORLD_PLACE_OF_AROUND: int = 5
 WORLD_PLACE_OF_VISIBLE: int = 6
+# How many days have passed in the game (Utility.GetCurrentGameTime without the time of day), for the memory of the
+# companion (see memory.py). Older game mods do not send it
+WORLD_PLACE_OF_GAME_DAY: int = 7
 # What the viewer can see lies within this many degrees to the left and right of where it faces
 # (VisibleHalfAngleDegrees in KI_MCP_Gefaehrte_Loop.psc). The things are filtered by it here
 VISIBLE_HALF_ANGLE_DEGREES: int = 60
@@ -498,6 +501,8 @@ def read_game_state(raw: Any) -> dict[str, Any] | None:
         state["around_companion"] = len(world_values) > WORLD_PLACE_OF_AROUND and world_values[WORLD_PLACE_OF_AROUND] != 0
         # Whether the game only listed the characters the viewer can see
         state["visible_only"] = len(world_values) > WORLD_PLACE_OF_VISIBLE and world_values[WORLD_PLACE_OF_VISIBLE] != 0
+        if len(world_values) > WORLD_PLACE_OF_GAME_DAY and world_values[WORLD_PLACE_OF_GAME_DAY] >= 0:
+            state["game_day"] = world_values[WORLD_PLACE_OF_GAME_DAY]
         if len(world_values) > WORLD_PLACE_OF_HEARING:
             state["hearing"] = world_values[WORLD_PLACE_OF_HEARING] != 0
             if state["hearing"]:

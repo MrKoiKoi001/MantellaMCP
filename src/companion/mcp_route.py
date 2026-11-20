@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.68"
+SERVER_VERSION: str = "0.71"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -36,6 +36,9 @@ TOOL_COMMAND: str = "COMMAND"
 # is swapped for the language that voice speaks, see _tools_for
 SAY_LANGUAGE_NOTE: str = "Write it in English: the voice cannot pronounce other languages. "
 TOOL_STATE: str = "STATE"
+# The memory of the companion between sessions (see memory.py). Only there if the server was started with a memory
+TOOL_MEMORY: str = "MEMORY"
+MEMORY_ACTIONS: list[str] = ["index", "read", "write", "forget"]
 # Waits until something happens in the game (see WAIT_DESCRIPTION and CompanionCommandQueue.wait_for_event)
 TOOL_WAIT: str = "WAIT_FOR_EVENT"
 ARGUMENT_MAX_WAIT: str = "max_wait_seconds"
@@ -124,7 +127,10 @@ SERVER_INSTRUCTIONS: str = (
     "wake-up, so react to it as you would to one. "
     "In a written chat call it only when the player asks you to keep watch, because there it holds your answer open. "
     "While your character speaks a sentence of say in the game, do not talk to the player: WAIT_FOR_EVENT tells you "
-    "when the sentence is over."
+    "when the sentence is over. "
+    "Your memory: the first answer of a session begins with what your character keeps between sessions (who it is, "
+    "the rules of the player, running gags, what happened last). Stay that character. With MEMORY you read a topic "
+    "in full, keep something new (a running gag, a person, something the player wants) and forget what is stale."
 )
 
 # The manual. All of this used to stand in the descriptions of the two tools, and an AI is handed the descriptions of
@@ -753,6 +759,35 @@ HELP_DESCRIPTION: str = (
     "time there. Read the topic of a command before you use it for the first time in a conversation; after that you know it."
 )
 
+MEMORY_DESCRIPTION: str = (
+    "Your memory between sessions: one small topic per file (at most 2500 characters), each with an importance and a "
+    "one-line summary. The first answer of a session already brings the list of topics, the whole text of the topics "
+    "of your personality, the essential and the important ones, and what happened last. 'action': index = the list of topics; read = "
+    "one topic in full ('topic'); write = keep a topic or replace its text ('topic' = a short name like "
+    "'jarl-balgruuf', 'text', 'summary' = one or two sentences for the list, 'importance' = personality (who you "
+    "are), essential (fixed facts: names, your horse, a house), important, normal or unimportant); forget = take a topic out. To add to a topic, read it, then write the whole new text. "
+    "Keep what matters for later: running gags, people, places with a story, what the player wishes or dislikes. "
+    "Topics you do not read or write for a long time in the game are forgotten by themselves (unimportant after 5 "
+    "game days, normal after 30, important after 60); personality and essential ones never are."
+)
+
+MEMORY_TOOL: dict[str, Any] = {
+    "name": TOOL_MEMORY,
+    "description": MEMORY_DESCRIPTION,
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": MEMORY_ACTIONS},
+            "topic": {"type": "string", "description": "The name of the topic (read, write, forget)."},
+            "text": {"type": "string", "description": "write: the whole text of the topic, at most 2500 characters."},
+            "summary": {"type": "string", "description": "write: one or two sentences for the list of topics."},
+            "importance": {"type": "string", "enum": ["personality", "essential", "important", "normal", "unimportant"],
+                           "description": "write: how important it is. Nothing = as before, or normal for a new topic."},
+        },
+        "required": ["action"],
+    },
+}
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": TOOL_COMMAND,
@@ -960,6 +995,9 @@ async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: Com
         params = {}
 
     if method == "initialize":
+        # A new session of the AI: its first answer brings the memory of the companion (see memory.py)
+        if queue.memory is not None:
+            queue.memory.note_session_start()
         requested_version = params.get("protocolVersion")
         version = requested_version if requested_version in SUPPORTED_PROTOCOL_VERSIONS else FALLBACK_PROTOCOL_VERSION
         return _result(message_id, {
@@ -971,7 +1009,7 @@ async def _handle_message(message: Any, queue: CompanionCommandQueue, voice: Com
     if method == "ping":
         return _result(message_id, {})
     if method == "tools/list":
-        return _result(message_id, {"tools": _tools_for(voice)})
+        return _result(message_id, {"tools": _tools_for(voice, queue)})
     if method == "tools/call":
         return _result(message_id, await _call_tool(params.get("name"), params.get("arguments"), queue, voice, can_wait_long))
     return _error(message_id, -32601, f"Method not found: {method}")
@@ -986,14 +1024,18 @@ def _say_note_for(voice: CompanionVoice | None) -> str:
             "Keep it short, the voice needs a few seconds for every sentence. ")
 
 
-def _tools_for(voice: CompanionVoice | None) -> list[dict[str, Any]]:
-    """The tools as the AI gets them: with the language the voice of the companion speaks in the note about say"""
+def _tools_for(voice: CompanionVoice | None, queue: CompanionCommandQueue | None = None) -> list[dict[str, Any]]:
+    """The tools as the AI gets them: with the language the voice of the companion speaks in the note about say,
+    and MEMORY if the server keeps a memory"""
     note = _say_note_for(voice)
-    if note == SAY_LANGUAGE_NOTE:
+    has_memory = queue is not None and queue.memory is not None
+    if note == SAY_LANGUAGE_NOTE and not has_memory:
         return TOOLS
     tools = copy.deepcopy(TOOLS)
     for tool in tools:
         tool["description"] = str(tool.get("description", "")).replace(SAY_LANGUAGE_NOTE, note)
+    if has_memory:
+        tools.append(copy.deepcopy(MEMORY_TOOL))
     return tools
 
 
@@ -1050,6 +1092,11 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
     except Exception:
         log.exception("AI <- %s broke off after %.1f s with an error of the server.", name, time.monotonic() - started)
         raise
+    if queue.memory is not None:
+        start_text = queue.memory.take_start_text(await _game_day_of(queue))
+        content_list = result.get("content") if isinstance(result, dict) else None
+        if start_text != "" and isinstance(content_list, list) and len(content_list) > 0 and isinstance(content_list[0], dict):
+            content_list[0]["text"] = start_text + str(content_list[0].get("text", ""))
     answer = ""
     content = result.get("content") if isinstance(result, dict) else None
     if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
@@ -1057,6 +1104,32 @@ async def _call_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, vo
     log.info("AI <- %s after %.1f s%s: %s", name, time.monotonic() - started, " (ERROR)" if isinstance(result, dict) and result.get("isError") else "",
              shorten(answer))
     return result
+
+
+async def _game_day_of(queue: CompanionCommandQueue) -> int | None:
+    """How many days have passed in the game, as the last state told. None = not known (an older game mod, no state)"""
+    state = await queue.peek_state()
+    game_day = state.get("game_day") if isinstance(state, dict) else None
+    return game_day if isinstance(game_day, int) and not isinstance(game_day, bool) else None
+
+
+def _run_memory(arguments: dict[str, Any], memory: Any, game_day: int | None) -> dict[str, Any]:
+    """MEMORY: the memory of the companion. Needs no game"""
+    action = str(arguments.get("action", "") or "").strip().lower()
+    topic = str(arguments.get("topic", "") or "")
+    if action == "index":
+        return _tool_text(memory.describe_index(), False)
+    if action == "read":
+        text, is_error = memory.read(topic, game_day)
+        return _tool_text(text, is_error)
+    if action == "write":
+        text, is_error = memory.write(topic, str(arguments.get("text", "") or ""), str(arguments.get("summary", "") or ""),
+                                      str(arguments.get("importance", "") or ""), game_day)
+        return _tool_text(text, is_error)
+    if action == "forget":
+        text, is_error = memory.forget(topic)
+        return _tool_text(text, is_error)
+    return _tool_text(f"MEMORY knows the actions {', '.join(MEMORY_ACTIONS)}.", True)
 
 
 async def _run_command_of_wait(command: Any, queue: CompanionCommandQueue, voice: CompanionVoice | None) -> tuple[str, bool, bool]:
@@ -1126,6 +1199,11 @@ async def _run_tool(name: Any, arguments: Any, queue: CompanionCommandQueue, voi
 
     if name == TOOL_WAIT:
         return await _wait_for_event(arguments, queue, can_wait_long, voice)
+
+    if name == TOOL_MEMORY:
+        if queue.memory is None:
+            return _tool_text("This server was started without a memory.", True)
+        return _run_memory(arguments, queue.memory, await _game_day_of(queue))
 
     if name == TOOL_STATE:
         find_gesture = " ".join(str(arguments.get(ARGUMENT_FIND_GESTURE, "") or "").split())[:MAX_FIND_LENGTH]
@@ -2102,6 +2180,8 @@ async def _prepare_speech(text: str, queue: CompanionCommandQueue, voice: Compan
                 "(KI_MCP_Gefaehrte.dll, interface version 6)."), 0
     # Making the sound takes a moment (seconds with XTTS), and the server has to keep answering the game meanwhile
     is_ok, problem, line = await asyncio.to_thread(voice.speak, text, voice_folder, is_loud, is_quiet)
+    if is_ok and queue.memory is not None:
+        queue.memory.note_recent("said", text, str(state.get("time", "")))
     return ("" if is_ok else problem), line
 
 

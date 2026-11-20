@@ -31,4 +31,5 @@ moonshine/
 companion_token.txt
 companion.ini
 companion_server.log*
+companion_memory/
 /piper/
