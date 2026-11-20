@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.67"
+SERVER_VERSION: str = "0.68"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -148,6 +148,16 @@ COMMAND_MANUAL: list[tuple[tuple[str, ...], str]] = [
         "your hands already: without it the game lets you run to the target all the same. You keep to that spot "
         "after the fight as well, until a command sends you somewhere ('follow' brings you back to the player); "
         "STATE shows 'holding position' for you meanwhile. "
+    )),
+    (("shoot", "riding"), (
+        "shoot = shoot one arrow at the target (a living character from 'Nearby') with the bow you hold. It is made for "
+        "the saddle, where 'attack' would make you get off your horse, and works the same on foot. You look at the "
+        "target, draw the bow and let go; it takes a few seconds, and 'What became of what you started' tells you "
+        "whether the game let you draw and let go. It needs a bow in your hands (no crossbow yet) and arrows on. "
+        "Nothing checks whether something stands in the way, and from the saddle your horse has to face the target "
+        "roughly. It is one arrow: for more, call it again or chain it with 'then'. On foot in a fight it is refused, "
+        "there the game shoots for you. A hit starts a fight like any attack would, so the same holds as for attack: "
+        "only when the player wants it. This command is new and still being tested: tell the player what you were told. "
     )),
     (("cover",), (
         "cover = take cover: you run to the nearest spot around you that none of your enemies can see (no target, "
@@ -676,6 +686,7 @@ COMMAND_DESCRIPTION: str = (
     f"'{consts.ATTACK_HOLD}' you stay where you stand and fight from there, which needs a bow or a spell), cover = run to a spot "
     "your enemies cannot see and keep to it, stand_down = stop fighting, flee = retreat without fighting, passive = "
     "on: start no fight of your own accord, full: do not fight at all, off: as always, sheathe = keep your weapon away, draw = draw it, "
+    "shoot = one arrow at the target with your bow, also from the saddle (new, being tested), "
     "cast_spell = cast a spell you know ('detail': its name or ID), auto_heal = heal by yourself: on, off or a percentage. "
     "Speaking and showing: say = speak the text in 'detail' aloud in the game, with the voice of your character. "
     + SAY_LANGUAGE_NOTE +
@@ -1522,6 +1533,14 @@ async def _run_command(arguments: dict[str, Any], queue: CompanionCommandQueue, 
                 if not isinstance(protocol, int) or protocol < consts.ATTACK_HOLD_PROTOCOL:
                     return {"status": consts.STATUS_FAILED, "message": f"attack with '{consts.ATTACK_HOLD}' needs a newer game mod than the one that is running "
                             "(build and install it again with build.py --install). Nothing was attacked. Without 'detail' you run to the target as before."}, True
+    if action == consts.ACTION_SHOOT:
+        # A game mod from before this does not know the command
+        state = await queue.peek_state()
+        if isinstance(state, dict):
+            protocol = state.get("protocol")
+            if not isinstance(protocol, int) or protocol < consts.SHOOT_PROTOCOL:
+                return {"status": consts.STATUS_FAILED, "message": "shoot needs a newer game mod than the one that is running "
+                        "(build and install it again with build.py --install). No arrow was shot."}, True
     if action == consts.ACTION_SLEEP:
         # A game mod from before this does not know the command
         state = await queue.peek_state()

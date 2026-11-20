@@ -580,6 +580,14 @@ def run_command(action: str, target: str, target_ref_id: str, item_id: str = "",
         if target != MERCHANT_REF_ID:
             return False, f"{name_of(target) or target} is no merchant.", target_ref_id
         return True, f"Fake game did '{action}' with the item {item_id} at {name_of(target)}.", target_ref_id
+    if action == consts.ACTION_SHOOT:
+        for character in NEARBY:
+            if character["ref_id"] == target:
+                if character.get("dead"):
+                    return False, f"{character['name']} is already dead.", target_ref_id
+                return True, (f"You draw your bow and shoot one arrow at {character['name']} from where you stand. That takes a few seconds. "
+                              "You are told whether the game let you draw and let go: this command is new and still being tested."), target_ref_id
+        return False, f"There is nothing with the ref_id '{target}'. Take the ref_id from 'Nearby' in STATE.", target_ref_id
     if action == consts.ACTION_SLEEP:
         if target == BED_REF_ID:
             return True, ("You walk to Bed and lie down to sleep. You are told once you sleep, or if you could not lie down. "

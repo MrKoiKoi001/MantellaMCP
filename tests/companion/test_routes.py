@@ -3906,6 +3906,31 @@ def test_heights_tell_who_stands_above_or_below_the_viewer():
     assert "8 m above" in describe_help("directions")[0]
 
 
+def test_shoot_is_a_command_with_a_living_target():
+    from src.companion import game_state
+    from src.companion.fake_game import run_command
+    from src.companion.mcp_route import COMMAND_DESCRIPTION, describe_help
+
+    assert consts.ACTION_SHOOT in consts.PLAYER_ACTIONS and consts.ACTION_SHOOT in consts.ACTIONS_REQUIRING_TARGET
+    # One arrow changes nothing about where the companion walks, so what waits in a chain stays
+    assert consts.ACTION_SHOOT in consts.ACTIONS_KEEPING_QUEUE and consts.SHOOT_PROTOCOL <= game_state.GAME_PROTOCOL
+    assert "shoot = one arrow at the target" in COMMAND_DESCRIPTION
+    assert "shoot = shoot one arrow at the target" in describe_help("shoot")[0] and "also from the saddle" not in describe_help("nonsense")[0]
+    # The fake game answers like the game mod
+    is_ok, text, _ = run_command(consts.ACTION_SHOOT, "FF000A01", "")
+    assert is_ok is True and text.startswith("You draw your bow and shoot one arrow at Bandit")
+    assert "is already dead" in run_command(consts.ACTION_SHOOT, "FF000A03", "")[1]
+    assert run_command(consts.ACTION_SHOOT, "00000001", "")[0] is False
+
+    with TestClient(create_app(TOKEN, hold_seconds=0.1)) as client:
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert "shoot" in tools[0]["inputSchema"]["properties"]["action"]["enum"]
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "shoot"}}))
+        assert answer["status"] == consts.STATUS_FAILED and "needs a target" in answer["message"]
+        answer = tool_payload(rpc(client, "tools/call", {"name": "COMMAND", "arguments": {"action": "shoot", "target": "FF000A01"}}))
+        assert answer["status"] == consts.STATUS_GAME_NOT_CONNECTED
+
+
 def test_sleep_lays_the_companion_down_in_a_bed():
     from src.companion import game_state
     from src.companion.fake_game import BED_REF_ID, SEAT_REF_ID, run_command

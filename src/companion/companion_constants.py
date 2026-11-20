@@ -379,6 +379,11 @@ class companion_constants:
     # Game mods from COVER_PROTOCOL on know it
     ACTION_COVER: str = "cover"
     COVER_PROTOCOL: int = 19
+    # shoot: the companion shoots one arrow at the target with the bow it holds, also from the saddle (the game mod
+    # makes it do what the attack button does for the player). A first build, see the notes of the game mod.
+    # Game mods from SHOOT_PROTOCOL on know it
+    ACTION_SHOOT: str = "shoot"
+    SHOOT_PROTOCOL: int = 26
     # lead: the companion walks ahead of the player to a target, like move_to, and waits whenever the player falls behind
     ACTION_LEAD: str = "lead"
     # auto_heal: whether the companion heals the player and itself without being told, when their health is low.
@@ -495,6 +500,7 @@ class companion_constants:
         ACTION_SNEAK,
         ACTION_PASSIVE,
         ACTION_COVER,
+        ACTION_SHOOT,
         ACTION_UNFAVORITE,
         ACTION_LEAD,
         ACTION_AUTO_HEAL,
@@ -505,7 +511,7 @@ class companion_constants:
     # These run at once and leave the commands alone that wait in a chain. Every other command throws them away
     ACTIONS_KEEPING_QUEUE: list[str] = [
         ACTION_LOOK_AT, ACTION_GESTURE, ACTION_EXPRESSION, ACTION_SAY, ACTION_FACE, ACTION_SHEATHE, ACTION_DRAW,
-        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_DROP, ACTION_CAST_SPELL, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
+        ACTION_EQUIP, ACTION_UNEQUIP, ACTION_FAVORITE, ACTION_GIVE, ACTION_TAKE, ACTION_DROP, ACTION_CAST_SPELL, ACTION_SHOOT, ACTION_RIDE_LOCK, ACTION_CLAIM_HORSE,
         ACTION_RELEASE_HORSE,
         ACTION_CALL_HORSE, ACTION_RENAME_HORSE, ACTION_SNEAK, ACTION_AUTO_HEAL, ACTION_PASSIVE, ACTION_UNFAVORITE,
     ]
@@ -516,7 +522,7 @@ class companion_constants:
     # These take 'run': the companion runs instead of walking
     ACTIONS_WITH_RUN: list[str] = [ACTION_MOVE_TO, ACTION_MOVE, ACTION_ENTER, ACTION_FOLLOW, ACTION_LEAD]
     ACTIONS_REQUIRING_TARGET: list[str] = [ACTION_ATTACK, ACTION_MOVE_TO, ACTION_ENTER, ACTION_LOOT, ACTION_PICK_UP, ACTION_CLAIM_HORSE,
-                                           ACTION_LEAD, ACTION_SLEEP] + ITEM_ACTIONS
+                                           ACTION_LEAD, ACTION_SLEEP, ACTION_SHOOT] + ITEM_ACTIONS
 
     # Result status values returned to the MCP side
     STATUS_DONE: str = "done"
