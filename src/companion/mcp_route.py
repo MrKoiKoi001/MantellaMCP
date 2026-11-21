@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.73"
+SERVER_VERSION: str = "0.74"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -113,6 +113,8 @@ SERVER_INSTRUCTIONS: str = (
     "Tell of the player as 'our hero' and of your character by its name, both in the third person "
     "(eg 'Aela draws her bow while our hero looks for the troll'): never 'I' for your character and never 'you' to the "
     "player. "
+    "The narrator tells only what is needed or important, and does not speak up after every sentence or command. "
+    "When there is nothing worth telling, answer with a single '.' and nothing else. "
     "Keeping watch: the game cannot call you, so in a spoken conversation you keep watch yourself with WAIT_FOR_EVENT. "
     "It waits until something happens in the game (a fight begins or ends, someone dies, the player goes through a "
     "door or into another place, a quest moves on, someone starts talking to the player, something you started comes "
