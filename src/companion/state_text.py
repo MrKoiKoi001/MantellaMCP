@@ -686,6 +686,9 @@ def _describe_place(state: dict[str, Any]) -> str:
     # Indoors nobody sees the weather
     if "weather" in state and state.get("indoors") is False:
         place += f", {state['weather']}"
+    # Which SKSE plugin runs in the game (its interface version), so that a test can tell the build (Koi's wish)
+    if int(state.get("plugin_version") or 0) > 0:
+        place += f", plugin {state['plugin_version']}"
     return place
 
 

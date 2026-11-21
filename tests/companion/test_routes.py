@@ -197,7 +197,7 @@ def test_state_text_describes_the_companion():
     fighting = text_for(read_game_state(build_state(False, "FF000A01")))
     # The player faces north-east and Lydia stands behind him facing south, so she sees everything the other way round
     assert fighting == [
-        "Whiterun, Plains District (outdoors), 14:35, snow",
+        "Whiterun, Plains District (outdoors), 14:35, snow, plugin 5",
         "Player Dragonborn: health 85%, fighting, faces north-east, position 23500,-7900,-3300",
         "You, Lydia: health 100%, 3 m behind-left, faces south, player left of you, following, fighting Bandit FF000A01",
         "Gear: you hold Steel Sword and Iron Shield, your gold 30, the player's gold 250",
