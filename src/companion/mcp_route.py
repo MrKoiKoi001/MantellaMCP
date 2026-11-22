@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.75"
+SERVER_VERSION: str = "0.76"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -126,6 +126,9 @@ SERVER_INSTRUCTIONS: str = (
     "Call COMMAND by itself only while a WAIT_FOR_EVENT of yours is still open and has not answered yet (the player "
     "asks for something in between): then act with COMMAND and start no second WAIT_FOR_EVENT, the open one goes on "
     "waiting. "
+    "Strict rule of the player, above all for say: when no WAIT_FOR_EVENT of yours is open, a say (and every other "
+    "command) goes into WAIT_FOR_EVENT as 'command', never into COMMAND by itself. A say through COMMAND followed by "
+    "a second call makes the app of the player connect anew every time. "
     "When it comes back with nothing, say nothing and call it again. When the player speaks, answer as "
     "always and make sure one call is waiting afterwards. Waiting is the normal state: never tell the player that you wait, that "
     "something is running or that it takes a while, also when you are asked to tell that a tool takes long. "
