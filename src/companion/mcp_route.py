@@ -20,7 +20,7 @@ from src.companion.state_text import describe_state, describe_wait
 from src.companion.voice import MAX_TEXT_LENGTH, PIPER_LANGUAGE_NAME, CompanionVoice, clean_text, find_voice_folder
 
 SERVER_NAME: str = "skyrim-companion"
-SERVER_VERSION: str = "0.76"
+SERVER_VERSION: str = "0.77"
 # say: the manners of speaking as the AI is told them
 MANNER_NAMES: str = ", ".join(consts.MANNERS)
 # say: the number of the sentence that was started last, the animation that was picked last (so that the next one is
@@ -41,6 +41,8 @@ TOOL_MEMORY: str = "MEMORY"
 MEMORY_ACTIONS: list[str] = ["index", "read", "write", "forget"]
 # Waits until something happens in the game (see WAIT_DESCRIPTION and CompanionCommandQueue.wait_for_event)
 TOOL_WAIT: str = "WAIT_FOR_EVENT"
+# Marks a tool as only reading, so that the app does not ask the player to allow each call
+READ_ONLY_ANNOTATIONS: dict[str, bool] = {"readOnlyHint": True}
 ARGUMENT_MAX_WAIT: str = "max_wait_seconds"
 # WAIT_FOR_EVENT: a command to carry out before the waiting, with the arguments of COMMAND. So an AI that acts and
 # then keeps watch needs one call instead of two. Two calls in the same turn made the voice app of the AI ask the
@@ -829,6 +831,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": TOOL_STATE,
+        "annotations": READ_ONLY_ANNOTATIONS,
         "description": (
             STATE_DESCRIPTION
         ),
@@ -863,6 +866,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": TOOL_HELP,
+        "annotations": READ_ONLY_ANNOTATIONS,
         "description": HELP_DESCRIPTION,
         "inputSchema": {
             "type": "object",
@@ -874,6 +878,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": TOOL_WAIT,
+        "annotations": READ_ONLY_ANNOTATIONS,
         "description": WAIT_DESCRIPTION,
         "inputSchema": {
             "type": "object",
